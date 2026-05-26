@@ -68,29 +68,9 @@ const el = {
   sendButton: document.getElementById("sendButton"),
 };
 
-const authToken = (() => {
-  try {
-    const url = new URL(window.location.href);
-    const fromUrl = url.searchParams.get("token");
-    if (fromUrl) {
-      localStorage.setItem("orchToken", fromUrl);
-      url.searchParams.delete("token");
-      window.history.replaceState({}, "", url.toString());
-      return fromUrl;
-    }
-    return localStorage.getItem("orchToken") || "";
-  } catch {
-    return "";
-  }
-})();
-
-function authHeaders() {
-  return authToken ? { authorization: `Bearer ${authToken}` } : {};
-}
-
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { "content-type": "application/json", ...authHeaders(), ...(options.headers || {}) },
+    headers: { "content-type": "application/json", ...(options.headers || {}) },
     ...options,
   });
   const body = await response.json().catch(() => ({}));
@@ -1356,7 +1336,7 @@ async function sendMessage(content, files = []) {
 async function streamApi(path, body, handlers = {}) {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "content-type": "application/json", ...authHeaders() },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!response.ok) {

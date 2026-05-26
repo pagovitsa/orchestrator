@@ -118,7 +118,7 @@ function stripAnsi(text) {
 
 function sanitizedProcessEnv(extra = {}) {
   const env = { ...process.env };
-  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY", "ORCH_AUTH_TOKEN"]) delete env[key];
+  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY", "ORCH_AUTH_PASSWORD"]) delete env[key];
   return { ...env, ...extra };
 }
 

@@ -11,7 +11,8 @@ services:
     restart: unless-stopped
     environment:
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
-      ORCH_AUTH_TOKEN: "${ORCH_AUTH_TOKEN:-}"
+      ORCH_AUTH_USER: "${ORCH_AUTH_USER:-orchestrator}"
+      ORCH_AUTH_PASSWORD: "${ORCH_AUTH_PASSWORD:-}"
       ORCH_ALLOWED_HOSTS: "${ORCH_ALLOWED_HOSTS:-}"
       ORCH_ENABLED_TOOLS: "${ORCH_ENABLED_TOOLS:-serena,context7}"
       ORCH_GIT_INIT_PROJECTS: "${ORCH_GIT_INIT_PROJECTS:-1}"

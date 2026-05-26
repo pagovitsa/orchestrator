@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
 import { paths, runtime } from "./config/env.js";
-import { authorizeApi, startupAuthError } from "./http/auth.js";
+import { authorizeRequest, startupAuthError } from "./http/auth.js";
 import { ensurePromptStore } from "./domain/prompts.js";
 import { ensureSessionStore } from "./domain/sessions.js";
 import { handleApi } from "./http/routes.js";
@@ -25,11 +25,12 @@ if (authError) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    if (url.pathname.startsWith("/api/")) {
-      const denied = authorizeApi(req, url);
-      if (denied) return sendJson(res, denied.status, { error: denied.error });
-      return await handleApi(req, res, url);
+    const denied = authorizeRequest(req);
+    if (denied) {
+      for (const [key, value] of Object.entries(denied.headers || {})) res.setHeader(key, value);
+      return sendJson(res, denied.status, { error: denied.error });
     }
+    if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
     return await serveStatic(req, res, url);
   } catch (error) {
     return sendJson(res, error.status || 500, { error: error.message || String(error) });
@@ -40,10 +41,10 @@ server.listen(runtime.port, runtime.listenHost, () => {
   console.log(`orch-ui listening on ${runtime.listenHost}:${runtime.port}`);
   console.log(`workspace: ${paths.workspaceRoot}`);
   console.log(`default supervisor: ${runtime.defaultSupervisor}`);
-  if (!runtime.authToken) {
+  if (!runtime.authPassword) {
     console.warn(
-      "[orch-ui] WARNING: no ORCH_AUTH_TOKEN set. The API has no auth; only expose it on loopback " +
-      "(ORCH_BIND_HOST=127.0.0.1). Set ORCH_AUTH_TOKEN before binding to a public interface.",
+      "[orch-ui] WARNING: no ORCH_AUTH_PASSWORD set. The server has no login; only expose it on " +
+      "loopback (ORCH_BIND_HOST=127.0.0.1). Set ORCH_AUTH_PASSWORD before binding to a public interface.",
     );
   }
 });
