@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
-import path from "node:path";
 import { paths, runtime } from "./config/env.js";
 import { ensurePromptStore } from "./domain/prompts.js";
 import { ensureSessionStore } from "./domain/sessions.js";
@@ -11,7 +10,6 @@ import { serveStatic } from "./http/static.js";
 async function ensureRuntimeDirs() {
   await ensureSessionStore();
   await ensurePromptStore();
-  await mkdir(path.join(paths.workspaceRoot, ".orch-ui", "uploads"), { recursive: true });
   await mkdir(paths.mcpConfigDir, { recursive: true });
 }
 
