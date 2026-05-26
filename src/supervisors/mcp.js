@@ -67,6 +67,42 @@ export function mcpServersFor(supervisor, cwd, options = {}) {
   return Object.fromEntries((supervisorPeers[supervisor] || []).map((peer) => [`pal-${peer}`, peerServerConfig(peer, cwd, options)]));
 }
 
+function serenaContext(supervisor) {
+  if (supervisor === "claude") return "claude-code";
+  if (supervisor === "gemini") return "ide";
+  return "codex";
+}
+
+// Shared 3rd-party tool MCP servers (pre-installed + pinned in the image), gated by
+// runtime.enabledTools. Kept separate from PAL peers: lower trust, network-reaching.
+// Only injected into per-session scoped configs (not startup/auth configs), scoped to scopedCwd.
+export function sharedToolServers(scopedCwd, supervisor) {
+  const env = { PATH: runtime.pathEnv };
+  const available = {
+    serena: {
+      command: "serena",
+      args: ["start-mcp-server", "--project-from-cwd", "--context", serenaContext(supervisor)],
+      cwd: scopedCwd,
+      env,
+    },
+    context7: {
+      command: "context7-mcp",
+      args: ["--transport", "stdio"],
+      cwd: scopedCwd,
+      env,
+    },
+    playwright: {
+      command: "playwright-mcp",
+      args: [],
+      cwd: scopedCwd,
+      env,
+    },
+  };
+  return Object.fromEntries(
+    runtime.enabledTools.filter((tool) => available[tool]).map((tool) => [tool, available[tool]]),
+  );
+}
+
 export function codexProfileName(session) {
   return `orch-pal-${session.id}`;
 }
@@ -94,15 +130,28 @@ export async function writeScopedPeerConfigs(session) {
   const dir = path.join(paths.mcpConfigDir, "sessions", session.id);
   await mkdir(dir, { recursive: true });
 
-  const servers = mcpServersFor(session.supervisor, scopedCwd);
+  const servers = {
+    ...mcpServersFor(session.supervisor, scopedCwd),
+    ...sharedToolServers(scopedCwd, session.supervisor),
+  };
   const claudeConfigPath = path.join(dir, "claude.json");
   const geminiConfigPath = path.join(dir, "gemini-system-settings.json");
   const codexProfile = codexProfileName(session);
   const codexProfilePath = path.join(paths.homeDir, ".codex", `${codexProfile}.config.toml`);
 
+  // Gemini merges system settings with user/project servers; mcp.allowed restricts to ours,
+  // and a per-server timeout covers MCP cold starts.
+  const geminiServers = Object.fromEntries(
+    Object.entries(servers).map(([name, server]) => [name, { ...server, timeout: 60000 }]),
+  );
+
   await mkdir(path.dirname(codexProfilePath), { recursive: true });
   await writeFile(claudeConfigPath, JSON.stringify({ mcpServers: servers }, null, 2), "utf8");
-  await writeFile(geminiConfigPath, JSON.stringify({ mcpServers: servers }, null, 2), "utf8");
+  await writeFile(
+    geminiConfigPath,
+    JSON.stringify({ mcpServers: geminiServers, mcp: { allowed: Object.keys(servers) } }, null, 2),
+    "utf8",
+  );
   await writeCodexProfile(codexProfilePath, servers);
 
   return { scopedCwd, claudeConfigPath, geminiConfigPath, codexProfile };

@@ -16,6 +16,13 @@ function envNumber(name, defaultValue) {
   return Number.isFinite(value) ? value : defaultValue;
 }
 
+function envList(name, defaultValue = "") {
+  return String(process.env[name] ?? defaultValue)
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 export const paths = {
   appRoot,
   srcRoot,
@@ -35,9 +42,25 @@ export const paths = {
 function readSecret(name) {
   try {
     return readFileSync(path.join(paths.secretsDir, name), "utf8").trim();
-  } catch {
-    return "";
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error; // fail closed: an unreadable secret must not silently disable auth
   }
+}
+
+// Like readSecret but fails closed when the file exists yet is empty (a misconfigured token must
+// not silently disable auth).
+function readAuthTokenSecret() {
+  let raw;
+  try {
+    raw = readFileSync(path.join(paths.secretsDir, "auth-token"), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  }
+  const value = raw.trim();
+  if (!value) throw new Error("auth-token secret file exists but is empty");
+  return value;
 }
 
 export const runtime = {
@@ -54,6 +77,11 @@ export const runtime = {
   previewPorts: process.env.ORCH_PREVIEW_PORTS || "3000-3020,5173-5190,8000-8020,8080-8090",
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || readSecret("deepseek-api-key"),
   pathEnv: process.env.PATH || "/home/node/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+  authToken: process.env.ORCH_AUTH_TOKEN || readAuthTokenSecret(),
+  bindHost: process.env.ORCH_BIND_HOST || "",
+  allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
+  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7"),
+  gitInitProjects: envFlag("ORCH_GIT_INIT_PROJECTS", true),
 };
 
 runtime.maxPayloadBytes = Math.ceil(runtime.maxUploadBytes * 1.5) + 1024 * 1024;

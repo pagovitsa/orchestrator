@@ -1,7 +1,40 @@
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { paths, runtime } from "../config/env.js";
+
+const execFileAsync = promisify(execFile);
+
+const PROJECT_GITIGNORE = [
+  "# Created by Orchestrator. Ignores app runtime artifacts and local env files.",
+  ".orch-ui/",
+  ".remember/",
+  ".env",
+  "",
+].join("\n");
+
+// Best-effort `git init` for a freshly created project. Never throws: returns gitInitialized/gitError.
+async function initProjectGit(projectPath) {
+  try {
+    await execFileAsync("git", ["-C", projectPath, "rev-parse", "--is-inside-work-tree"]);
+    return { gitInitialized: false };
+  } catch {
+    // Not a repo yet: proceed.
+  }
+  try {
+    try {
+      await writeFile(path.join(projectPath, ".gitignore"), PROJECT_GITIGNORE, { flag: "wx" });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error; // never clobber an existing .gitignore
+    }
+    await execFileAsync("git", ["-C", projectPath, "init"]);
+    return { gitInitialized: true };
+  } catch (error) {
+    return { gitInitialized: false, gitError: error.message || String(error) };
+  }
+}
 
 let cachedWorkspaceRealRoot = "";
 
@@ -79,7 +112,9 @@ export async function ensureProject(name) {
   const projectPath = resolveCwd(project);
   try {
     await mkdir(projectPath, { recursive: false });
-    return { project, created: true };
+    const result = { project, created: true };
+    if (runtime.gitInitProjects) Object.assign(result, await initProjectGit(projectPath));
+    return result;
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
     const existing = await lstat(projectPath);

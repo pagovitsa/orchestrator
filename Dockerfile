@@ -13,9 +13,12 @@ ENV PATH=/home/node/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     bash \
+    build-essential \
     ca-certificates \
     curl \
     git \
+    jq \
+    openssh-client \
     passwd \
     python3 \
     python3-pip \
@@ -29,6 +32,20 @@ RUN npm install -g \
     @anthropic-ai/claude-code@2.1.150 \
     @openai/codex@0.133.0 \
     @google/gemini-cli@0.43.0
+
+# Shared MCP tool servers, pre-installed + pinned so sessions never cold-start npx/uvx.
+# NOTE: verify these versions/bin names against the registry at build time.
+ARG CONTEXT7_MCP_VERSION=3.0.0
+RUN npm install -g @upstash/context7-mcp@${CONTEXT7_MCP_VERSION}
+
+ARG SERENA_SPEC=serena-agent
+RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
+    uv tool install --python 3.12 ${SERENA_SPEC}
+
+# Playwright browser MCP is opt-in (ORCH_ENABLED_TOOLS=...,playwright). It is NOT installed
+# by default because Chromium + system libs add hundreds of MB. To enable, add a build step
+# (the @playwright/mcp bin is `playwright-mcp`, which mcp.js launches):
+#   RUN npm install -g @playwright/mcp@<ver> && npx playwright install --with-deps chromium
 
 RUN mkdir -p /workspace /data /app \
   && chown -R node:node /workspace /data /app

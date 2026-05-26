@@ -20,7 +20,10 @@ export async function serveStatic(_req, res, url) {
   try {
     const info = await stat(filePath);
     if (!info.isFile()) return sendText(res, 404, "Not found");
-    res.writeHead(200, { "content-type": contentTypes[path.extname(filePath)] || "application/octet-stream" });
+    res.writeHead(200, {
+      "content-type": contentTypes[path.extname(filePath)] || "application/octet-stream",
+      "referrer-policy": "no-referrer",
+    });
     createReadStream(filePath).pipe(res);
   } catch {
     sendText(res, 404, "Not found");

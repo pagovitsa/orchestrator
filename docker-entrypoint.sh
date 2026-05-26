@@ -13,7 +13,14 @@ env_enabled() {
   esac
 }
 
-if env_enabled "${ORCH_AUTO_UPDATE_CLIS:-1}"; then
+# Default git identity for the node user so auto-init/commits inside /workspace work.
+runuser -u node -- env HOME="$HOME" bash -c '
+  git config --global --get user.name >/dev/null 2>&1 || git config --global user.name "Orchestrator"
+  git config --global --get user.email >/dev/null 2>&1 || git config --global user.email "orchestrator@local.invalid"
+  git config --global --get init.defaultBranch >/dev/null 2>&1 || git config --global init.defaultBranch main
+'
+
+if env_enabled "${ORCH_AUTO_UPDATE_CLIS:-0}"; then
   cli_specs="${ORCH_CLI_PACKAGE_SPECS:-@anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest}"
   update_timeout="${ORCH_CLI_UPDATE_TIMEOUT_SECONDS:-120}"
   if [ -n "$cli_specs" ]; then

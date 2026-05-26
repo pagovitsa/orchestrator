@@ -179,7 +179,7 @@ function sanitizedProcessEnv(extra = {}) {
     BIND_HOST: runtime.devServerHost,
     VITE_HOST: runtime.devServerHost,
   };
-  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY"]) delete env[key];
+  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY", "ORCH_AUTH_TOKEN"]) delete env[key];
   return { ...env, ...extra };
 }
 
@@ -396,7 +396,7 @@ async function callClaude(session, prompt, options = {}) {
   else args.push("--permission-mode", "plan");
   args.push("-");
   const parser = createClaudeStreamParser(options);
-  const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, stdoutHandler: parser.push.bind(parser), ...options });
+  const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, env: { MCP_TIMEOUT: "60000" }, stdoutHandler: parser.push.bind(parser), ...options });
   parser.flush();
   if (result.ok) return parser.answer() || cliResult(result);
   return cliResult(result);
