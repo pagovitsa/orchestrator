@@ -11,6 +11,13 @@ services:
     restart: unless-stopped
     environment:
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      # Optional API keys: use these to authenticate the CLIs independently of the browser ChatGPT/
+      # Google OAuth session (which rotates and can invalidate the CLI's stored token).
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      CODEX_ACCESS_TOKEN: "${CODEX_ACCESS_TOKEN:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       ORCH_AUTH_USER: "${ORCH_AUTH_USER:-orchestrator}"
       ORCH_AUTH_PASSWORD: "${ORCH_AUTH_PASSWORD:-}"
       ORCH_ALLOWED_HOSTS: "${ORCH_ALLOWED_HOSTS:-}"
