@@ -50,7 +50,7 @@ RUN chmod +x /usr/local/bin/orch-entrypoint \
   && npm run check \
   && npm test
 
-EXPOSE 8787
+EXPOSE 8787 3000-3020 5173-5190 8000-8020 8080-8090
 
 ENTRYPOINT ["tini", "--", "orch-entrypoint"]
 CMD ["node", "/app/src/server.js"]

@@ -14,6 +14,15 @@ function compactHistory(messages, limit = 18) {
     .join("\n\n");
 }
 
+function previewServerInstruction() {
+  return [
+    `WEB SERVER PREVIEW: When starting any project web/dev server, bind to ${runtime.devServerHost}, not localhost or 127.0.0.1.`,
+    `Use a port from the Docker-published preview ranges: ${runtime.previewPorts}.`,
+    "Prefer explicit flags such as `--host 0.0.0.0 --port <mapped-port>` for Vite/Next/other dev servers.",
+    "Report preview URLs as `http://127.0.0.1:<port>` for this host and `http://<host-lan-ip>:<port>` for other PCs on the LAN. Do not use tunnels unless the user asks.",
+  ].join("\n");
+}
+
 function buildCliPrompt(session, userContent, systemPrompt) {
   const history = compactHistory(session.messages || []);
   return [
@@ -26,6 +35,7 @@ function buildCliPrompt(session, userContent, systemPrompt) {
     `CURRENT WORKDIR: ${session.cwd || "."}`,
     `WRITE MODE: ${runtime.allowWrite ? "enabled" : "read-only/plan"}`,
     "ACCESS POLICY: Read and edit only inside ALLOWED SESSION ROOT. Do not inspect, modify, create, delete, or run commands against sibling folders under /workspace.",
+    previewServerInstruction(),
     "",
     "PEER MODEL ROUTING:",
     peerRoutingText(session.supervisor),
@@ -154,7 +164,12 @@ function createStderrTraceFilter(command, options) {
 }
 
 function sanitizedProcessEnv(extra = {}) {
-  const env = { ...process.env };
+  const env = {
+    ...process.env,
+    HOST: runtime.devServerHost,
+    BIND_HOST: runtime.devServerHost,
+    VITE_HOST: runtime.devServerHost,
+  };
   for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY"]) delete env[key];
   return { ...env, ...extra };
 }

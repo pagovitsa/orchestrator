@@ -49,6 +49,8 @@ export const runtime = {
   timeoutMs: envNumber("ORCH_TIMEOUT_MS", 900000),
   maxUploadBytes: envNumber("ORCH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),
   maxInlineAttachmentChars: envNumber("ORCH_UPLOAD_INLINE_CHARS", 60000),
+  devServerHost: process.env.ORCH_DEV_SERVER_HOST || "0.0.0.0",
+  previewPorts: process.env.ORCH_PREVIEW_PORTS || "3000-3020,5173-5190,8000-8020,8080-8090",
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || readSecret("deepseek-api-key"),
   pathEnv: process.env.PATH || "/home/node/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
 };

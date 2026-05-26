@@ -37,6 +37,35 @@ Open:
 http://127.0.0.1:8787
 ```
 
+From another PC on the same LAN, open the UI with the host machine IP:
+
+```text
+http://<host-lan-ip>:8787
+```
+
+## Project Web Previews
+
+Project dev servers run inside the `orch-ui` container, so they must bind to `0.0.0.0` and use a Docker-published preview port. The default published ranges are:
+
+```text
+3000-3020, 5173-5190, 8000-8020, 8080-8090
+```
+
+Ask the supervisor to start servers with explicit host/port flags, for example:
+
+```bash
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173
+http://<host-lan-ip>:5173
+```
+
+If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
+
 ## Supervisors
 
 - `Claude CLI` runs `claude --print` with the shared prompt.
