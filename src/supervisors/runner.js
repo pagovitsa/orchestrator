@@ -53,6 +53,18 @@ function compactTraceText(value, limit = 220) {
   return `${clean.slice(0, limit - 3)}...`;
 }
 
+function hidePromptPayload(text) {
+  const value = redactTraceText(text);
+  const marker = "\nuser\nSYSTEM PROMPT:";
+  const start = value.indexOf(marker);
+  if (start < 0) return value;
+  const before = value.slice(0, start);
+  const rest = value.slice(start + marker.length);
+  const resume = rest.search(/\n(?=(?:\d{4}-\d\d-\d\dT|ERROR:|codex\b|exec\b|mcp:))/i);
+  const after = resume >= 0 ? rest.slice(resume) : "";
+  return `${before}\nuser\n[prompt payload hidden]${after}`;
+}
+
 function formatCommand(command, args) {
   const hiddenValueFlags = new Set(["--system-prompt", "--prompt"]);
   const visible = [];
@@ -81,6 +93,66 @@ function tracePeerSetup(session, scoped, options) {
   emitTrace(options, `[${session.supervisor}] PAL MCP attached: ${peers.map((peer) => `pal-${peer}`).join(", ") || "(none)"}`);
 }
 
+function createStderrTraceFilter(command, options) {
+  let buffer = "";
+  let pendingUserLine = false;
+  let hidingPromptPayload = false;
+
+  const emitLine = (line) => {
+    const clean = redactTraceText(line).trimEnd();
+    if (!clean) return;
+    emitTrace(options, `[stderr] ${clean}`, "stderr");
+  };
+
+  const isCodexEventLine = (line) => /^(codex|exec|mcp:|apply_patch|error|warning|diff)\b/i.test(line.trim());
+
+  const processLine = (line) => {
+    const clean = line.trimEnd();
+
+    if (pendingUserLine) {
+      pendingUserLine = false;
+      if (clean === "SYSTEM PROMPT:") {
+        hidingPromptPayload = true;
+        emitTrace(options, "[stderr] [prompt payload hidden]", "stderr");
+        return;
+      }
+      emitLine("user");
+    }
+
+    if (!hidingPromptPayload && command === "codex" && clean === "user") {
+      pendingUserLine = true;
+      return;
+    }
+
+    if (hidingPromptPayload) {
+      if (isCodexEventLine(clean)) {
+        hidingPromptPayload = false;
+        processLine(clean);
+      }
+      return;
+    }
+
+    emitLine(line);
+  };
+
+  return {
+    push(text) {
+      buffer += text;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) processLine(line);
+    },
+    flush() {
+      if (pendingUserLine) {
+        emitLine("user");
+        pendingUserLine = false;
+      }
+      if (buffer) processLine(buffer);
+      buffer = "";
+    },
+  };
+}
+
 function sanitizedProcessEnv(extra = {}) {
   const env = { ...process.env };
   for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY"]) delete env[key];
@@ -90,6 +162,7 @@ function sanitizedProcessEnv(extra = {}) {
 function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, stdoutHandler, signal }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
+    const stderrTrace = createStderrTraceFilter(command, traceOptions);
     emitTrace(traceOptions, `$ ${formatCommand(command, args)}`);
     emitTrace(traceOptions, `[cwd] ${cwd}`);
     const child = spawn(command, args, {
@@ -122,7 +195,7 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      emitTrace(traceOptions, `[stderr] ${text}`, "stderr");
+      stderrTrace.push(text);
     });
     child.stdin.on("error", (error) => {
       stdinError = error.message || String(error);
@@ -132,12 +205,14 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
     });
     child.on("error", (error) => {
       clearTimeout(timer);
+      stderrTrace.flush();
       if (signal) signal.removeEventListener("abort", abort);
       emitTrace(traceOptions, `[spawn error] ${error.message}`);
       resolve({ ok: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), code: -1, timedOut });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      stderrTrace.flush();
       if (signal) signal.removeEventListener("abort", abort);
       emitTrace(traceOptions, `[exit] code=${code}${timedOut ? " timed out" : ""}`);
       resolve({ ok: code === 0 && !timedOut && !stdinError, stdout, stderr, code, timedOut });
@@ -156,10 +231,12 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
 function cliResult(result) {
   const output = result.stdout.trim();
   if (result.ok && output) return output;
+  const stderr = hidePromptPayload(result.stderr.trim());
+  const stdout = hidePromptPayload(output);
   const details = [
     result.timedOut ? `Command timed out after ${runtime.timeoutMs}ms.` : "",
-    result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
-    output ? `stdout:\n${output}` : "",
+    stderr ? `stderr:\n${stderr}` : "",
+    stdout ? `stdout:\n${stdout}` : "",
   ].filter(Boolean).join("\n\n");
   throw new Error(details || `Command failed with exit code ${result.code}`);
 }
