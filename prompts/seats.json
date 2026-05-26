@@ -1,0 +1,16 @@
+{
+  "_comment": "Source of truth for the generated supervisor seat prompts. Edit this + seat.template.md, then run `npm run build:prompts`. Do not hand-edit the generated Claude.md/Codex.md/Gemini.md/DeepSeek.md.",
+  "strengths": {
+    "claude": "careful repo editing, tool-heavy investigation, implementation planning, nuanced review",
+    "codex": "implementation, debugging, tests, scripts, focused code review, minimal safe patches",
+    "gemini": "large-context analysis, architecture review, hidden coupling, system-level implications",
+    "deepseek": "bulk drafts, alternative strategies, edge cases, adversarial reasoning"
+  },
+  "_peers_note": "Peer lists and file names are NOT defined here; the generator derives them from supervisorPeers and sourcePromptFiles in src/config/env.js to keep a single source of truth.",
+  "seats": [
+    { "id": "claude", "selfName": "Claude Code", "runtimeKind": "cli" },
+    { "id": "codex", "selfName": "Codex CLI", "runtimeKind": "cli" },
+    { "id": "gemini", "selfName": "Gemini CLI Pro", "runtimeKind": "cli" },
+    { "id": "deepseek", "selfName": "DeepSeek V4 Pro", "runtimeKind": "api-loop", "toolStepLimit": 4 }
+  ]
+}
