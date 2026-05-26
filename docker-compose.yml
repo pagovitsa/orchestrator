@@ -28,7 +28,7 @@ services:
       - "${ORCH_BIND_HOST:-0.0.0.0}:${ORCH_UI_PORT:-8787}:8787"
       - "[${ORCH_BIND_HOST_IPV6:-::}]:${ORCH_UI_PORT:-8787}:8787"
     volumes:
-      - "${HOST_PROJECTS:-/home/pagovitsa/orch-projects}:/workspace"
+      - "${ORCH_HOST_PROJECTS:-${HOME}/orch-projects}:/workspace"
       - claude_auth:/home/node/.claude
       - codex_auth:/home/node/.codex
       - gemini_auth:/home/node/.gemini

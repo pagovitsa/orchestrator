@@ -11,8 +11,10 @@ prompts/main-orchestrator.md
 The default mounted host workspace is:
 
 ```text
-/home/pagovitsa/orch-projects -> /workspace
+$HOME/orch-projects -> /workspace
 ```
+
+Override it with `ORCH_HOST_PROJECTS=/absolute/path` if you want a different host folder.
 
 Use `New chat` to enter a new project name and choose the supervisor for that chat run. The UI creates the project folder automatically. Existing projects that already have chat history are opened from the left sidebar, not re-selected from the new-chat modal.
 
@@ -23,7 +25,7 @@ The selected CLI runs in that project folder, and its PAL MCP servers expose onl
 ## Start
 
 ```bash
-cd /home/pagovitsa/projects/Orchestrator
+cd /path/to/Orchestrator
 cp .env.example .env
 # edit .env and set DEEPSEEK_API_KEY if you want the DeepSeek route
 docker compose up --build
