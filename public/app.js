@@ -28,6 +28,28 @@ function isViewing(sessionId) {
   return Boolean(state.currentSession && state.currentSession.id === sessionId);
 }
 
+// Keep the screen awake while a run is streaming (e.g. long debates on mobile). Requires a secure
+// context (HTTPS or localhost); over plain http on a LAN/Tailscale IP the API is unavailable and this
+// silently no-ops.
+let screenWakeLock = null;
+async function updateWakeLock() {
+  const wantLock = [...state.runs.values()].some((run) => run.streaming);
+  try {
+    if (wantLock && !screenWakeLock && "wakeLock" in navigator && document.visibilityState === "visible") {
+      screenWakeLock = await navigator.wakeLock.request("screen");
+      screenWakeLock.addEventListener("release", () => { screenWakeLock = null; });
+    } else if (!wantLock && screenWakeLock) {
+      await screenWakeLock.release();
+      screenWakeLock = null;
+    }
+  } catch {
+    screenWakeLock = null; // unsupported or non-secure context: ignore
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") updateWakeLock();
+});
+
 const el = {
   sidebar: document.querySelector(".sidebar"),
   sidebarToggle: document.getElementById("sidebarToggle"),
@@ -1221,6 +1243,7 @@ async function sendMessage(content, files = []) {
 
   const run = { sessionId: session.id, session, draft, supervisor, streaming: true, stopInFlight: false, heartbeat: null };
   state.runs.set(session.id, run);
+  updateWakeLock();
   const viewing = () => isViewing(run.sessionId);
   if (viewing()) renderMessages();
   renderSessions();
@@ -1328,6 +1351,7 @@ async function sendMessage(content, files = []) {
   } finally {
     clearInterval(run.heartbeat);
     state.runs.delete(run.sessionId);
+    updateWakeLock();
     renderSessions();
     if (viewing()) syncComposerState();
   }
