@@ -44,9 +44,11 @@ COPY --chown=node:node test ./test
 COPY --chown=node:node public ./public
 COPY --chown=node:node prompts ./prompts
 COPY --chown=node:node pal-config ./pal-config
+COPY --chown=node:node bin ./bin
 COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/orch-entrypoint
 
-RUN chmod +x /usr/local/bin/orch-entrypoint \
+RUN chmod +x /usr/local/bin/orch-entrypoint /app/bin/orch-preview \
+  && ln -sf /app/bin/orch-preview /usr/local/bin/orch-preview \
   && npm run check \
   && npm test
 

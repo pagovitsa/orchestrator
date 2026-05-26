@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  orch-preview static <port> [directory]
+  orch-preview start <port> -- <command> [args...]
+  orch-preview stop <port>
+  orch-preview status
+
+Examples:
+  orch-preview static 8000 .
+  orch-preview start 5173 -- npm run dev -- --host 0.0.0.0 --port 5173
+EOF
+}
+
+project_dir="${ORCH_PROJECT_ROOT:-$PWD}"
+state_dir="$project_dir/.orchestration/previews"
+host="${ORCH_DEV_SERVER_HOST:-0.0.0.0}"
+port_ranges="${ORCH_PREVIEW_PORTS:-3000-3020,5173-5190,8000-8020,8080-8090}"
+lan_host="${ORCH_LAN_HOST:-<host-lan-ip>}"
+
+mkdir -p "$state_dir"
+
+is_number() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+port_allowed() {
+  local port="$1"
+  local item start end
+  IFS=',' read -ra ranges <<<"$port_ranges"
+  for item in "${ranges[@]}"; do
+    item="${item//[[:space:]]/}"
+    if [[ "$item" == *-* ]]; then
+      start="${item%-*}"
+      end="${item#*-}"
+      if is_number "$start" && is_number "$end" && (( port >= start && port <= end )); then
+        return 0
+      fi
+    elif is_number "$item" && (( port == item )); then
+      return 0
+    fi
+  done
+  return 1
+}
+
+pid_file() {
+  printf '%s/%s.pid' "$state_dir" "$1"
+}
+
+log_file() {
+  printf '%s/%s.log' "$state_dir" "$1"
+}
+
+pid_alive() {
+  local pid="${1:-}"
+  is_number "$pid" && kill -0 "$pid" 2>/dev/null
+}
+
+health_url() {
+  printf 'http://127.0.0.1:%s/' "$1"
+}
+
+print_urls() {
+  local port="$1"
+  printf 'Local: http://127.0.0.1:%s/\n' "$port"
+  printf 'LAN:   http://%s:%s/\n' "$lan_host" "$port"
+}
+
+validate_port() {
+  local port="${1:-}"
+  if ! is_number "$port"; then
+    echo "Port must be a number." >&2
+    exit 2
+  fi
+  if ! port_allowed "$port"; then
+    echo "Port $port is not in ORCH_PREVIEW_PORTS ($port_ranges)." >&2
+    exit 2
+  fi
+}
+
+stop_port() {
+  local port="$1"
+  validate_port "$port"
+  local pf pid
+  pf="$(pid_file "$port")"
+  if [[ ! -f "$pf" ]]; then
+    echo "No recorded preview on port $port."
+    return 0
+  fi
+  pid="$(cat "$pf" 2>/dev/null || true)"
+  if ! pid_alive "$pid"; then
+    rm -f "$pf"
+    echo "Preview on port $port was not running."
+    return 0
+  fi
+  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    if ! pid_alive "$pid"; then
+      rm -f "$pf"
+      echo "Stopped preview on port $port."
+      return 0
+    fi
+    sleep 0.2
+  done
+  kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  rm -f "$pf"
+  echo "Force-stopped preview on port $port."
+}
+
+start_process() {
+  local port="$1"
+  shift
+  validate_port "$port"
+  if (( $# == 0 )); then
+    echo "Missing command." >&2
+    exit 2
+  fi
+
+  local pf lf pid
+  pf="$(pid_file "$port")"
+  lf="$(log_file "$port")"
+  if [[ -f "$pf" ]]; then
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    if pid_alive "$pid"; then
+      echo "Preview already running on port $port (pid $pid)."
+      print_urls "$port"
+      echo "Log: $lf"
+      exit 0
+    fi
+    rm -f "$pf"
+  fi
+
+  (
+    cd "$project_dir"
+    export HOST="$host"
+    export BIND_HOST="$host"
+    export VITE_HOST="$host"
+    export PORT="$port"
+    if command -v setsid >/dev/null 2>&1; then
+      nohup setsid "$@" >"$lf" 2>&1 < /dev/null &
+    else
+      nohup "$@" >"$lf" 2>&1 < /dev/null &
+    fi
+    echo "$!" > "$pf"
+  )
+
+  pid="$(cat "$pf")"
+  for _ in $(seq 1 30); do
+    if ! pid_alive "$pid"; then
+      echo "Preview process exited early on port $port." >&2
+      tail -80 "$lf" >&2 || true
+      rm -f "$pf"
+      exit 1
+    fi
+    if curl -fsS --max-time 1 "$(health_url "$port")" >/dev/null 2>&1; then
+      echo "Preview started on port $port (pid $pid)."
+      print_urls "$port"
+      echo "Log: $lf"
+      exit 0
+    fi
+    sleep 0.5
+  done
+
+  echo "Preview process is running on port $port (pid $pid), but health check did not pass yet."
+  print_urls "$port"
+  echo "Log: $lf"
+}
+
+status_all() {
+  local found=0 pf port pid lf
+  for pf in "$state_dir"/*.pid; do
+    [[ -e "$pf" ]] || continue
+    found=1
+    port="$(basename "$pf" .pid)"
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    lf="$(log_file "$port")"
+    if pid_alive "$pid"; then
+      printf 'running port=%s pid=%s log=%s\n' "$port" "$pid" "$lf"
+      print_urls "$port"
+    else
+      printf 'stale port=%s pid=%s\n' "$port" "${pid:-unknown}"
+    fi
+  done
+  if (( found == 0 )); then
+    echo "No previews recorded."
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  static)
+    port="${2:-8000}"
+    directory="${3:-.}"
+    start_process "$port" python3 -m http.server "$port" --bind "$host" --directory "$directory"
+    ;;
+  start)
+    port="${2:-}"
+    shift 2 || true
+    if [[ "${1:-}" == "--" ]]; then shift; fi
+    start_process "$port" "$@"
+    ;;
+  stop)
+    stop_port "${2:-}"
+    ;;
+  status)
+    status_all
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

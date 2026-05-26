@@ -54,7 +54,13 @@ Project dev servers run inside the `orch-ui` container, so they must bind to `0.
 Ask the supervisor to start servers with explicit host/port flags, for example:
 
 ```bash
-npm run dev -- --host 0.0.0.0 --port 5173
+orch-preview start 5173 -- npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+For a plain static folder:
+
+```bash
+orch-preview static 8000 .
 ```
 
 Then open:
@@ -65,6 +71,8 @@ http://<host-lan-ip>:5173
 ```
 
 If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
+
+The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews.
 
 Supervisors are instructed not to use public tunnels such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel. If a LAN browser cannot connect, the expected fix is port mapping, host IP, or firewall diagnosis.
 

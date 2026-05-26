@@ -18,8 +18,10 @@ function previewServerInstruction() {
   return [
     `WEB SERVER PREVIEW: When starting any project web/dev server, bind to ${runtime.devServerHost}, not localhost or 127.0.0.1.`,
     `Use a port from the Docker-published preview ranges: ${runtime.previewPorts}.`,
-    "Prefer explicit flags such as `--host 0.0.0.0 --port <mapped-port>` for Vite/Next/other dev servers, or `python3 -m http.server <mapped-port> --bind 0.0.0.0` for static sites.",
-    "After starting a server, health-check it from inside the container with `curl http://127.0.0.1:<port>/`, then report preview URLs as `http://127.0.0.1:<port>` for this host and `http://<host-lan-ip>:<port>` for other PCs on the LAN.",
+    "Use the `orch-preview` helper so the server stays alive after this supervisor run exits.",
+    "For static sites run `orch-preview static <mapped-port> .`; for app dev servers run `orch-preview start <mapped-port> -- <command> ... --host 0.0.0.0 --port <mapped-port>`.",
+    "Do not run foreground servers such as raw `python3 -m http.server ...` or `npm run dev` as the final long-running command; they may die when the CLI session exits. Use `orch-preview` instead.",
+    "`orch-preview` performs the container health check and prints the host/LAN URLs; report those URLs to the user.",
     "Do not run public tunnels or tunnel CLIs such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel.",
     "If a LAN browser cannot connect, diagnose Docker port mappings, host IP, and firewall; do not fall back to a tunnel.",
   ].join("\n");
