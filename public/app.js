@@ -3,7 +3,6 @@ const state = {
   sessions: [],
   projects: [],
   currentSession: null,
-  busy: false,
   selectedFiles: [],
   connections: [],
   connectionJobs: {},
@@ -14,10 +13,20 @@ const state = {
   promptDrafts: {},
   activePromptId: null,
   activeTerminalMessage: null,
-  activeRunSessionId: null,
-  stopInFlight: false,
+  runs: new Map(),
   statusText: "Ready",
 };
+
+// Active model runs, keyed by session id, so a run keeps streaming in the background while the user
+// navigates to other projects. Each run owns its own session object + assistant draft; the UI only
+// re-renders when the run's session is the one currently being viewed.
+function currentRun() {
+  return state.currentSession ? state.runs.get(state.currentSession.id) || null : null;
+}
+
+function isViewing(sessionId) {
+  return Boolean(state.currentSession && state.currentSession.id === sessionId);
+}
 
 const el = {
   sidebar: document.querySelector(".sidebar"),
@@ -752,13 +761,20 @@ function renderSessions() {
     const row = document.createElement("div");
     row.className = "session-row";
 
+    const running = Boolean(session.id && state.runs.get(session.id)?.streaming);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `session ${isCurrentProject(session) ? "active" : ""}`;
+    button.className = `session ${isCurrentProject(session) ? "active" : ""} ${running ? "running" : ""}`.trim();
 
     const title = document.createElement("div");
     title.className = "session-title";
     title.textContent = session.title || "New chat";
+    if (running) {
+      const dot = document.createElement("span");
+      dot.className = "session-running-dot";
+      dot.title = "Model running";
+      title.prepend(dot);
+    }
 
     const meta = document.createElement("div");
     meta.className = "session-meta";
@@ -772,7 +788,7 @@ function renderSessions() {
     remove.className = "project-delete-button";
     remove.title = `Delete ${session.cwd || session.project}`;
     remove.setAttribute("aria-label", `Delete ${session.cwd || session.project}`);
-    remove.disabled = state.busy;
+    remove.disabled = running;
     remove.innerHTML = iconSvg(icons.trash);
     remove.addEventListener("click", () => deleteProjectFromUi(session));
 
@@ -852,7 +868,7 @@ function renderMessageBody(body, message) {
   stopButton.className = "stop-run-button";
   stopButton.title = "Stop model";
   stopButton.setAttribute("aria-label", "Stop model");
-  stopButton.disabled = state.stopInFlight;
+  stopButton.disabled = Boolean(currentRun()?.stopInFlight);
   stopButton.innerHTML = iconSvg(icons.stop);
   stopButton.addEventListener("click", stopActiveRun);
   body.appendChild(stopButton);
@@ -981,15 +997,18 @@ async function readAttachments(files) {
 }
 
 function setComposerEnabled(enabled) {
-  el.messageInput.disabled = !enabled || state.busy;
-  el.attachmentMenuButton.disabled = !enabled || state.busy;
-  el.fileInput.disabled = !enabled || state.busy;
-  el.sendButton.disabled = !enabled || (state.busy && !state.activeRunSessionId) || state.stopInFlight;
-  el.sendButton.classList.toggle("is-stop", state.busy);
-  el.sendButton.title = state.busy ? "Stop model" : "Send";
-  el.sendButton.setAttribute("aria-label", state.busy ? "Stop model" : "Send message");
-  el.sendButton.innerHTML = iconSvg(state.busy ? icons.stop : icons.send);
-  if (!enabled || state.busy) closeAttachmentMenu();
+  const run = currentRun();
+  const busy = Boolean(run?.streaming);
+  const stopping = Boolean(run?.stopInFlight);
+  el.messageInput.disabled = !enabled || busy;
+  el.attachmentMenuButton.disabled = !enabled || busy;
+  el.fileInput.disabled = !enabled || busy;
+  el.sendButton.disabled = !enabled || stopping;
+  el.sendButton.classList.toggle("is-stop", busy);
+  el.sendButton.title = busy ? "Stop model" : "Send";
+  el.sendButton.setAttribute("aria-label", busy ? "Stop model" : "Send message");
+  el.sendButton.innerHTML = iconSvg(busy ? icons.stop : icons.send);
+  if (!enabled || busy) closeAttachmentMenu();
 }
 
 function syncComposerState() {
@@ -997,17 +1016,18 @@ function syncComposerState() {
 }
 
 async function stopActiveRun() {
-  if (!state.currentSession || !state.activeRunSessionId || state.stopInFlight) return;
-  state.stopInFlight = true;
+  const run = currentRun();
+  if (!run || !run.streaming || run.stopInFlight) return;
+  run.stopInFlight = true;
   syncComposerState();
   const last = state.currentSession?.messages?.at(-1);
   if (last?.streaming) updateLastMessage(last);
   setStatus("Stopping model...");
   try {
-    await api(`/api/sessions/${state.activeRunSessionId}/stop`, { method: "POST" });
+    await api(`/api/sessions/${run.sessionId}/stop`, { method: "POST" });
   } catch (error) {
     setStatus(`Stop error: ${error.message}`);
-    state.stopInFlight = false;
+    run.stopInFlight = false;
     syncComposerState();
   }
 }
@@ -1048,8 +1068,10 @@ function updateModalState() {
 }
 
 async function loadSession(id) {
-  const body = await api(`/api/sessions/${id}`);
-  state.currentSession = body.session;
+  // If a run is streaming for this session, use its live in-memory copy (with the draft) rather than
+  // the server copy, which lacks in-progress output. Covers every entry point (sidebar, modal).
+  const run = state.runs.get(id);
+  state.currentSession = run ? run.session : (await api(`/api/sessions/${id}`)).session;
   renderSessions();
   renderMessages();
   syncComposerState();
@@ -1080,8 +1102,15 @@ async function openProjectSession(project) {
     collapseResponsiveSidebar();
     return;
   }
-  if (state.busy) {
-    setStatus("Stop the current model before switching projects");
+  // If the target project has a run in flight, show its live in-memory session (with the streaming
+  // draft) instead of re-fetching the server copy, which would not yet have the in-progress output.
+  if (project.id && state.runs.has(project.id)) {
+    state.currentSession = state.runs.get(project.id).session;
+    renderSessions();
+    renderMessages();
+    syncComposerState();
+    setWorkspaceStatus();
+    collapseResponsiveSidebar();
     return;
   }
   if (project.id) {
@@ -1109,8 +1138,8 @@ async function openProjectSession(project) {
 async function deleteProjectFromUi(project) {
   const projectName = project.cwd || project.project || project.title;
   if (!projectName) return;
-  if (state.busy) {
-    setStatus("Stop the current model before deleting a project");
+  if (project.id && state.runs.get(project.id)?.streaming) {
+    setStatus("Stop the running model before deleting this project");
     return;
   }
   const confirmed = window.confirm(`Delete project "${projectName}"?\n\nThis removes the project folder and its chat history.`);
@@ -1165,14 +1194,16 @@ async function sendMessage(content, files = []) {
     return;
   }
 
-  const supervisor = state.currentSession.supervisor;
+  const session = state.currentSession;
+  if (state.runs.has(session.id)) return; // a run is already streaming for this project
+  const supervisor = session.supervisor;
   const userMessage = {
     role: "user",
     content: content || (files.length ? "Attached files" : ""),
     attachments: files.map((file) => ({ name: file.name, size: file.size, type: file.type || "" })),
     at: new Date().toISOString(),
   };
-  const assistantDraft = {
+  const draft = {
     role: "assistant",
     supervisor,
     content: "",
@@ -1182,99 +1213,120 @@ async function sendMessage(content, files = []) {
     streaming: true,
   };
 
-  state.currentSession.messages ||= [];
-  state.currentSession.messages.push(userMessage, assistantDraft);
-  renderMessages();
+  session.messages ||= [];
+  session.messages.push(userMessage, draft);
 
-  state.busy = true;
-  state.activeRunSessionId = state.currentSession.id;
-  state.stopInFlight = false;
+  const run = { sessionId: session.id, session, draft, supervisor, streaming: true, stopInFlight: false, heartbeat: null };
+  state.runs.set(session.id, run);
+  const viewing = () => isViewing(run.sessionId);
+  if (viewing()) renderMessages();
+  renderSessions();
   syncComposerState();
-  setStatus(files.length ? "Reading files..." : `Running ${supervisor}...`);
+  if (viewing()) setStatus(files.length ? "Reading files..." : `Running ${supervisor}...`);
+
   const startedAt = Date.now();
-  const heartbeat = setInterval(() => {
-    if (!assistantDraft.streaming || assistantDraft.content) return;
+  run.heartbeat = setInterval(() => {
+    if (!draft.streaming || draft.content) return;
     const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
     const minutes = Math.floor(elapsedSeconds / 60);
     const seconds = elapsedSeconds % 60;
     const elapsed = minutes ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
-    assistantDraft.status = `${supervisor} is working... ${elapsed}`;
-    updateLastMessage(assistantDraft);
-    setStatus(`Running ${supervisor}... ${elapsed}`);
+    draft.status = `${supervisor} is working... ${elapsed}`;
+    if (viewing()) {
+      updateLastMessage(draft);
+      setStatus(`Running ${supervisor}... ${elapsed}`);
+    }
   }, 1000);
 
   try {
     const attachments = await readAttachments(files);
-    setStatus(`Running ${supervisor}...`);
-    await streamApi(`/api/sessions/${state.currentSession.id}/messages/stream`, {
+    if (viewing()) setStatus(`Running ${supervisor}...`);
+    await streamApi(`/api/sessions/${run.sessionId}/messages/stream`, {
       content,
       attachments,
     }, {
       session(event) {
-        state.currentSession = event.session;
-        state.currentSession.messages.push(assistantDraft);
-        renderMessages();
-        syncComposerState();
+        run.session = event.session;
+        run.session.messages.push(draft);
+        if (viewing()) {
+          state.currentSession = run.session;
+          renderMessages();
+          syncComposerState();
+        }
       },
       chunk(event) {
-        assistantDraft.status = "";
-        assistantDraft.content += event.content;
-        updateLastMessage(assistantDraft);
+        draft.status = "";
+        draft.content += event.content;
+        if (viewing()) updateLastMessage(draft);
       },
       trace(event) {
-        assistantDraft.trace.push(String(event.content || ""));
-        let totalChars = assistantDraft.trace.reduce((total, item) => total + item.length, 0);
-        while (assistantDraft.trace.length > 1 && totalChars > 60000) {
-          totalChars -= assistantDraft.trace.shift().length;
+        draft.trace.push(String(event.content || ""));
+        let totalChars = draft.trace.reduce((total, item) => total + item.length, 0);
+        while (draft.trace.length > 1 && totalChars > 60000) {
+          totalChars -= draft.trace.shift().length;
         }
-        updateLastMessage(assistantDraft);
-        syncOpenTerminal(assistantDraft);
+        if (viewing()) {
+          updateLastMessage(draft);
+          syncOpenTerminal(draft);
+        }
       },
       done(event) {
-        assistantDraft.streaming = false;
-        state.currentSession = event.session;
-        const last = state.currentSession.messages.at(-1);
-        if (last) last.trace = assistantDraft.trace;
-        renderMessages();
-        syncOpenTerminal(assistantDraft);
-        syncComposerState();
-        setWorkspaceStatus();
+        draft.streaming = false;
+        run.streaming = false;
+        run.session = event.session;
+        const last = run.session.messages.at(-1);
+        if (last) last.trace = draft.trace;
+        if (viewing()) {
+          state.currentSession = run.session;
+          renderMessages();
+          syncOpenTerminal(draft);
+          syncComposerState();
+          setWorkspaceStatus();
+        }
       },
       error(event) {
-        assistantDraft.streaming = false;
-        state.currentSession = event.session || state.currentSession;
-        const last = state.currentSession?.messages?.at(-1);
-        if (last) last.trace = assistantDraft.trace;
-        setStatus(`Error: ${event.error}`);
-        renderMessages();
-        syncOpenTerminal(assistantDraft);
-        syncComposerState();
+        draft.streaming = false;
+        run.streaming = false;
+        run.session = event.session || run.session;
+        const last = run.session?.messages?.at(-1);
+        if (last) last.trace = draft.trace;
+        if (viewing()) {
+          state.currentSession = run.session;
+          setStatus(`Error: ${event.error}`);
+          renderMessages();
+          syncOpenTerminal(draft);
+        }
       },
       stopped(event) {
-        assistantDraft.streaming = false;
-        state.currentSession = event.session || state.currentSession;
-        const last = state.currentSession?.messages?.at(-1);
-        if (last) last.trace = assistantDraft.trace;
-        setStatus(event.error || "Stopped by user");
-        renderMessages();
-        syncOpenTerminal(assistantDraft);
-        syncComposerState();
+        draft.streaming = false;
+        run.streaming = false;
+        run.session = event.session || run.session;
+        const last = run.session?.messages?.at(-1);
+        if (last) last.trace = draft.trace;
+        if (viewing()) {
+          state.currentSession = run.session;
+          setStatus(event.error || "Stopped by user");
+          renderMessages();
+          syncOpenTerminal(draft);
+        }
       },
     });
     await refreshSessions();
   } catch (error) {
-    setStatus(`Error: ${error.message}`);
-    assistantDraft.error = true;
-    assistantDraft.streaming = false;
-    assistantDraft.status = "";
-    assistantDraft.content = assistantDraft.content || `Error: ${error.message}`;
-    updateLastMessage(assistantDraft);
+    draft.error = true;
+    draft.streaming = false;
+    run.streaming = false;
+    draft.status = "";
+    draft.content = draft.content || `Error: ${error.message}`;
+    if (viewing()) {
+      setStatus(`Error: ${error.message}`);
+      updateLastMessage(draft);
+    }
   } finally {
-    clearInterval(heartbeat);
-    state.busy = false;
-    state.activeRunSessionId = null;
-    state.stopInFlight = false;
-    syncComposerState();
+    clearInterval(run.heartbeat);
+    state.runs.delete(run.sessionId);
+    renderSessions();
+    if (viewing()) syncComposerState();
   }
 }
 
@@ -1415,7 +1467,7 @@ el.newChatForm.addEventListener("submit", async (event) => {
 });
 el.composer.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (state.busy) {
+  if (currentRun()?.streaming) {
     await stopActiveRun();
     return;
   }

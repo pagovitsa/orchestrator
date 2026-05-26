@@ -302,6 +302,22 @@ input {
   font-weight: 650;
 }
 
+.session-running-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  vertical-align: middle;
+  animation: orch-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes orch-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 .project-delete-button {
   display: grid;
   place-items: center;
