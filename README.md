@@ -66,6 +66,8 @@ http://<host-lan-ip>:5173
 
 If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
 
+Supervisors are instructed not to use public tunnels such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel. If a LAN browser cannot connect, the expected fix is port mapping, host IP, or firewall diagnosis.
+
 ## Supervisors
 
 - `Claude CLI` runs `claude --print` with the shared prompt.

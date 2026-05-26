@@ -18,8 +18,10 @@ function previewServerInstruction() {
   return [
     `WEB SERVER PREVIEW: When starting any project web/dev server, bind to ${runtime.devServerHost}, not localhost or 127.0.0.1.`,
     `Use a port from the Docker-published preview ranges: ${runtime.previewPorts}.`,
-    "Prefer explicit flags such as `--host 0.0.0.0 --port <mapped-port>` for Vite/Next/other dev servers.",
-    "Report preview URLs as `http://127.0.0.1:<port>` for this host and `http://<host-lan-ip>:<port>` for other PCs on the LAN. Do not use tunnels unless the user asks.",
+    "Prefer explicit flags such as `--host 0.0.0.0 --port <mapped-port>` for Vite/Next/other dev servers, or `python3 -m http.server <mapped-port> --bind 0.0.0.0` for static sites.",
+    "After starting a server, health-check it from inside the container with `curl http://127.0.0.1:<port>/`, then report preview URLs as `http://127.0.0.1:<port>` for this host and `http://<host-lan-ip>:<port>` for other PCs on the LAN.",
+    "Do not run public tunnels or tunnel CLIs such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel.",
+    "If a LAN browser cannot connect, diagnose Docker port mappings, host IP, and firewall; do not fall back to a tunnel.",
   ].join("\n");
 }
 
