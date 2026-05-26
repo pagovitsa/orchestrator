@@ -360,35 +360,46 @@ input {
 }
 
 .message-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.message-body > span {
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.message-trace {
-  margin-top: 10px;
-  border: 1px solid #2f383d;
-  border-radius: 8px;
-  background: #080a0b;
-  overflow: hidden;
+.terminal-open-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border: 1px solid #3b454a;
+  border-radius: 50%;
+  background: #20262a;
+  color: var(--text);
+  padding: 0;
+  cursor: pointer;
 }
 
-.message-trace-label {
-  border-bottom: 1px solid #253036;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 6px 8px;
+.terminal-open-button:hover {
+  border-color: rgba(37, 169, 154, 0.7);
+  background: #293136;
 }
 
-.message-trace pre {
-  max-height: 220px;
-  margin: 0;
-  overflow: auto;
-  padding: 8px;
-  color: #cbd7d2;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
+.terminal-open-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .message-attachment-list,
@@ -633,6 +644,10 @@ input {
   width: min(920px, calc(100vw - 28px));
 }
 
+.terminal-modal {
+  width: min(920px, calc(100vw - 28px));
+}
+
 .modal::backdrop {
   background: rgba(6, 7, 8, 0.72);
 }
@@ -676,6 +691,27 @@ input {
 
 .prompt-panel {
   grid-template-rows: auto auto minmax(260px, 1fr) auto auto;
+}
+
+.terminal-panel {
+  grid-template-rows: auto minmax(260px, 1fr);
+}
+
+.terminal-output {
+  width: 100%;
+  max-height: min(68vh, 640px);
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #080a0b;
+  color: #cbd7d2;
+  padding: 12px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .prompt-tabs {

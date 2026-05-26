@@ -13,6 +13,7 @@ const state = {
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
+  activeTerminalMessage: null,
   statusText: "Ready",
 };
 
@@ -31,6 +32,10 @@ const el = {
   promptEditor: document.getElementById("promptEditor"),
   promptStatus: document.getElementById("promptStatus"),
   savePrompts: document.getElementById("savePrompts"),
+  terminalDialog: document.getElementById("terminalDialog"),
+  closeTerminal: document.getElementById("closeTerminal"),
+  terminalTitle: document.getElementById("terminalTitle"),
+  terminalOutput: document.getElementById("terminalOutput"),
   newChat: document.getElementById("newChat"),
   modalProjectName: document.getElementById("modalProjectName"),
   projectOptions: document.getElementById("projectOptions"),
@@ -757,34 +762,74 @@ function createMessageElement(message) {
 
   const body = document.createElement("div");
   body.className = "message-body";
-  body.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
+  renderMessageBody(body, message);
 
   head.append(who, when);
   article.append(head, body);
-  renderMessageTrace(article, message.trace);
   if (message.attachments?.length) article.append(createAttachmentList(message.attachments, false));
   return article;
 }
 
-function renderMessageTrace(article, trace = []) {
-  let traceBox = article.querySelector(".message-trace");
-  if (!trace?.length) {
-    traceBox?.remove();
+function renderMessageBody(body, message) {
+  body.innerHTML = "";
+
+  const text = document.createElement("span");
+  text.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
+  body.appendChild(text);
+
+  if (!message.streaming && !message.trace?.length) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "terminal-open-button";
+  button.title = "Open terminal";
+  button.setAttribute("aria-label", "Open terminal");
+  button.innerHTML = [
+    '<svg viewBox="0 0 24 24" aria-hidden="true">',
+    '<path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"></path>',
+    '<path d="M10 21h4"></path>',
+    "</svg>",
+  ].join("");
+  button.addEventListener("click", () => openTerminalModal(message));
+  body.appendChild(button);
+}
+
+function terminalTitleFor(message) {
+  const supervisor = message?.supervisor || "model";
+  return `${supervisor} terminal`;
+}
+
+function terminalText(trace = []) {
+  return trace?.length ? trace.join("") : "Waiting for terminal output...";
+}
+
+function renderTerminalModal() {
+  const message = state.activeTerminalMessage;
+  if (!message) {
+    el.terminalTitle.textContent = "Terminal";
+    el.terminalOutput.textContent = "Waiting for terminal output...";
     return;
   }
-  if (!traceBox) {
-    traceBox = document.createElement("div");
-    traceBox.className = "message-trace";
-    const label = document.createElement("div");
-    label.className = "message-trace-label";
-    label.textContent = "Terminal";
-    const pre = document.createElement("pre");
-    traceBox.append(label, pre);
-    article.appendChild(traceBox);
+  el.terminalTitle.textContent = terminalTitleFor(message);
+  el.terminalOutput.textContent = terminalText(message.trace);
+  el.terminalOutput.scrollTop = el.terminalOutput.scrollHeight;
+}
+
+function openTerminalModal(message) {
+  state.activeTerminalMessage = message;
+  renderTerminalModal();
+  if (!el.terminalDialog.open) el.terminalDialog.showModal();
+}
+
+function closeTerminalModal() {
+  state.activeTerminalMessage = null;
+  if (el.terminalDialog.open) el.terminalDialog.close();
+}
+
+function syncOpenTerminal(message) {
+  if (state.activeTerminalMessage === message && el.terminalDialog.open) {
+    renderTerminalModal();
   }
-  const pre = traceBox.querySelector("pre");
-  pre.textContent = trace.join("");
-  pre.scrollTop = pre.scrollHeight;
 }
 
 function updateLastMessage(message) {
@@ -799,8 +844,8 @@ function updateLastMessage(message) {
   const when = last.querySelector(".message-head span:last-child");
   const body = last.querySelector(".message-body");
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
-  if (body) body.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
-  renderMessageTrace(last, message.trace);
+  if (body) renderMessageBody(body, message);
+  syncOpenTerminal(message);
   scrollMessagesToBottom();
 }
 
@@ -1061,6 +1106,7 @@ async function sendMessage(content, files = []) {
           totalChars -= assistantDraft.trace.shift().length;
         }
         updateLastMessage(assistantDraft);
+        syncOpenTerminal(assistantDraft);
       },
       done(event) {
         assistantDraft.streaming = false;
@@ -1068,6 +1114,7 @@ async function sendMessage(content, files = []) {
         const last = state.currentSession.messages.at(-1);
         if (last) last.trace = assistantDraft.trace;
         renderMessages();
+        syncOpenTerminal(assistantDraft);
         syncComposerState();
         setWorkspaceStatus();
       },
@@ -1078,6 +1125,7 @@ async function sendMessage(content, files = []) {
         if (last) last.trace = assistantDraft.trace;
         setStatus(`Error: ${event.error}`);
         renderMessages();
+        syncOpenTerminal(assistantDraft);
         syncComposerState();
       },
     });
@@ -1191,6 +1239,13 @@ el.promptDialog.addEventListener("click", (event) => {
 el.promptDialog.querySelector("[data-close-prompts]").addEventListener("click", closePromptModal);
 el.promptEditor.addEventListener("input", storeActivePromptDraft);
 el.savePrompts.addEventListener("click", savePromptSettings);
+el.closeTerminal.addEventListener("click", closeTerminalModal);
+el.terminalDialog.addEventListener("click", (event) => {
+  if (event.target === el.terminalDialog) closeTerminalModal();
+});
+el.terminalDialog.addEventListener("close", () => {
+  state.activeTerminalMessage = null;
+});
 el.modalProjectName.addEventListener("input", updateModalState);
 el.modalSupervisorSelect.addEventListener("change", updateModalState);
 el.cancelNewChat.addEventListener("click", closeNewChatModal);
