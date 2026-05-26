@@ -46,6 +46,8 @@ services:
     ports:
       - "${ORCH_BIND_HOST:-127.0.0.1}:${ORCH_UI_PORT:-8787}:8787"
       - "[${ORCH_BIND_HOST_IPV6:-::1}]:${ORCH_UI_PORT:-8787}:8787"
+      # Codex browser-OAuth callback (localhost-only by design); reached via the in-container socat relay.
+      - "127.0.0.1:1455:1455"
       - "${ORCH_PREVIEW_BIND_HOST:-127.0.0.1}:3000-3020:3000-3020"
       - "${ORCH_PREVIEW_BIND_HOST:-127.0.0.1}:5173-5190:5173-5190"
       - "${ORCH_PREVIEW_BIND_HOST:-127.0.0.1}:8000-8020:8000-8020"

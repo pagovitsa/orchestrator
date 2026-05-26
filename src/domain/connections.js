@@ -18,14 +18,15 @@ const cliConnectors = {
   codex: {
     id: "codex",
     label: "Codex CLI",
-    args: ["login", "--device-auth"],
-    detail: "Uses the Codex auth volume in this app.",
-    links: [
-      {
-        label: "Open ChatGPT Security",
-        url: "https://chatgpt.com/#settings/Security",
-      },
+    // Standard browser OAuth login. `codex login` serves the OAuth callback on container-localhost:1455,
+    // which Docker's published port can't reach directly, so relay container-eth0:1455 -> 127.0.0.1:1455.
+    // Open the auth link below in a browser on THIS host (the OAuth redirect targets localhost:1455).
+    command: "bash",
+    args: [
+      "-lc",
+      'socat TCP-LISTEN:1455,fork,reuseaddr,bind=$(hostname -i | awk "{print \\$1}") TCP:127.0.0.1:1455 & SOCAT=$!; trap "kill $SOCAT 2>/dev/null" EXIT INT TERM; codex login',
     ],
+    detail: "Browser login. Open the link shown below in a browser on the machine running this container.",
   },
   gemini: {
     id: "gemini",
