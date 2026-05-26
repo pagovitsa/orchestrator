@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Orch UI</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-actions">
+          <button id="sidebarToggle" class="icon-button sidebar-action sidebar-toggle" type="button" title="Projects" aria-label="Toggle projects" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16"></path>
+            </svg>
+          </button>
+          <button id="connectButton" class="icon-button sidebar-action connect-button" type="button" title="Connect models" aria-label="Connect models">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 7V3M15 7V3M8 11h8M12 21v-4M7 7h10v4a5 5 0 0 1-10 0V7Z"></path>
+            </svg>
+          </button>
+          <button id="newChat" class="icon-button sidebar-action new-chat-button" type="button" title="New chat" aria-label="New chat">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
+          </button>
+          <button id="promptButton" class="icon-button sidebar-action prompt-button" type="button" title="Model prompts" aria-label="Model prompts">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 3h9l4 4v14H6V3Z"></path>
+              <path d="M15 3v5h5M9 12h6M9 16h6"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="sessionList" class="sessions" aria-label="Sessions"></div>
+      <div id="status" class="model-status sidebar-status" aria-label="Model connection status"></div>
+    </aside>
+
+    <main class="main">
+      <section id="messages" class="messages" aria-live="polite"></section>
+
+      <form id="composer" class="composer">
+        <div class="composer-shell">
+          <div class="attachment-menu-wrap">
+            <button id="attachmentMenuButton" class="attachment-menu-button" type="button" title="Upload file" aria-label="Upload file" aria-haspopup="menu" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14"></path>
+              </svg>
+            </button>
+            <div id="attachmentMenu" class="attachment-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-attach-action="files">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m21.4 11.6-8.8 8.8a6 6 0 0 1-8.5-8.5l9.7-9.7a4 4 0 0 1 5.7 5.7l-9.7 9.7a2 2 0 0 1-2.8-2.8l8.8-8.8"></path>
+                </svg>
+                <span>Upload file</span>
+              </button>
+            </div>
+          </div>
+          <div class="composer-main">
+            <textarea id="messageInput" rows="3" placeholder="Ask the current supervisor..."></textarea>
+            <div id="attachmentList" class="attachment-list"></div>
+          </div>
+          <button id="sendButton" type="submit" title="Send" aria-label="Send message">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 19V5M6 11l6-6 6 6"></path>
+            </svg>
+          </button>
+          <input id="fileInput" type="file" multiple>
+        </div>
+      </form>
+    </main>
+
+    <dialog id="newChatDialog" class="modal">
+      <form id="newChatForm" class="modal-panel">
+        <div class="modal-head">
+          <h2>New chat</h2>
+          <button id="cancelNewChat" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+
+        <div class="modal-field">
+          <label for="modalProjectName">Project name</label>
+          <input id="modalProjectName" list="projectOptions" autocomplete="off" maxlength="80" placeholder="project-folder">
+          <datalist id="projectOptions"></datalist>
+        </div>
+
+        <div class="modal-field">
+          <label for="modalSupervisorSelect">Supervisor</label>
+          <select id="modalSupervisorSelect"></select>
+        </div>
+
+        <div id="modalError" class="modal-error" role="alert"></div>
+
+        <div class="modal-actions">
+          <button class="secondary" type="button" data-close-modal>Cancel</button>
+          <button id="startNewChat" class="primary" type="submit">Start</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="connectDialog" class="modal connect-modal">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2>Connect</h2>
+          <button id="closeConnect" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+
+        <div id="connectionList" class="connection-list"></div>
+
+        <div class="modal-actions">
+          <button id="refreshConnections" class="secondary" type="button">Refresh</button>
+          <button class="primary" type="button" data-close-connect>Done</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="promptDialog" class="modal prompt-modal">
+      <div class="modal-panel prompt-panel">
+        <div class="modal-head">
+          <h2>Model prompts</h2>
+          <button id="closePrompts" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+
+        <div id="promptTabs" class="prompt-tabs" role="tablist" aria-label="Model prompt tabs"></div>
+        <textarea id="promptEditor" class="prompt-editor" spellcheck="false" placeholder="Prompt"></textarea>
+        <div id="promptStatus" class="modal-error" role="alert"></div>
+
+        <div class="modal-actions">
+          <button class="secondary" type="button" data-close-prompts>Cancel</button>
+          <button id="savePrompts" class="primary" type="button">Save</button>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

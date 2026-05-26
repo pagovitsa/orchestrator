@@ -1,0 +1,44 @@
+services:
+  orch-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: local/orchestrator:latest
+    container_name: orch-ui
+    restart: unless-stopped
+    environment:
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      ORCH_DEFAULT_SUPERVISOR: "${ORCH_DEFAULT_SUPERVISOR:-claude}"
+      ORCH_ALLOW_WRITE: "${ORCH_ALLOW_WRITE:-1}"
+      ORCH_ALLOW_WORKSPACE_ROOT: "${ORCH_ALLOW_WORKSPACE_ROOT:-0}"
+      ORCH_TIMEOUT_MS: "${ORCH_TIMEOUT_MS:-900000}"
+      ORCH_UPLOAD_MAX_BYTES: "${ORCH_UPLOAD_MAX_BYTES:-26214400}"
+      ORCH_LISTEN_HOST: "${ORCH_LISTEN_HOST:-::}"
+      ORCH_UI_PORT: "${ORCH_UI_PORT:-8787}"
+      CLAUDE_MODEL: "${CLAUDE_MODEL:-}"
+      CODEX_MODEL: "${CODEX_MODEL:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-}"
+    ports:
+      - "${ORCH_BIND_HOST:-0.0.0.0}:${ORCH_UI_PORT:-8787}:8787"
+      - "[${ORCH_BIND_HOST_IPV6:-::}]:${ORCH_UI_PORT:-8787}:8787"
+    volumes:
+      - "${HOST_PROJECTS:-/home/pagovitsa/orch-projects}:/workspace"
+      - claude_auth:/home/node/.claude
+      - codex_auth:/home/node/.codex
+      - gemini_auth:/home/node/.gemini
+      - orch_data:/data
+      - "./prompts:/app/prompts:ro"
+    working_dir: /app
+
+volumes:
+  claude_auth:
+    name: orch_claude_auth
+  codex_auth:
+    name: orch_codex_auth
+  gemini_auth:
+    name: orch_gemini_auth
+  orch_data:
+    name: orch_data

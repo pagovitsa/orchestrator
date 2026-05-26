@@ -1,0 +1,26 @@
+{
+  "name": "claude",
+  "command": "claude",
+  "additional_args": [
+    "--permission-mode",
+    "bypassPermissions",
+    "--dangerously-skip-permissions",
+    "--model",
+    "sonnet"
+  ],
+  "env": {},
+  "roles": {
+    "default": {
+      "prompt_path": "systemprompts/clink/default.txt",
+      "role_args": []
+    },
+    "planner": {
+      "prompt_path": "systemprompts/clink/default_planner.txt",
+      "role_args": []
+    },
+    "codereviewer": {
+      "prompt_path": "systemprompts/clink/default_codereviewer.txt",
+      "role_args": []
+    }
+  }
+}

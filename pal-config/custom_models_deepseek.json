@@ -1,0 +1,64 @@
+{
+  "_README": {
+    "description": "Model registry for the container PAL instances' Custom provider -> DeepSeek cloud.",
+    "note": "The container entrypoint writes ~/.claude.json to point at this file."
+  },
+  "models": [
+    {
+      "model_name": "deepseek-v4-flash",
+      "aliases": ["deepseek-cloud", "deepseek", "ds"],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "DeepSeek V4 Flash (cloud, direct API).",
+      "intelligence_score": 14
+    },
+    {
+      "model_name": "deepseek-v4-pro",
+      "aliases": ["deepseek-pro", "ds-pro"],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "DeepSeek V4 Pro (cloud, direct API).",
+      "intelligence_score": 15
+    },
+    {
+      "model_name": "deepseek-chat",
+      "aliases": ["ds-chat"],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "supports_extended_thinking": false,
+      "supports_json_mode": true,
+      "supports_function_calling": true,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "DeepSeek chat compatibility alias.",
+      "intelligence_score": 13
+    },
+    {
+      "model_name": "deepseek-reasoner",
+      "aliases": ["ds-reasoner"],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "supports_extended_thinking": true,
+      "supports_json_mode": true,
+      "supports_function_calling": false,
+      "supports_images": false,
+      "max_image_size_mb": 0.0,
+      "supports_temperature": true,
+      "description": "DeepSeek reasoner compatibility alias.",
+      "intelligence_score": 14
+    }
+  ]
+}

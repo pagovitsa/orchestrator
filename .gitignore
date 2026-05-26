@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.remember/
+.orchestration/runs/
+.playwright-mcp/
+data/
+orch-connect-modal.png
+node_modules/
+npm-debug.log*
+pal-mcp-server/.git
+pal-mcp-server/.venv
+pal-mcp-server/.claude
+pal-mcp-server/logs
+**/__pycache__/
+**/*.pyc
