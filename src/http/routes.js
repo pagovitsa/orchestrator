@@ -20,9 +20,44 @@ import {
   sendConnectionJobInput,
   startConnection,
 } from "../domain/connections.js";
-import { ensureProject, listProjects, requireScopedCwd, resolveCwd } from "../domain/workspace.js";
+import { deleteProject, ensureProject, listProjects, requireScopedCwd, resolveCwd } from "../domain/workspace.js";
 import { runSupervisor } from "../supervisors/runner.js";
 import { readBody, sendJson, writeStreamEvent } from "./response.js";
+
+const activeRuns = new Map();
+
+function runStopReason(signal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === "string") return reason;
+  return "Stopped by user";
+}
+
+function activeRunForProject(project) {
+  for (const run of activeRuns.values()) {
+    if (run.cwd === project) return run;
+  }
+  return null;
+}
+
+function registerActiveRun(id, session, abortController, mode) {
+  if (activeRuns.has(id)) {
+    throw Object.assign(new Error("This project already has a running model. Stop it before sending another message."), { status: 409 });
+  }
+  activeRuns.set(id, {
+    id,
+    mode,
+    supervisor: session.supervisor,
+    cwd: session.cwd || ".",
+    startedAt: new Date().toISOString(),
+    abortController,
+  });
+}
+
+function clearActiveRun(id, abortController) {
+  const active = activeRuns.get(id);
+  if (active?.abortController === abortController) activeRuns.delete(id);
+}
 
 function promptSessionWithoutCurrentUser(session) {
   return { ...session, messages: (session.messages || []).slice(0, -1) };
@@ -55,8 +90,19 @@ async function appendUserMessage(session, body) {
 
 async function handleStreamMessage(req, res, id) {
   const session = await loadSession(id);
-  const body = await readBody(req);
-  const modelContent = await appendUserMessage(session, body);
+  const abortController = new AbortController();
+  let completed = false;
+  let clientClosed = false;
+  registerActiveRun(id, session, abortController, "stream");
+
+  const body = await readBody(req).catch((error) => {
+    clearActiveRun(id, abortController);
+    throw error;
+  });
+  const modelContent = await appendUserMessage(session, body).catch((error) => {
+    clearActiveRun(id, abortController);
+    throw error;
+  });
 
   res.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
@@ -66,9 +112,6 @@ async function handleStreamMessage(req, res, id) {
   });
   writeStreamEvent(res, { type: "session", session });
 
-  const abortController = new AbortController();
-  let completed = false;
-  let clientClosed = false;
   res.on("close", () => {
     if (completed) return;
     clientClosed = true;
@@ -100,18 +143,23 @@ async function handleStreamMessage(req, res, id) {
     writeStreamEvent(res, { type: "done", session, message: session.messages.at(-1) });
   } catch (error) {
     if (clientClosed && abortController.signal.aborted) return;
-    const details = error.message || String(error);
+    const stopped = abortController.signal.aborted;
+    const details = stopped ? runStopReason(abortController.signal) : (error.message || String(error));
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
-      content: [transcript.trim(), `Error: ${details}`].filter(Boolean).join("\n\n"),
+      content: stopped
+        ? [transcript.trim(), details].filter(Boolean).join("\n\n")
+        : [transcript.trim(), `Error: ${details}`].filter(Boolean).join("\n\n"),
       at: new Date().toISOString(),
-      error: true,
+      error: !stopped,
+      stopped,
     });
     await saveSession(session);
-    writeStreamEvent(res, { type: "error", error: details, session, message: session.messages.at(-1) });
+    writeStreamEvent(res, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
   } finally {
     completed = true;
+    clearActiveRun(id, abortController);
     if (!res.writableEnded && !res.destroyed) res.end();
   }
 }
@@ -123,17 +171,34 @@ async function handleJsonMessage(req, res, id) {
     if (!completed) abortController.abort();
   });
   const session = await loadSession(id);
-  const modelContent = await appendUserMessage(session, await readBody(req));
-  const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { signal: abortController.signal });
-  session.messages.push({
-    role: "assistant",
-    supervisor: session.supervisor,
-    content: answer || "(empty response)",
-    at: new Date().toISOString(),
-  });
-  await saveSession(session);
-  completed = true;
-  return sendJson(res, 200, { session, message: session.messages.at(-1) });
+  registerActiveRun(id, session, abortController, "json");
+  try {
+    const modelContent = await appendUserMessage(session, await readBody(req));
+    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { signal: abortController.signal });
+    session.messages.push({
+      role: "assistant",
+      supervisor: session.supervisor,
+      content: answer || "(empty response)",
+      at: new Date().toISOString(),
+    });
+    await saveSession(session);
+    completed = true;
+    return sendJson(res, 200, { session, message: session.messages.at(-1) });
+  } catch (error) {
+    if (!abortController.signal.aborted) throw error;
+    session.messages.push({
+      role: "assistant",
+      supervisor: session.supervisor,
+      content: runStopReason(abortController.signal),
+      at: new Date().toISOString(),
+      stopped: true,
+    });
+    await saveSession(session);
+    completed = true;
+    return sendJson(res, 200, { session, message: session.messages.at(-1), stopped: true });
+  } finally {
+    clearActiveRun(id, abortController);
+  }
 }
 
 export async function handleApi(req, res, url) {
@@ -183,6 +248,16 @@ export async function handleApi(req, res, url) {
     const result = await ensureProject(body.name);
     return sendJson(res, result.created ? 201 : 200, { ...result, projects: await listProjects() });
   }
+  const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+  if (projectMatch && req.method === "DELETE") {
+    const project = decodeURIComponent(projectMatch[1]);
+    const activeRun = activeRunForProject(project);
+    if (activeRun) {
+      throw Object.assign(new Error("Stop the running model before deleting this project"), { status: 409 });
+    }
+    const result = await deleteProject(project);
+    return sendJson(res, 200, { ...result, projects: await listProjects(), sessions: await listSessions() });
+  }
   if (req.method === "GET" && url.pathname === "/api/sessions") {
     return sendJson(res, 200, { sessions: await listSessions() });
   }
@@ -200,6 +275,13 @@ export async function handleApi(req, res, url) {
     const session = applySessionPatch(await loadSession(sessionMatch[1]), await readBody(req), { allowIdentityChange: false });
     await saveSession(session);
     return sendJson(res, 200, { session });
+  }
+  const stopMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/stop$/);
+  if (stopMatch && req.method === "POST") {
+    const activeRun = activeRuns.get(stopMatch[1]);
+    if (!activeRun) return sendJson(res, 200, { stopped: false });
+    activeRun.abortController.abort(new Error("Stopped by user"));
+    return sendJson(res, 202, { stopped: true, run: { id: activeRun.id, supervisor: activeRun.supervisor, cwd: activeRun.cwd } });
   }
 
   const streamMessageMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/messages\/stream$/);

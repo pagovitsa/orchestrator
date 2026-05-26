@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { lstat, mkdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime } from "../config/env.js";
 
@@ -94,4 +94,21 @@ export async function ensureProject(name) {
 export async function createProject(name) {
   const result = await ensureProject(name);
   return result.project;
+}
+
+export async function deleteProject(name) {
+  const project = normalizeProjectName(name);
+  const projectPath = resolveCwd(project);
+  let existing;
+  try {
+    existing = await lstat(projectPath);
+  } catch (error) {
+    if (error.code === "ENOENT") throw Object.assign(new Error("Project not found"), { status: 404 });
+    throw error;
+  }
+  if (!existing.isDirectory() || existing.isSymbolicLink()) {
+    throw Object.assign(new Error("Project must be a real folder inside /workspace"), { status: 409 });
+  }
+  await rm(projectPath, { recursive: true, force: false });
+  return { project };
 }

@@ -263,6 +263,13 @@ input {
   font-size: 12px;
 }
 
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  align-items: stretch;
+}
+
 .session {
   display: grid;
   gap: 5px;
@@ -293,6 +300,36 @@ input {
 .session-title {
   font-size: 14px;
   font-weight: 650;
+}
+
+.project-delete-button {
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  width: 34px;
+  min-height: 58px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  cursor: pointer;
+}
+
+.project-delete-button:hover {
+  border-color: rgba(228, 93, 82, 0.55);
+  background: rgba(228, 93, 82, 0.08);
+  color: var(--danger);
+}
+
+.project-delete-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .main {
@@ -372,7 +409,8 @@ input {
   overflow-wrap: anywhere;
 }
 
-.terminal-open-button {
+.terminal-open-button,
+.stop-run-button {
   display: inline-grid;
   flex: 0 0 auto;
   place-items: center;
@@ -387,12 +425,23 @@ input {
   cursor: pointer;
 }
 
-.terminal-open-button:hover {
+.terminal-open-button:hover,
+.stop-run-button:hover {
   border-color: rgba(37, 169, 154, 0.7);
   background: #293136;
 }
 
-.terminal-open-button svg {
+.stop-run-button {
+  border-color: rgba(228, 93, 82, 0.55);
+}
+
+.stop-run-button:hover {
+  border-color: rgba(228, 93, 82, 0.75);
+  background: rgba(228, 93, 82, 0.15);
+}
+
+.terminal-open-button svg,
+.stop-run-button svg {
   width: 15px;
   height: 15px;
   fill: none;
@@ -622,6 +671,16 @@ input {
 #sendButton:hover {
   background: #fff;
   color: #080a0b;
+}
+
+#sendButton.is-stop {
+  background: var(--danger);
+  color: #fff;
+}
+
+#sendButton.is-stop:hover {
+  background: #f06a60;
+  color: #fff;
 }
 
 .modal {

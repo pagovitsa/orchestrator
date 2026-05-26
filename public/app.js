@@ -14,6 +14,8 @@ const state = {
   promptDrafts: {},
   activePromptId: null,
   activeTerminalMessage: null,
+  activeRunSessionId: null,
+  stopInFlight: false,
   statusText: "Ready",
 };
 
@@ -288,6 +290,21 @@ function createModelIcon(id) {
   svg.appendChild(path);
   return svg;
 }
+
+function iconSvg(paths) {
+  return [
+    '<svg viewBox="0 0 24 24" aria-hidden="true">',
+    ...paths.map((d) => `<path d="${d}"></path>`),
+    "</svg>",
+  ].join("");
+}
+
+const icons = {
+  send: ["M12 19V5M6 11l6-6 6 6"],
+  stop: ["M8 8h8v8H8z"],
+  terminal: ["M6 9a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9", "M10 21h4"],
+  trash: ["M3 6h18", "M8 6V4h8v2", "M6 6l1 15h10l1-15", "M10 11v6M14 11v6"],
+};
 
 function renderModelStatus(connections = state.connections) {
   el.status.innerHTML = "";
@@ -694,6 +711,13 @@ function projectRows() {
   });
 }
 
+function isCurrentProject(project) {
+  if (!state.currentSession || !project) return false;
+  return Boolean(project.id && project.id === state.currentSession.id)
+    || Boolean(project.cwd && project.cwd === state.currentSession.cwd)
+    || Boolean(project.project && project.project === state.currentSession.project);
+}
+
 function renderSessions() {
   el.sessionList.innerHTML = "";
   const rows = projectRows();
@@ -705,9 +729,12 @@ function renderSessions() {
     return;
   }
   for (const session of rows) {
+    const row = document.createElement("div");
+    row.className = "session-row";
+
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `session ${state.currentSession?.id === session.id ? "active" : ""}`;
+    button.className = `session ${isCurrentProject(session) ? "active" : ""}`;
 
     const title = document.createElement("div");
     title.className = "session-title";
@@ -719,7 +746,18 @@ function renderSessions() {
 
     button.append(title, meta);
     button.addEventListener("click", () => openProjectSession(session));
-    el.sessionList.appendChild(button);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "project-delete-button";
+    remove.title = `Delete ${session.cwd || session.project}`;
+    remove.setAttribute("aria-label", `Delete ${session.cwd || session.project}`);
+    remove.disabled = state.busy;
+    remove.innerHTML = iconSvg(icons.trash);
+    remove.addEventListener("click", () => deleteProjectFromUi(session));
+
+    row.append(button, remove);
+    el.sessionList.appendChild(row);
   }
 }
 
@@ -784,14 +822,20 @@ function renderMessageBody(body, message) {
   button.className = "terminal-open-button";
   button.title = "Open terminal";
   button.setAttribute("aria-label", "Open terminal");
-  button.innerHTML = [
-    '<svg viewBox="0 0 24 24" aria-hidden="true">',
-    '<path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"></path>',
-    '<path d="M10 21h4"></path>',
-    "</svg>",
-  ].join("");
+  button.innerHTML = iconSvg(icons.terminal);
   button.addEventListener("click", () => openTerminalModal(message));
   body.appendChild(button);
+
+  if (!message.streaming) return;
+  const stopButton = document.createElement("button");
+  stopButton.type = "button";
+  stopButton.className = "stop-run-button";
+  stopButton.title = "Stop model";
+  stopButton.setAttribute("aria-label", "Stop model");
+  stopButton.disabled = state.stopInFlight;
+  stopButton.innerHTML = iconSvg(icons.stop);
+  stopButton.addEventListener("click", stopActiveRun);
+  body.appendChild(stopButton);
 }
 
 function terminalTitleFor(message) {
@@ -920,12 +964,32 @@ function setComposerEnabled(enabled) {
   el.messageInput.disabled = !enabled || state.busy;
   el.attachmentMenuButton.disabled = !enabled || state.busy;
   el.fileInput.disabled = !enabled || state.busy;
-  el.sendButton.disabled = !enabled || state.busy;
+  el.sendButton.disabled = !enabled || (state.busy && !state.activeRunSessionId) || state.stopInFlight;
+  el.sendButton.classList.toggle("is-stop", state.busy);
+  el.sendButton.title = state.busy ? "Stop model" : "Send";
+  el.sendButton.setAttribute("aria-label", state.busy ? "Stop model" : "Send message");
+  el.sendButton.innerHTML = iconSvg(state.busy ? icons.stop : icons.send);
   if (!enabled || state.busy) closeAttachmentMenu();
 }
 
 function syncComposerState() {
   setComposerEnabled(Boolean(state.currentSession));
+}
+
+async function stopActiveRun() {
+  if (!state.currentSession || !state.activeRunSessionId || state.stopInFlight) return;
+  state.stopInFlight = true;
+  syncComposerState();
+  const last = state.currentSession?.messages?.at(-1);
+  if (last?.streaming) updateLastMessage(last);
+  setStatus("Stopping model...");
+  try {
+    await api(`/api/sessions/${state.activeRunSessionId}/stop`, { method: "POST" });
+  } catch (error) {
+    setStatus(`Stop error: ${error.message}`);
+    state.stopInFlight = false;
+    syncComposerState();
+  }
 }
 
 async function refreshSessions() {
@@ -991,6 +1055,15 @@ async function createSession({ supervisor, cwd }) {
 }
 
 async function openProjectSession(project) {
+  if (isCurrentProject(project)) {
+    renderSessions();
+    collapseResponsiveSidebar();
+    return;
+  }
+  if (state.busy) {
+    setStatus("Stop the current model before switching projects");
+    return;
+  }
   if (project.id) {
     await loadSession(project.id);
     return;
@@ -1010,6 +1083,33 @@ async function openProjectSession(project) {
     setStatus(`Error: ${error.message}`);
     await refreshModelStatus();
     await openConnectModal();
+  }
+}
+
+async function deleteProjectFromUi(project) {
+  const projectName = project.cwd || project.project || project.title;
+  if (!projectName) return;
+  if (state.busy) {
+    setStatus("Stop the current model before deleting a project");
+    return;
+  }
+  const confirmed = window.confirm(`Delete project "${projectName}"?\n\nThis removes the project folder and its chat history.`);
+  if (!confirmed) return;
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(projectName)}`, { method: "DELETE" });
+    state.projects = body.projects || [];
+    state.sessions = body.sessions || [];
+    if (isCurrentProject(project)) {
+      state.currentSession = null;
+      renderMessages();
+      syncComposerState();
+      setWorkspaceStatus();
+    }
+    renderProjectOptions();
+    renderSessions();
+    setStatus(`Deleted ${projectName}`);
+  } catch (error) {
+    setStatus(`Delete error: ${error.message}`);
   }
 }
 
@@ -1067,6 +1167,8 @@ async function sendMessage(content, files = []) {
   renderMessages();
 
   state.busy = true;
+  state.activeRunSessionId = state.currentSession.id;
+  state.stopInFlight = false;
   syncComposerState();
   setStatus(files.length ? "Reading files..." : `Running ${supervisor}...`);
   const startedAt = Date.now();
@@ -1128,6 +1230,16 @@ async function sendMessage(content, files = []) {
         syncOpenTerminal(assistantDraft);
         syncComposerState();
       },
+      stopped(event) {
+        assistantDraft.streaming = false;
+        state.currentSession = event.session || state.currentSession;
+        const last = state.currentSession?.messages?.at(-1);
+        if (last) last.trace = assistantDraft.trace;
+        setStatus(event.error || "Stopped by user");
+        renderMessages();
+        syncOpenTerminal(assistantDraft);
+        syncComposerState();
+      },
     });
     await refreshSessions();
   } catch (error) {
@@ -1140,6 +1252,8 @@ async function sendMessage(content, files = []) {
   } finally {
     clearInterval(heartbeat);
     state.busy = false;
+    state.activeRunSessionId = null;
+    state.stopInFlight = false;
     syncComposerState();
   }
 }
@@ -1281,7 +1395,10 @@ el.newChatForm.addEventListener("submit", async (event) => {
 });
 el.composer.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (state.busy) return;
+  if (state.busy) {
+    await stopActiveRun();
+    return;
+  }
   const content = el.messageInput.value.trim();
   const files = [...state.selectedFiles];
   if (!content && !files.length) return;
