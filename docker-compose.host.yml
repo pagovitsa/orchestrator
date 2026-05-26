@@ -1,0 +1,7 @@
+services:
+  orch-ui:
+    network_mode: host
+    ports: !reset []
+    environment:
+      ORCH_NETWORK_MODE: host
+      ORCH_LISTEN_HOST: "${ORCH_LISTEN_HOST:-0.0.0.0}"

@@ -43,6 +43,18 @@ From another PC on the same LAN, open the UI with the host machine IP:
 http://<host-lan-ip>:8787
 ```
 
+## Host Network Mode
+
+On Linux you can run `orch-ui` on the host network instead of Docker bridge/port publishing:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+```
+
+In this mode Docker does not use the `ports:` mappings. The UI and project previews bind directly on the host network, so `0.0.0.0:<port>` is immediately visible on the host and LAN if the host firewall allows it. This is often simpler for local LAN previews, but it is less isolated and can conflict with host services already using the same ports.
+
+Use the default bridge mode if you want explicit Docker port mappings or better portability across Docker Desktop / non-Linux environments.
+
 ## Project Web Previews
 
 Project dev servers run inside the `orch-ui` container, so they must bind to `0.0.0.0` and use a Docker-published preview port. The default published ranges are:
@@ -74,7 +86,7 @@ If another machine still cannot connect, check the host firewall for the selecte
 
 The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews.
 
-Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. It should treat shell `127.0.0.1` as container-local and use Docker-published ports for anything the user's browser or LAN machines need to open.
+Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. In bridge mode it treats shell `127.0.0.1` as container-local and uses Docker-published ports for browser/LAN previews; in host network mode it knows the container shares the host network namespace.
 
 Supervisors are instructed not to use public tunnels such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel. If a LAN browser cannot connect, the expected fix is port mapping, host IP, or firewall diagnosis.
 

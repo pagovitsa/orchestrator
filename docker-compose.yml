@@ -19,6 +19,7 @@ services:
       ORCH_AUTO_UPDATE_CLIS: "${ORCH_AUTO_UPDATE_CLIS:-1}"
       ORCH_CLI_PACKAGE_SPECS: "${ORCH_CLI_PACKAGE_SPECS:-@anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest}"
       ORCH_CLI_UPDATE_TIMEOUT_SECONDS: "${ORCH_CLI_UPDATE_TIMEOUT_SECONDS:-120}"
+      ORCH_NETWORK_MODE: "${ORCH_NETWORK_MODE:-bridge}"
       ORCH_LISTEN_HOST: "${ORCH_LISTEN_HOST:-::}"
       ORCH_UI_PORT: "${ORCH_UI_PORT:-8787}"
       ORCH_DEV_SERVER_HOST: "${ORCH_DEV_SERVER_HOST:-0.0.0.0}"

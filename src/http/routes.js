@@ -210,6 +210,7 @@ export async function handleApi(req, res, url) {
       workspaceRoot: paths.workspaceRoot,
       promptFile: paths.promptFile,
       supervisorPeers,
+      networkMode: runtime.networkMode,
       devServerHost: runtime.devServerHost,
       previewPorts: runtime.previewPorts,
       maxUploadBytes: runtime.maxUploadBytes,
