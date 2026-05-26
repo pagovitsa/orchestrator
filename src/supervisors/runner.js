@@ -16,6 +16,8 @@ function compactHistory(messages, limit = 18) {
 
 function previewServerInstruction() {
   return [
+    "RUNTIME ENVIRONMENT: You are running inside the `orch-ui` Docker image/container, not directly on the user's host OS.",
+    "Paths under `/workspace` are Docker-mounted project folders. `127.0.0.1` from shell commands is the container; the user's browser can reach a service only when Docker publishes that port.",
     `WEB SERVER PREVIEW: When starting any project web/dev server, bind to ${runtime.devServerHost}, not localhost or 127.0.0.1.`,
     `Use a port from the Docker-published preview ranges: ${runtime.previewPorts}.`,
     "Use the `orch-preview` helper so the server stays alive after this supervisor run exits.",

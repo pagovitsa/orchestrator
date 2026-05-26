@@ -74,6 +74,8 @@ If another machine still cannot connect, check the host firewall for the selecte
 
 The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews.
 
+Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. It should treat shell `127.0.0.1` as container-local and use Docker-published ports for anything the user's browser or LAN machines need to open.
+
 Supervisors are instructed not to use public tunnels such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel. If a LAN browser cannot connect, the expected fix is port mapping, host IP, or firewall diagnosis.
 
 ## Supervisors
