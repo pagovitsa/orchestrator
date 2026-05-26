@@ -654,12 +654,12 @@ input {
 }
 
 .composer textarea {
-  min-height: 54px;
+  min-height: 38px;
   max-height: 240px;
   border: 0;
   background: transparent;
   padding: 0;
-  resize: vertical;
+  resize: none;
 }
 
 .composer textarea:focus {
@@ -1070,7 +1070,7 @@ textarea:disabled {
   }
 
   .composer textarea {
-    min-height: 48px;
+    min-height: 36px;
   }
 
   .message {

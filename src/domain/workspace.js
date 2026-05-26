@@ -144,6 +144,16 @@ export async function deleteProject(name) {
   if (!existing.isDirectory() || existing.isSymbolicLink()) {
     throw Object.assign(new Error("Project must be a real folder inside /workspace"), { status: 409 });
   }
-  await rm(projectPath, { recursive: true, force: false });
+  try {
+    await rm(projectPath, { recursive: true, force: true });
+  } catch (error) {
+    if (error.code === "EACCES" || error.code === "EPERM") {
+      throw Object.assign(
+        new Error(`Could not delete "${project}": some files are owned by another user${error.path ? ` (${error.path})` : ""}. Remove them manually.`),
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
   return { project };
 }

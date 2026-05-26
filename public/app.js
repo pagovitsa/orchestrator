@@ -844,11 +844,34 @@ function createMessageElement(message) {
   return article;
 }
 
+const URL_PATTERN = /(https?:\/\/[^\s<>()]+)/g;
+
+// Appends text to a node, turning http(s) URLs into target=_blank links. Built via DOM nodes only
+// (no innerHTML) and limited to http/https, so message content cannot inject markup.
+function appendLinkified(container, value) {
+  const text = String(value ?? "");
+  let lastIndex = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const url = match[0].replace(/[.,;:!?)'"\]]+$/, "");
+    if (match.index > lastIndex) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+    }
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = url;
+    container.appendChild(link);
+    lastIndex = match.index + url.length;
+  }
+  if (lastIndex < text.length) container.appendChild(document.createTextNode(text.slice(lastIndex)));
+}
+
 function renderMessageBody(body, message) {
   body.innerHTML = "";
 
   const text = document.createElement("span");
-  text.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
+  appendLinkified(text, message.content || message.status || (message.streaming ? "Starting..." : ""));
   body.appendChild(text);
 
   if (!message.streaming && !message.trace?.length) return;
