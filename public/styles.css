@@ -364,6 +364,33 @@ input {
   overflow-wrap: anywhere;
 }
 
+.message-trace {
+  margin-top: 10px;
+  border: 1px solid #2f383d;
+  border-radius: 8px;
+  background: #080a0b;
+  overflow: hidden;
+}
+
+.message-trace-label {
+  border-bottom: 1px solid #253036;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.message-trace pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  color: #cbd7d2;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .message-attachment-list,
 .selected-attachment-list {
   display: flex;

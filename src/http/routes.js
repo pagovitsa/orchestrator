@@ -71,9 +71,12 @@ async function handleStreamMessage(req, res, id) {
     transcript += content;
     writeStreamEvent(res, { type: "chunk", stream, content });
   };
+  const onTrace = ({ stream = "trace", content }) => {
+    writeStreamEvent(res, { type: "trace", stream, content, at: new Date().toISOString() });
+  };
 
   try {
-    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { onOutput });
+    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { onOutput, onTrace });
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,

@@ -761,8 +761,30 @@ function createMessageElement(message) {
 
   head.append(who, when);
   article.append(head, body);
+  renderMessageTrace(article, message.trace);
   if (message.attachments?.length) article.append(createAttachmentList(message.attachments, false));
   return article;
+}
+
+function renderMessageTrace(article, trace = []) {
+  let traceBox = article.querySelector(".message-trace");
+  if (!trace?.length) {
+    traceBox?.remove();
+    return;
+  }
+  if (!traceBox) {
+    traceBox = document.createElement("div");
+    traceBox.className = "message-trace";
+    const label = document.createElement("div");
+    label.className = "message-trace-label";
+    label.textContent = "Terminal";
+    const pre = document.createElement("pre");
+    traceBox.append(label, pre);
+    article.appendChild(traceBox);
+  }
+  const pre = traceBox.querySelector("pre");
+  pre.textContent = trace.join("");
+  pre.scrollTop = pre.scrollHeight;
 }
 
 function updateLastMessage(message) {
@@ -778,6 +800,7 @@ function updateLastMessage(message) {
   const body = last.querySelector(".message-body");
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
   if (body) body.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
+  renderMessageTrace(last, message.trace);
   scrollMessagesToBottom();
 }
 
@@ -989,6 +1012,7 @@ async function sendMessage(content, files = []) {
     supervisor,
     content: "",
     status: "Starting...",
+    trace: [],
     at: new Date().toISOString(),
     streaming: true,
   };
@@ -1030,9 +1054,19 @@ async function sendMessage(content, files = []) {
         assistantDraft.content += event.content;
         updateLastMessage(assistantDraft);
       },
+      trace(event) {
+        assistantDraft.trace.push(String(event.content || ""));
+        let totalChars = assistantDraft.trace.reduce((total, item) => total + item.length, 0);
+        while (assistantDraft.trace.length > 1 && totalChars > 60000) {
+          totalChars -= assistantDraft.trace.shift().length;
+        }
+        updateLastMessage(assistantDraft);
+      },
       done(event) {
         assistantDraft.streaming = false;
         state.currentSession = event.session;
+        const last = state.currentSession.messages.at(-1);
+        if (last) last.trace = assistantDraft.trace;
         renderMessages();
         syncComposerState();
         setWorkspaceStatus();
@@ -1040,6 +1074,8 @@ async function sendMessage(content, files = []) {
       error(event) {
         assistantDraft.streaming = false;
         state.currentSession = event.session || state.currentSession;
+        const last = state.currentSession?.messages?.at(-1);
+        if (last) last.trace = assistantDraft.trace;
         setStatus(`Error: ${event.error}`);
         renderMessages();
         syncComposerState();
