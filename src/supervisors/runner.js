@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { paths, runtime, supervisorPeers, supervisors } from "../config/env.js";
 import { loadPrompt } from "../domain/prompts.js";
 import { resolveCwd, requireScopedCwd } from "../domain/workspace.js";
@@ -405,13 +405,26 @@ async function callClaude(session, prompt, options = {}) {
   return cliResult(result);
 }
 
+// The flag that loads our generated profile config file varies by codex version (older builds drop
+// --profile-v2 and use --profile). Detect it once from `codex exec --help`.
+let codexProfileFlag = null;
+function detectCodexProfileFlag() {
+  if (codexProfileFlag) return Promise.resolve(codexProfileFlag);
+  return new Promise((resolve) => {
+    execFile("codex", ["exec", "--help"], { timeout: 5000 }, (_error, stdout = "", stderr = "") => {
+      codexProfileFlag = /--profile-v2\b/.test(`${stdout}\n${stderr}`) ? "--profile-v2" : "--profile";
+      resolve(codexProfileFlag);
+    });
+  });
+}
+
 async function callCodex(session, prompt, options = {}) {
   const scoped = options.enablePeerMcp === false
     ? { scopedCwd: requireScopedCwd(session.cwd), codexProfile: null }
     : await writeScopedPeerConfigs(session);
   tracePeerSetup(session, scoped, options);
   const args = ["exec", "--skip-git-repo-check", "-C", scoped.scopedCwd];
-  if (options.enablePeerMcp !== false) args.push("--profile-v2", scoped.codexProfile);
+  if (options.enablePeerMcp !== false) args.push(await detectCodexProfileFlag(), scoped.codexProfile);
   if (process.env.CODEX_MODEL) args.push("--model", process.env.CODEX_MODEL);
   if (runtime.allowWrite) args.push("--dangerously-bypass-approvals-and-sandbox");
   else args.push("--sandbox", "read-only");
