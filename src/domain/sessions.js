@@ -6,6 +6,7 @@ import { requireScopedCwd, resolveCwd, listProjects } from "./workspace.js";
 
 const rememberDirName = ".remember";
 const rememberFileName = "orchestrator-chat.json";
+const sessionLocks = new Map();
 
 export async function ensureSessionStore() {
   // Project conversations live inside each project. There is no central chat-session store.
@@ -29,6 +30,17 @@ async function readRememberFile(cwd) {
   }
 }
 
+async function withSessionLock(cwd, task) {
+  const key = cwd || ".";
+  const previous = sessionLocks.get(key) || Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const marker = run.catch(() => {});
+  sessionLocks.set(key, marker);
+  return run.finally(() => {
+    if (sessionLocks.get(key) === marker) sessionLocks.delete(key);
+  });
+}
+
 function normalizeProjectSession(session, cwd) {
   const project = projectLabel(cwd);
   return {
@@ -42,6 +54,29 @@ function normalizeProjectSession(session, cwd) {
     updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
     messages: Array.isArray(session.messages) ? session.messages : [],
   };
+}
+
+function messageKey(message) {
+  return JSON.stringify({
+    role: message.role,
+    supervisor: message.supervisor || "",
+    at: message.at || "",
+    content: message.content || "",
+    modelContent: message.modelContent || "",
+    error: Boolean(message.error),
+  });
+}
+
+function mergeMessages(existing = [], incoming = []) {
+  const merged = [];
+  const seen = new Set();
+  for (const message of [...existing, ...incoming]) {
+    const key = messageKey(message);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(message);
+  }
+  return merged.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
 }
 
 export async function loadSession(id) {
@@ -58,14 +93,26 @@ export async function loadSession(id) {
 }
 
 export async function saveSession(session) {
-  session.schemaVersion = 1;
-  session.project = projectLabel(session.cwd);
-  session.title = session.project;
-  session.updatedAt = new Date().toISOString();
+  return withSessionLock(session.cwd, async () => {
+    const cwd = session.cwd || ".";
+    const existing = await readRememberFile(cwd);
+    const normalized = normalizeProjectSession(session, cwd);
+    const saved = {
+      ...normalized,
+      id: existing?.id || normalized.id,
+      createdAt: existing?.createdAt || normalized.createdAt,
+      messages: mergeMessages(existing?.messages, normalized.messages),
+      updatedAt: new Date().toISOString(),
+    };
+    saved.project = projectLabel(cwd);
+    saved.title = saved.project;
 
-  const filePath = rememberPathForCwd(session.cwd);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(session, null, 2), "utf8");
+    const filePath = rememberPathForCwd(cwd);
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, JSON.stringify(saved, null, 2), "utf8");
+    Object.assign(session, saved);
+    return session;
+  });
 }
 
 export async function listSessions() {

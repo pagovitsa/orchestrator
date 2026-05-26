@@ -81,6 +81,12 @@ function tracePeerSetup(session, scoped, options) {
   emitTrace(options, `[${session.supervisor}] PAL MCP attached: ${peers.map((peer) => `pal-${peer}`).join(", ") || "(none)"}`);
 }
 
+function sanitizedProcessEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY"]) delete env[key];
+  return { ...env, ...extra };
+}
+
 function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, stdoutHandler, signal }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
@@ -88,12 +94,13 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
     emitTrace(traceOptions, `[cwd] ${cwd}`);
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: sanitizedProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let stdinError = "";
     const timer = setTimeout(() => {
       timedOut = true;
       emitTrace(traceOptions, `[timeout] command exceeded ${runtime.timeoutMs}ms; terminating`);
@@ -117,6 +124,12 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
       stderr += text;
       emitTrace(traceOptions, `[stderr] ${text}`, "stderr");
     });
+    child.stdin.on("error", (error) => {
+      stdinError = error.message || String(error);
+      stderr = `${stderr}\nstdin: ${stdinError}`.trim();
+      emitTrace(traceOptions, `[stdin error] ${stdinError}`, "stderr");
+      child.kill("SIGTERM");
+    });
     child.on("error", (error) => {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", abort);
@@ -127,9 +140,16 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", abort);
       emitTrace(traceOptions, `[exit] code=${code}${timedOut ? " timed out" : ""}`);
-      resolve({ ok: code === 0 && !timedOut, stdout, stderr, code, timedOut });
+      resolve({ ok: code === 0 && !timedOut && !stdinError, stdout, stderr, code, timedOut });
     });
-    child.stdin.end(input);
+    try {
+      child.stdin.end(input);
+    } catch (error) {
+      stdinError = error.message || String(error);
+      stderr = `${stderr}\nstdin: ${stdinError}`.trim();
+      emitTrace(traceOptions, `[stdin error] ${stdinError}`, "stderr");
+      child.kill("SIGTERM");
+    }
   });
 }
 
@@ -303,10 +323,10 @@ async function callGemini(session, prompt, options = {}) {
   tracePeerSetup(session, scoped, options);
   const args = ["--skip-trust", "--output-format", "text"];
   if (process.env.GEMINI_MODEL) args.push("--model", process.env.GEMINI_MODEL);
-  args.push("--approval-mode", runtime.allowWrite ? "yolo" : "plan", "--prompt", prompt);
+  args.push("--approval-mode", runtime.allowWrite ? "yolo" : "plan", "--prompt", "");
   const result = await runCommand("gemini", args, {
     cwd: scoped.scopedCwd,
-    input: "",
+    input: prompt,
     env: {
       GEMINI_CLI_TRUST_WORKSPACE: "true",
       ...(options.enablePeerMcp === false ? {} : { GEMINI_CLI_SYSTEM_SETTINGS_PATH: scoped.geminiConfigPath }),
@@ -355,7 +375,7 @@ async function callDeepSeekPlain(messages, options = {}) {
     signal: options.signal,
   });
   if (!response.ok) throw new Error(`DeepSeek API ${response.status}: ${await response.text()}`);
-  if (shouldStream) return readDeepSeekStream(response.body, options.onOutput);
+  if (shouldStream) return readDeepSeekStream(response.body, options);
   const parsed = JSON.parse(await response.text());
   return parsed.choices?.[0]?.message?.content?.trim() || "";
 }
@@ -424,7 +444,17 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
     toolMessages.push(message);
     for (const toolCall of toolCalls) {
       const toolName = toolCall.function?.name || "";
-      const args = JSON.parse(toolCall.function?.arguments || "{}");
+      let args = {};
+      try {
+        args = JSON.parse(toolCall.function?.arguments || "{}");
+      } catch (error) {
+        toolMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: `Invalid tool arguments for ${toolName}: ${error.message}`,
+        });
+        continue;
+      }
       const prompt = String(args.prompt || "").trim();
       if (!prompt) throw new Error(`${toolName} requires a prompt`);
       emitTrace(options, `[deepseek] ${toolName} -> running peer delegate`);
@@ -449,7 +479,7 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
   throw new Error(`Unknown peer: ${peer}`);
 }
 
-async function readDeepSeekStream(body, onOutput) {
+async function readDeepSeekStream(body, options = {}) {
   let answer = "";
   let buffer = "";
   const decoder = new TextDecoder();
@@ -459,10 +489,16 @@ async function readDeepSeekStream(body, onOutput) {
     if (!line.startsWith("data:")) return;
     const data = line.slice(5).trim();
     if (!data || data === "[DONE]") return;
-    const delta = JSON.parse(data).choices?.[0]?.delta?.content || "";
+    let delta = "";
+    try {
+      delta = JSON.parse(data).choices?.[0]?.delta?.content || "";
+    } catch (error) {
+      emitTrace(options, `[deepseek] ignored malformed stream line: ${error.message}`, "stderr");
+      return;
+    }
     if (delta) {
       answer += delta;
-      onOutput({ stream: "stdout", content: delta });
+      options.onOutput?.({ stream: "stdout", content: delta });
     }
   };
 

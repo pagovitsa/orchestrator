@@ -1,12 +1,50 @@
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { lstat, mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime } from "../config/env.js";
 
+let cachedWorkspaceRealRoot = "";
+
+function isInside(candidate, root) {
+  return candidate === root || candidate.startsWith(`${root}${path.sep}`);
+}
+
+function workspaceRealRoot() {
+  if (!cachedWorkspaceRealRoot) cachedWorkspaceRealRoot = realpathSync.native(paths.workspaceRoot);
+  return cachedWorkspaceRealRoot;
+}
+
+function nearestExistingRealPath(candidate) {
+  let current = candidate;
+  for (;;) {
+    try {
+      return realpathSync.native(current);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+}
+
 export function resolveCwd(cwd = ".") {
   const resolved = path.resolve(paths.workspaceRoot, cwd || ".");
-  if (resolved !== paths.workspaceRoot && !resolved.startsWith(`${paths.workspaceRoot}${path.sep}`)) {
+  if (!isInside(resolved, paths.workspaceRoot)) {
     throw Object.assign(new Error("cwd must stay inside /workspace"), { status: 400 });
   }
+
+  try {
+    const realRoot = workspaceRealRoot();
+    const realResolved = nearestExistingRealPath(resolved);
+    if (!isInside(realResolved, realRoot)) {
+      throw Object.assign(new Error("cwd must stay inside /workspace"), { status: 400 });
+    }
+  } catch (error) {
+    if (error.status) throw error;
+    if (error.code !== "ENOENT") throw error;
+  }
+
   return resolved;
 }
 
@@ -44,10 +82,11 @@ export async function ensureProject(name) {
     return { project, created: true };
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
-    const existing = await stat(projectPath);
-    if (!existing.isDirectory()) {
+    const existing = await lstat(projectPath);
+    if (!existing.isDirectory() || existing.isSymbolicLink()) {
       throw Object.assign(new Error("A non-folder item already exists with that name"), { status: 409 });
     }
+    resolveCwd(project);
     return { project, created: false };
   }
 }

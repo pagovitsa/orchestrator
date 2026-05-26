@@ -27,9 +27,18 @@ export async function readBody(req) {
   }
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throw Object.assign(new Error("Invalid JSON request body"), { status: 400 });
+  }
 }
 
 export function writeStreamEvent(res, event) {
-  res.write(`${JSON.stringify(event)}\n`);
+  if (res.destroyed || res.writableEnded) return false;
+  try {
+    return res.write(`${JSON.stringify(event)}\n`);
+  } catch {
+    return false;
+  }
 }

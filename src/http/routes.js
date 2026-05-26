@@ -66,6 +66,15 @@ async function handleStreamMessage(req, res, id) {
   });
   writeStreamEvent(res, { type: "session", session });
 
+  const abortController = new AbortController();
+  let completed = false;
+  let clientClosed = false;
+  res.on("close", () => {
+    if (completed) return;
+    clientClosed = true;
+    abortController.abort();
+  });
+
   let transcript = "";
   const onOutput = ({ stream, content }) => {
     transcript += content;
@@ -76,7 +85,11 @@ async function handleStreamMessage(req, res, id) {
   };
 
   try {
-    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { onOutput, onTrace });
+    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
+      onOutput,
+      onTrace,
+      signal: abortController.signal,
+    });
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
@@ -86,6 +99,7 @@ async function handleStreamMessage(req, res, id) {
     await saveSession(session);
     writeStreamEvent(res, { type: "done", session, message: session.messages.at(-1) });
   } catch (error) {
+    if (clientClosed && abortController.signal.aborted) return;
     const details = error.message || String(error);
     session.messages.push({
       role: "assistant",
@@ -97,14 +111,20 @@ async function handleStreamMessage(req, res, id) {
     await saveSession(session);
     writeStreamEvent(res, { type: "error", error: details, session, message: session.messages.at(-1) });
   } finally {
-    res.end();
+    completed = true;
+    if (!res.writableEnded && !res.destroyed) res.end();
   }
 }
 
 async function handleJsonMessage(req, res, id) {
+  const abortController = new AbortController();
+  let completed = false;
+  res.on("close", () => {
+    if (!completed) abortController.abort();
+  });
   const session = await loadSession(id);
   const modelContent = await appendUserMessage(session, await readBody(req));
-  const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent);
+  const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { signal: abortController.signal });
   session.messages.push({
     role: "assistant",
     supervisor: session.supervisor,
@@ -112,6 +132,7 @@ async function handleJsonMessage(req, res, id) {
     at: new Date().toISOString(),
   });
   await saveSession(session);
+  completed = true;
   return sendJson(res, 200, { session, message: session.messages.at(-1) });
 }
 

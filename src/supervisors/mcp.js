@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { disabledTools, paths, runtime, supervisorPeers, supervisors } from "../config/env.js";
 import { tomlArray, tomlString } from "../utils/format.js";
@@ -25,7 +25,6 @@ function basePalEnv(scopedCwd) {
   return {
     PATH: runtime.pathEnv,
     CUSTOM_API_URL: "https://api.deepseek.com/v1",
-    CUSTOM_API_KEY: runtime.deepseekApiKey,
     CUSTOM_MODELS_CONFIG_PATH: paths.deepseekModelsFile,
     DEFAULT_MODEL: "deepseek-v4-pro",
     LOG_LEVEL: "INFO",
@@ -33,10 +32,24 @@ function basePalEnv(scopedCwd) {
   };
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 export function peerServerConfig(peer, cwd, { scoped = true } = {}) {
   const env = basePalEnv(scoped ? cwd : "");
   if (peer === "deepseek") {
     env.DISABLED_TOOLS = disabledTools.deepseekPeer;
+    env.ORCH_DEEPSEEK_KEY_FILE = path.join(paths.secretsDir, "deepseek-api-key");
+    return {
+      command: "bash",
+      args: [
+        "-lc",
+        `CUSTOM_API_KEY="$(cat "$ORCH_DEEPSEEK_KEY_FILE" 2>/dev/null || true)"; export CUSTOM_API_KEY; exec python3 ${shellQuote(paths.palServerFile)}`,
+      ],
+      cwd,
+      env,
+    };
   } else {
     env.GEMINI_CLI_TRUST_WORKSPACE = "true";
     env.DISABLED_TOOLS = disabledTools.cliPeer;
@@ -95,11 +108,21 @@ export async function writeScopedPeerConfigs(session) {
   return { scopedCwd, claudeConfigPath, geminiConfigPath, codexProfile };
 }
 
+async function clearGeneratedPeerConfigs() {
+  await rm(path.join(paths.mcpConfigDir, "sessions"), { recursive: true, force: true });
+  const codexDir = path.join(paths.homeDir, ".codex");
+  const entries = await readdir(codexDir).catch(() => []);
+  await Promise.all(entries
+    .filter((name) => name.startsWith("orch-pal-") && name.endsWith(".config.toml"))
+    .map((name) => rm(path.join(codexDir, name), { force: true })));
+}
+
 export async function writeStartupPeerConfigs() {
   await mkdir(path.join(paths.homeDir, ".claude"), { recursive: true });
   await mkdir(path.join(paths.homeDir, ".codex"), { recursive: true });
   await mkdir(path.join(paths.homeDir, ".gemini"), { recursive: true });
   await mkdir(paths.mcpConfigDir, { recursive: true });
+  await clearGeneratedPeerConfigs();
 
   const globalCwd = paths.palServerRoot;
   const cliSupervisors = Object.keys(supervisors).filter((supervisor) => supervisor !== "deepseek");

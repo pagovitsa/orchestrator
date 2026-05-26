@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime, supervisors } from "../config/env.js";
 import { writeStartupPeerConfigs } from "../supervisors/mcp.js";
@@ -86,7 +86,7 @@ async function writeGeminiOAuthSettings() {
 
 function runStatusCommand(command, args) {
   return new Promise((resolve) => {
-    execFile(command, args, { timeout: 5000 }, (error, stdout = "", stderr = "") => {
+    execFile(command, args, { timeout: 5000, env: sanitizedProcessEnv() }, (error, stdout = "", stderr = "") => {
       resolve({ ok: !error, stdout, stderr });
     });
   });
@@ -116,10 +116,16 @@ function stripAnsi(text) {
     .replace(/\u001B[PX^_].*?\u001B\\/gs, "");
 }
 
-function appendJobOutput(job, stream, chunk) {
+function sanitizedProcessEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY"]) delete env[key];
+  return { ...env, ...extra };
+}
+
+function appendJobOutput(job, stream, chunk, { force = false } = {}) {
   const text = stripAnsi(chunk.toString("utf8"));
   if (!text) return;
-  if (job.status !== "running") return;
+  if (job.status !== "running" && !force) return;
   job.output = `${job.output}${text}`;
   if (job.output.length > MAX_OUTPUT_CHARS) job.output = job.output.slice(-MAX_OUTPUT_CHARS);
   job.updatedAt = new Date().toISOString();
@@ -128,8 +134,38 @@ function appendJobOutput(job, stream, chunk) {
     job.status = "done";
     job.exitCode = 0;
     job.output = job.successOutput || job.output;
-    job.child?.stdin?.write("/quit\n");
+    try {
+      safeWriteJobInput(job, "/quit\n", { markFailed: false });
+    } catch {
+      // The CLI may have already closed after successful login.
+    }
     setTimeout(() => job.child?.kill("SIGTERM"), 1200).unref();
+  }
+}
+
+function failJob(job, error) {
+  const message = error?.message || String(error || "Connection job failed");
+  job.status = "failed";
+  job.error = message;
+  job.updatedAt = new Date().toISOString();
+  appendJobOutput(job, "stderr", `\n${message}\n`, { force: true });
+}
+
+function safeWriteJobInput(job, text, { markFailed = true } = {}) {
+  if (!job.child?.stdin?.writable) {
+    const error = Object.assign(new Error("Connection job is not accepting input"), { status: 409 });
+    if (markFailed && job.status === "running") failJob(job, error);
+    throw error;
+  }
+  try {
+    job.child.stdin.write(text, (error) => {
+      if (!error) return;
+      if (markFailed && job.status === "running") failJob(job, error);
+      else appendJobOutput(job, "stderr", `\nstdin: ${error.message || error}\n`, { force: true });
+    });
+  } catch (error) {
+    if (markFailed && job.status === "running") failJob(job, error);
+    throw error;
   }
 }
 
@@ -184,10 +220,9 @@ function clearJobsFor(connectionId) {
   }
 }
 
-async function resetDirectory(dir) {
+async function removeAuthFiles(dir, names) {
   await mkdir(dir, { recursive: true });
-  const entries = await readdir(dir, { withFileTypes: true });
-  await Promise.all(entries.map((entry) => rm(path.join(dir, entry.name), { recursive: true, force: true })));
+  await Promise.all(names.map((name) => rm(path.join(dir, name), { recursive: true, force: true })));
 }
 
 async function saveDeepSeekKey(apiKey) {
@@ -286,8 +321,6 @@ export async function startConnection(id, body = {}) {
   const existing = runningJobFor(id);
   if (existing) return { job: publicJob(existing) };
 
-  await connector.beforeStart?.();
-
   const now = new Date().toISOString();
   const job = {
     id: randomUUID(),
@@ -305,19 +338,28 @@ export async function startConnection(id, body = {}) {
   };
   jobs.set(job.id, job);
 
+  try {
+    await connector.beforeStart?.();
+  } catch (error) {
+    failJob(job, error);
+    return { job: publicJob(job) };
+  }
+
   const child = spawn(connector.command || id, connector.args, {
     cwd: paths.workspaceRoot,
-    env: { ...process.env, ...(connector.env || {}) },
+    env: sanitizedProcessEnv(connector.env || {}),
     stdio: ["pipe", "pipe", "pipe"],
   });
   job.child = child;
 
   child.stdout.on("data", (chunk) => appendJobOutput(job, "stdout", chunk));
   child.stderr.on("data", (chunk) => appendJobOutput(job, "stderr", chunk));
+  child.stdin.on("error", (error) => {
+    if (job.status === "running") failJob(job, error);
+    else appendJobOutput(job, "stderr", `\nstdin: ${error.message || error}\n`, { force: true });
+  });
   child.on("error", (error) => {
-    job.status = "failed";
-    job.error = error.message;
-    appendJobOutput(job, "stderr", `\n${error.message}\n`);
+    failJob(job, error);
     job.child = null;
   });
   child.on("close", (code) => {
@@ -345,7 +387,12 @@ export async function disconnectConnection(id) {
     codex: path.join(paths.homeDir, ".codex"),
     gemini: path.join(paths.homeDir, ".gemini"),
   };
-  await resetDirectory(authDirs[id]);
+  const authFiles = {
+    claude: [".credentials.json", "mcp-needs-auth-cache.json"],
+    codex: ["auth.json", "credentials.json", "session.json"],
+    gemini: ["oauth_creds.json", "google_accounts.json", "credentials.json", "auth.json"],
+  };
+  await removeAuthFiles(authDirs[id], authFiles[id] || []);
   await writeStartupPeerConfigs();
 
   return { disconnected: true, connections: await connectionStatus() };
@@ -365,7 +412,7 @@ export function sendConnectionJobInput(id, input) {
   }
   const text = String(input || "");
   if (!text) throw Object.assign(new Error("Input is required"), { status: 400 });
-  job.child.stdin.write(text.endsWith("\n") ? text : `${text}\n`);
+  safeWriteJobInput(job, text.endsWith("\n") ? text : `${text}\n`);
   appendJobOutput(job, "stdin", "\n[input sent]\n");
   return publicJob(job);
 }

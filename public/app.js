@@ -1119,15 +1119,25 @@ async function streamApi(path, body, handlers = {}) {
     buffer = lines.pop() || "";
     for (const line of lines) {
       if (!line.trim()) continue;
-      const event = JSON.parse(line);
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        handlers.trace?.({ content: "[client] ignored malformed stream line\n" });
+        continue;
+      }
       handlers[event.type]?.(event);
     }
   }
 
   buffer += decoder.decode();
   if (buffer.trim()) {
-    const event = JSON.parse(buffer);
-    handlers[event.type]?.(event);
+    try {
+      const event = JSON.parse(buffer);
+      handlers[event.type]?.(event);
+    } catch {
+      handlers.trace?.({ content: "[client] ignored malformed final stream line\n" });
+    }
   }
 }
 
