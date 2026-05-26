@@ -198,12 +198,15 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
     let stderr = "";
     let timedOut = false;
     let stdinError = "";
-    const timer = setTimeout(() => {
-      timedOut = true;
-      emitTrace(traceOptions, `[timeout] command exceeded ${runtime.timeoutMs}ms; terminating`);
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-    }, runtime.timeoutMs);
+    // ORCH_TIMEOUT_MS <= 0 means no auto-timeout (long multi-round runs); the user can always stop manually.
+    const timer = runtime.timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          emitTrace(traceOptions, `[timeout] command exceeded ${runtime.timeoutMs}ms; terminating`);
+          child.kill("SIGTERM");
+          setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+        }, runtime.timeoutMs)
+      : null;
     const abort = () => {
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 5000).unref();

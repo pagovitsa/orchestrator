@@ -38,8 +38,9 @@ const server = createServer(async (req, res) => {
 });
 
 // A streaming run can last up to ORCH_TIMEOUT_MS; Node's default 5-min requestTimeout would otherwise
-// abort the chunked response mid-stream (ERR_INCOMPLETE_CHUNKED_ENCODING). Keep it comfortably above.
-server.requestTimeout = runtime.timeoutMs + 120000;
+// abort the chunked response mid-stream (ERR_INCOMPLETE_CHUNKED_ENCODING). Keep it comfortably above,
+// and disable it entirely (0) when the run timeout is disabled.
+server.requestTimeout = runtime.timeoutMs > 0 ? runtime.timeoutMs + 120000 : 0;
 
 server.listen(runtime.port, runtime.listenHost, () => {
   console.log(`orch-ui listening on ${runtime.listenHost}:${runtime.port}`);

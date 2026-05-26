@@ -69,7 +69,7 @@ export const runtime = {
   defaultSupervisor: process.env.ORCH_DEFAULT_SUPERVISOR || "claude",
   allowWrite: envFlag("ORCH_ALLOW_WRITE", false),
   allowWorkspaceRoot: envFlag("ORCH_ALLOW_WORKSPACE_ROOT", false),
-  timeoutMs: envNumber("ORCH_TIMEOUT_MS", 900000),
+  timeoutMs: envNumber("ORCH_TIMEOUT_MS", 10800000), // 3h; 0 = no auto-timeout (stop manually)
   maxUploadBytes: envNumber("ORCH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),
   maxInlineAttachmentChars: envNumber("ORCH_UPLOAD_INLINE_CHARS", 60000),
   networkMode: process.env.ORCH_NETWORK_MODE || "bridge",

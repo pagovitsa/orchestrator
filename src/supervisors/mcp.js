@@ -116,7 +116,7 @@ export async function writeCodexProfile(filePath, servers, heading = "Generated 
       `args = ${tomlArray(server.args)}`,
       `cwd = ${tomlString(server.cwd)}`,
       "startup_timeout_sec = 120",
-      "tool_timeout_sec = 1200",
+      "tool_timeout_sec = 7200",
       `[mcp_servers.${tomlString(name)}.env]`,
     );
     for (const [key, value] of Object.entries(server.env)) lines.push(`${key} = ${tomlString(value)}`);
