@@ -757,7 +757,7 @@ function createMessageElement(message) {
 
   const body = document.createElement("div");
   body.className = "message-body";
-  body.textContent = message.content || (message.streaming ? "Starting..." : "");
+  body.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
 
   head.append(who, when);
   article.append(head, body);
@@ -777,7 +777,7 @@ function updateLastMessage(message) {
   const when = last.querySelector(".message-head span:last-child");
   const body = last.querySelector(".message-body");
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
-  if (body) body.textContent = message.content || (message.streaming ? "Starting..." : "");
+  if (body) body.textContent = message.content || message.status || (message.streaming ? "Starting..." : "");
   scrollMessagesToBottom();
 }
 
@@ -988,6 +988,7 @@ async function sendMessage(content, files = []) {
     role: "assistant",
     supervisor,
     content: "",
+    status: "Starting...",
     at: new Date().toISOString(),
     streaming: true,
   };
@@ -999,6 +1000,17 @@ async function sendMessage(content, files = []) {
   state.busy = true;
   syncComposerState();
   setStatus(files.length ? "Reading files..." : `Running ${supervisor}...`);
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    if (!assistantDraft.streaming || assistantDraft.content) return;
+    const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = elapsedSeconds % 60;
+    const elapsed = minutes ? `${minutes}m ${String(seconds).padStart(2, "0")}s` : `${seconds}s`;
+    assistantDraft.status = `${supervisor} is working... ${elapsed}`;
+    updateLastMessage(assistantDraft);
+    setStatus(`Running ${supervisor}... ${elapsed}`);
+  }, 1000);
 
   try {
     const attachments = await readAttachments(files);
@@ -1014,16 +1026,19 @@ async function sendMessage(content, files = []) {
         syncComposerState();
       },
       chunk(event) {
+        assistantDraft.status = "";
         assistantDraft.content += event.content;
         updateLastMessage(assistantDraft);
       },
       done(event) {
+        assistantDraft.streaming = false;
         state.currentSession = event.session;
         renderMessages();
         syncComposerState();
         setWorkspaceStatus();
       },
       error(event) {
+        assistantDraft.streaming = false;
         state.currentSession = event.session || state.currentSession;
         setStatus(`Error: ${event.error}`);
         renderMessages();
@@ -1035,9 +1050,11 @@ async function sendMessage(content, files = []) {
     setStatus(`Error: ${error.message}`);
     assistantDraft.error = true;
     assistantDraft.streaming = false;
+    assistantDraft.status = "";
     assistantDraft.content = assistantDraft.content || `Error: ${error.message}`;
     updateLastMessage(assistantDraft);
   } finally {
+    clearInterval(heartbeat);
     state.busy = false;
     syncComposerState();
   }
