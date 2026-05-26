@@ -71,6 +71,18 @@ docker compose exec --user node orch-ui gemini
 
 For Gemini, run `/auth` in the interactive prompt if it asks. Put `DEEPSEEK_API_KEY=...` in `.env` for the DeepSeek route.
 
+## CLI Auto Updates
+
+On every container boot, `orch-entrypoint` checks npm for newer Claude/Codex/Gemini CLI packages and installs the configured latest specs before starting the UI server:
+
+```env
+ORCH_AUTO_UPDATE_CLIS=1
+ORCH_CLI_PACKAGE_SPECS=@anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest
+ORCH_CLI_UPDATE_TIMEOUT_SECONDS=120
+```
+
+If npm is unavailable or the check times out, startup continues with the versions baked into the image. Set `ORCH_AUTO_UPDATE_CLIS=0` to keep the baked-in versions only, or replace `ORCH_CLI_PACKAGE_SPECS` with pinned versions if needed.
+
 ## Write Mode
 
 `ORCH_ALLOW_WRITE=1` launches the CLI supervisors in YOLO mode: Claude bypasses permissions, Codex bypasses approvals and sandbox prompts, and Gemini uses `approval-mode yolo`. The selected workspace folder is still passed as the session working directory and the prompt scope.
