@@ -60,6 +60,10 @@ function emitTrace(options, content, stream = "trace") {
   options.onTrace?.({ stream, content: content.endsWith("\n") ? content : `${content}\n` });
 }
 
+function emitUsage(options, usage) {
+  options.onUsage?.(usage);
+}
+
 function redactTraceText(value) {
   return String(value || "")
     .replace(/sk-[A-Za-z0-9_-]{10,}/g, "sk-...redacted")
@@ -323,6 +327,11 @@ function createClaudeStreamParser(options = {}) {
     if (event.type === "rate_limit_event" && event.rate_limit_info) {
       const info = event.rate_limit_info;
       const used = Number.isFinite(info.utilization) ? `${Math.round(info.utilization * 100)}%` : info.status;
+      emitUsage(options, {
+        type: "rate_limit",
+        percent: Number.isFinite(info.utilization) ? info.utilization * 100 : undefined,
+        label: info.rateLimitType || info.status || "Claude rate limit",
+      });
       emitTrace(options, `[claude] rate limit ${info.rateLimitType || ""}: ${used}`.trim());
       return;
     }
@@ -354,6 +363,10 @@ function createClaudeStreamParser(options = {}) {
       const seconds = Number.isFinite(event.duration_ms) ? `${Math.round(event.duration_ms / 100) / 10}s` : "";
       const turns = Number.isFinite(event.num_turns) ? `turns=${event.num_turns}` : "";
       const cost = Number.isFinite(event.total_cost_usd) ? `cost=$${event.total_cost_usd.toFixed(4)}` : "";
+      emitUsage(options, {
+        type: "cost",
+        costUsd: Number.isFinite(event.total_cost_usd) ? event.total_cost_usd : undefined,
+      });
       emitTrace(options, `[claude] completed ${[seconds, turns, cost].filter(Boolean).join(" ")}`.trim());
     }
   };
@@ -430,6 +443,13 @@ async function callCodex(session, prompt, options = {}) {
   else args.push("--sandbox", "read-only");
   args.push("-");
   const result = await runCommand("codex", args, { cwd: scoped.scopedCwd, input: prompt, ...options });
+  const tokenMatch = `${result.stderr}\n${result.stdout}`.match(/tokens used\s*[\r\n\s]+([0-9,]+)/i);
+  if (tokenMatch) {
+    emitUsage(options, {
+      type: "tokens",
+      tokens: Number(tokenMatch[1].replace(/,/g, "")),
+    });
+  }
   return cliResult(result);
 }
 
@@ -488,12 +508,19 @@ async function callDeepSeekPlain(messages, options = {}) {
       temperature: 0.2,
       max_tokens: 8192,
       stream: shouldStream,
+      ...(shouldStream ? { stream_options: { include_usage: true } } : {}),
     }),
     signal: options.signal,
   });
   if (!response.ok) throw new Error(`DeepSeek API ${response.status}: ${await response.text()}`);
   if (shouldStream) return readDeepSeekStream(response.body, options);
   const parsed = JSON.parse(await response.text());
+  if (parsed.usage) {
+    emitUsage(options, {
+      type: "tokens",
+      tokens: parsed.usage.total_tokens,
+    });
+  }
   return parsed.choices?.[0]?.message?.content?.trim() || "";
 }
 
@@ -550,7 +577,14 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
       }
       throw new Error(`DeepSeek API ${response.status}: ${body}`);
     }
-    const message = JSON.parse(body).choices?.[0]?.message || {};
+    const parsed = JSON.parse(body);
+    if (parsed.usage) {
+      emitUsage(options, {
+        type: "tokens",
+        tokens: parsed.usage.total_tokens,
+      });
+    }
+    const message = parsed.choices?.[0]?.message || {};
     const toolCalls = message.tool_calls || [];
     if (!toolCalls.length) {
       const answer = message.content?.trim() || "";
@@ -608,7 +642,14 @@ async function readDeepSeekStream(body, options = {}) {
     if (!data || data === "[DONE]") return;
     let delta = "";
     try {
-      delta = JSON.parse(data).choices?.[0]?.delta?.content || "";
+      const parsed = JSON.parse(data);
+      if (parsed.usage) {
+        emitUsage(options, {
+          type: "tokens",
+          tokens: parsed.usage.total_tokens,
+        });
+      }
+      delta = parsed.choices?.[0]?.delta?.content || "";
     } catch (error) {
       emitTrace(options, `[deepseek] ignored malformed stream line: ${error.message}`, "stderr");
       return;

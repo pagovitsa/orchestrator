@@ -100,10 +100,12 @@ label,
 .model-chip {
   position: relative;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 3px;
   place-items: center;
   width: 38px;
-  height: 38px;
-  min-height: 38px;
+  height: 44px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-2);
@@ -139,7 +141,7 @@ label,
 .model-chip-dot {
   position: absolute;
   right: 5px;
-  bottom: 5px;
+  top: 5px;
   width: 8px;
   height: 8px;
   border: 2px solid var(--panel-2);
@@ -149,6 +151,49 @@ label,
 
 .model-chip.on .model-chip-dot {
   background: var(--accent);
+}
+
+.usage-bars {
+  display: grid;
+  grid-template-columns: repeat(4, 3px);
+  gap: 2px;
+  align-items: end;
+  height: 12px;
+}
+
+.usage-bars span {
+  display: block;
+  width: 3px;
+  border-radius: 999px;
+  background: #394146;
+}
+
+.usage-bars span:nth-child(1) {
+  height: 4px;
+}
+
+.usage-bars span:nth-child(2) {
+  height: 6px;
+}
+
+.usage-bars span:nth-child(3) {
+  height: 9px;
+}
+
+.usage-bars span:nth-child(4) {
+  height: 12px;
+}
+
+.usage-bars .filled {
+  background: var(--soft);
+}
+
+.usage-bars.provider .filled {
+  background: var(--accent);
+}
+
+.usage-bars.active .filled {
+  background: #f4f5f2;
 }
 
 .primary,
@@ -1018,12 +1063,17 @@ textarea:disabled {
 
 @media (max-width: 480px) {
   .icon-button,
-  .model-chip,
   .attachment-menu-button,
   #sendButton {
     width: 36px;
     height: 36px;
     min-height: 36px;
+  }
+
+  .model-chip {
+    width: 36px;
+    height: 42px;
+    min-height: 42px;
   }
 
   .modal-panel {

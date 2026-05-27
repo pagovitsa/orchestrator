@@ -12,6 +12,7 @@ import {
   saveSession,
 } from "../domain/sessions.js";
 import { listPrompts, savePrompts } from "../domain/prompts.js";
+import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
 import {
   connectionStatus,
   disconnectConnection,
@@ -57,6 +58,22 @@ function registerActiveRun(id, session, abortController, mode) {
 function clearActiveRun(id, abortController) {
   const active = activeRuns.get(id);
   if (active?.abortController === abortController) activeRuns.delete(id);
+}
+
+function captureUsage(supervisor) {
+  return (signal) => {
+    recordUsageSignal(supervisor, signal).catch((error) => {
+      console.error(`usage signal failed for ${supervisor}:`, error.message || error);
+    });
+  };
+}
+
+async function safelyRecordUsage(action, task) {
+  try {
+    await task();
+  } catch (error) {
+    console.error(`usage ${action} failed:`, error.message || error);
+  }
 }
 
 function promptSessionWithoutCurrentUser(session) {
@@ -119,6 +136,7 @@ async function handleStreamMessage(req, res, id) {
   });
 
   let transcript = "";
+  let usageStarted = false;
   const onOutput = ({ stream, content }) => {
     transcript += content;
     writeStreamEvent(res, { type: "chunk", stream, content });
@@ -128,9 +146,12 @@ async function handleStreamMessage(req, res, id) {
   };
 
   try {
+    usageStarted = true;
+    await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
     const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
       onOutput,
       onTrace,
+      onUsage: captureUsage(session.supervisor),
       signal: abortController.signal,
     });
     session.messages.push({
@@ -141,8 +162,12 @@ async function handleStreamMessage(req, res, id) {
     });
     await saveSession(session);
     writeStreamEvent(res, { type: "done", session, message: session.messages.at(-1) });
+    await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
   } catch (error) {
-    if (clientClosed && abortController.signal.aborted) return;
+    if (clientClosed && abortController.signal.aborted) {
+      if (usageStarted) await safelyRecordUsage(`stop for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { stopped: true }));
+      return;
+    }
     const stopped = abortController.signal.aborted;
     const details = stopped ? runStopReason(abortController.signal) : (error.message || String(error));
     session.messages.push({
@@ -157,6 +182,9 @@ async function handleStreamMessage(req, res, id) {
     });
     await saveSession(session);
     writeStreamEvent(res, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
+    if (usageStarted) {
+      await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: details, stopped }));
+    }
   } finally {
     completed = true;
     clearActiveRun(id, abortController);
@@ -172,9 +200,15 @@ async function handleJsonMessage(req, res, id) {
   });
   const session = await loadSession(id);
   registerActiveRun(id, session, abortController, "json");
+  let usageStarted = false;
   try {
     const modelContent = await appendUserMessage(session, await readBody(req));
-    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, { signal: abortController.signal });
+    usageStarted = true;
+    await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
+    const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
+      signal: abortController.signal,
+      onUsage: captureUsage(session.supervisor),
+    });
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
@@ -182,10 +216,16 @@ async function handleJsonMessage(req, res, id) {
       at: new Date().toISOString(),
     });
     await saveSession(session);
+    await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
     completed = true;
     return sendJson(res, 200, { session, message: session.messages.at(-1) });
   } catch (error) {
-    if (!abortController.signal.aborted) throw error;
+    if (!abortController.signal.aborted) {
+      if (usageStarted) {
+        await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: error.message || String(error) }));
+      }
+      throw error;
+    }
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
@@ -194,6 +234,7 @@ async function handleJsonMessage(req, res, id) {
       stopped: true,
     });
     await saveSession(session);
+    if (usageStarted) await safelyRecordUsage(`stop for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { stopped: true }));
     completed = true;
     return sendJson(res, 200, { session, message: session.messages.at(-1), stopped: true });
   } finally {
@@ -228,6 +269,9 @@ export async function handleApi(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/connections") {
     return sendJson(res, 200, { connections: await connectionStatus() });
+  }
+  if (req.method === "GET" && url.pathname === "/api/usage") {
+    return sendJson(res, 200, { usage: await listUsage() });
   }
   const connectionStartMatch = url.pathname.match(/^\/api\/connections\/([a-z0-9-]+)\/start$/);
   if (connectionStartMatch && req.method === "POST") {

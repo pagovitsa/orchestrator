@@ -9,6 +9,7 @@ const state = {
   connectionPollers: {},
   connectionInputs: {},
   focusedConnectionInput: null,
+  usage: [],
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
@@ -47,7 +48,10 @@ async function updateWakeLock() {
   }
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") updateWakeLock();
+  if (document.visibilityState === "visible") {
+    updateWakeLock();
+    refreshUsage();
+  }
 });
 
 const el = {
@@ -341,10 +345,11 @@ function renderModelStatus(connections = state.connections) {
   el.status.innerHTML = "";
   el.status.title = state.statusText;
   for (const connection of connections) {
+    const usage = usageForModel(connection.id);
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = `model-chip ${connection.connected ? "on" : "off"}`;
-    chip.title = `${connection.label}: ${connection.connected ? "on" : "off"}`;
+    chip.title = usageTitle(connection, usage);
     chip.setAttribute("aria-label", chip.title);
 
     const icon = document.createElement("span");
@@ -355,10 +360,57 @@ function renderModelStatus(connections = state.connections) {
     dot.className = "model-chip-dot";
     dot.setAttribute("aria-hidden", "true");
 
-    chip.append(icon, dot);
+    chip.append(icon, createUsageBars(usage), dot);
     chip.addEventListener("click", openConnectModal);
     el.status.appendChild(chip);
   }
+}
+
+function usageForModel(id) {
+  return state.usage.find((item) => item.id === id);
+}
+
+function usageTitle(connection, usage) {
+  const connected = connection.connected ? "on" : "off";
+  if (!usage) return `${connection.label}: ${connected} - usage unknown`;
+  const source = usage.mode === "provider" ? "provider signal" : "observed runs";
+  const parts = [
+    `${connection.label}: ${connected}`,
+    `${usage.percent || 0}% ${source}`,
+    `${usage.runsToday || 0} runs today`,
+  ];
+  if (usage.active) parts.push("running now");
+  if (usage.lastTokens) parts.push(`${usage.lastTokens.toLocaleString()} tokens last seen`);
+  if (usage.lastCostUsd !== null && usage.lastCostUsd !== undefined) parts.push(`last cost $${Number(usage.lastCostUsd).toFixed(4)}`);
+  if (usage.lastKnownLabel) parts.push(usage.lastKnownLabel);
+  return parts.join(" - ");
+}
+
+function createUsageBars(usage) {
+  const percent = Math.max(0, Math.min(100, Number(usage?.percent || 0)));
+  const level = Math.ceil(percent / 25);
+  const bars = document.createElement("span");
+  bars.className = `usage-bars ${usage?.active ? "active" : ""} ${usage?.mode === "provider" ? "provider" : "observed"}`;
+  bars.setAttribute("aria-hidden", "true");
+  for (let index = 1; index <= 4; index += 1) {
+    const bar = document.createElement("span");
+    bar.className = index <= level ? "filled" : "";
+    bars.appendChild(bar);
+  }
+  return bars;
+}
+
+function markLocalUsageActive(supervisor) {
+  if (!supervisor) return;
+  let usage = state.usage.find((item) => item.id === supervisor);
+  if (!usage) {
+    usage = { id: supervisor, percent: 0, mode: "observed", runsToday: 0, active: false };
+    state.usage.push(usage);
+  }
+  usage.active = true;
+  usage.runsToday = (usage.runsToday || 0) + 1;
+  if (usage.mode !== "provider") usage.percent = Math.min(100, (usage.runsToday || 0) * 5);
+  renderModelStatus();
 }
 
 async function openConnectModal() {
@@ -391,14 +443,28 @@ async function refreshConnections() {
 
 async function refreshModelStatus() {
   try {
-    const body = await api("/api/connections");
-    state.connections = body.connections || [];
+    const [connectionBody, usageBody] = await Promise.all([
+      api("/api/connections"),
+      api("/api/usage"),
+    ]);
+    state.connections = connectionBody.connections || [];
+    state.usage = usageBody.usage || [];
     renderModelStatus();
     renderSupervisors();
     updateModalState();
   } catch (error) {
     setStatus(`Connection status error: ${error.message}`);
     renderModelStatus();
+  }
+}
+
+async function refreshUsage() {
+  try {
+    const body = await api("/api/usage");
+    state.usage = body.usage || [];
+    renderModelStatus();
+  } catch (error) {
+    setStatus(`Usage status error: ${error.message}`);
   }
 }
 
@@ -1243,6 +1309,7 @@ async function sendMessage(content, files = []) {
 
   const run = { sessionId: session.id, session, draft, supervisor, streaming: true, stopInFlight: false, heartbeat: null };
   state.runs.set(session.id, run);
+  markLocalUsageActive(supervisor);
   updateWakeLock();
   const viewing = () => isViewing(run.sessionId);
   if (viewing()) renderMessages();
@@ -1338,6 +1405,7 @@ async function sendMessage(content, files = []) {
       },
     });
     await refreshSessions();
+    await refreshUsage();
   } catch (error) {
     draft.error = true;
     draft.streaming = false;
@@ -1354,6 +1422,7 @@ async function sendMessage(content, files = []) {
     updateWakeLock();
     renderSessions();
     if (viewing()) syncComposerState();
+    await refreshUsage();
   }
 }
 
@@ -1517,5 +1586,9 @@ el.fileInput.addEventListener("change", () => {
   el.fileInput.value = "";
   renderSelectedAttachments();
 });
+
+setInterval(() => {
+  if (document.visibilityState === "visible") refreshUsage();
+}, 30000);
 
 init().catch((error) => setStatus(`Init error: ${error.message}`));
