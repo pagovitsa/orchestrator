@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="bcoders AI orchestration logo" width="760">
+</p>
+
 # Orchestrator
 
 [![CI](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml)
