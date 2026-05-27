@@ -1485,6 +1485,12 @@ function projectAutopilotEnabled(project) {
   return project?.autopilotEnabled === true;
 }
 
+function configuredAutopilotFeedLimit() {
+  const value = Number(state.config?.autopilotFeedLimit);
+  if (!Number.isFinite(value)) return 2;
+  return Math.max(0, Math.min(10, Math.round(value)));
+}
+
 async function setProjectAutopilot(project, enabled) {
   const key = projectMenuKey(project);
   if (!key || !project?.id) return;
@@ -1504,6 +1510,27 @@ async function setProjectAutopilot(project, enabled) {
     if (enabled && state.currentSession?.id === project.id) scheduleAutopilot(state.currentSession);
   } catch (error) {
     setStatus(`Autopilot toggle error: ${error.message}`);
+  }
+}
+
+async function clearAutopilotHistoryFromUi(project) {
+  if (!project?.id) return;
+  if (projectIsRunning(project)) {
+    setStatus("Stop the running model before clearing Autopilot activity");
+    return;
+  }
+  const confirmed = window.confirm(`Clear Autopilot activity for "${project.project || project.title || project.cwd || "this project"}"?`);
+  if (!confirmed) return;
+  try {
+    const body = await api(`/api/sessions/${project.id}/autopilot-history`, { method: "DELETE" });
+    if (body.session) {
+      if (state.currentSession?.id === project.id) state.currentSession = body.session;
+      upsertSessionSummary(body.session);
+    }
+    renderSessions();
+    setStatus("Autopilot activity cleared");
+  } catch (error) {
+    setStatus(`Autopilot clear error: ${error.message}`);
   }
 }
 
@@ -1586,6 +1613,7 @@ function openProjectContextMenu(event, project) {
   state.projectMenuProject = project;
   const autopilotOn = projectAutopilotEnabled(project);
   const running = projectIsRunning(project);
+  const hasAutopilotFeed = normalizeAutopilotFeed(project.autopilotFeed, { limit: configuredAutopilotFeedLimit() }).length > 0;
   el.projectContextMenu.innerHTML = "";
 
   const autopilot = document.createElement("button");
@@ -1597,6 +1625,17 @@ function openProjectContextMenu(event, project) {
   autopilot.addEventListener("click", () => {
     closeProjectContextMenu();
     void setProjectAutopilot(project, !autopilotOn);
+  });
+
+  const clearActivity = document.createElement("button");
+  clearActivity.type = "button";
+  clearActivity.role = "menuitem";
+  clearActivity.className = "project-context-item";
+  clearActivity.disabled = !hasAutopilotFeed || running;
+  clearActivity.innerHTML = `<span>Clear activity</span>${running ? "<strong>Running</strong>" : hasAutopilotFeed ? "" : "<strong>Empty</strong>"}`;
+  clearActivity.addEventListener("click", async () => {
+    closeProjectContextMenu();
+    await clearAutopilotHistoryFromUi(project);
   });
 
   const separator = document.createElement("div");
@@ -1613,7 +1652,7 @@ function openProjectContextMenu(event, project) {
     await deleteProjectFromUi(project);
   });
 
-  el.projectContextMenu.append(autopilot, separator, remove);
+  el.projectContextMenu.append(autopilot, clearActivity, separator, remove);
   el.projectContextMenu.hidden = false;
   positionProjectContextMenu(event.clientX, event.clientY);
   autopilot.focus();
@@ -1667,7 +1706,7 @@ function renderSessions() {
     meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs${autopilotLabel}`;
 
     button.append(title, meta);
-    const feed = normalizeAutopilotFeed(session.autopilotFeed);
+    const feed = normalizeAutopilotFeed(session.autopilotFeed, { limit: configuredAutopilotFeedLimit() });
     if (feed.length) {
       const activity = document.createElement("div");
       activity.className = "session-autopilot-feed";
@@ -2583,7 +2622,7 @@ async function sendMessageForSession(targetSession, content, files = [], options
 
 function sessionSummaryFromSession(session) {
   const messages = session?.messages || [];
-  const autopilotFeed = normalizeAutopilotFeed(session.autopilotFeed || []);
+  const autopilotFeed = normalizeAutopilotFeed(session.autopilotFeed || [], { limit: configuredAutopilotFeedLimit() });
   return {
     id: session.id,
     title: session.project || session.title || session.cwd || "New chat",
@@ -2777,6 +2816,12 @@ function handleLiveAutopilot(event) {
     state.autopilotPhases.set(event.sessionId, "running");
     renderSessions();
     setStatus(`${project} autopilot thinking...`);
+    return;
+  }
+  if (event.phase === "history-cleared") {
+    state.autopilotPhases.delete(event.sessionId);
+    renderSessions();
+    if (isViewing(event.sessionId)) setWorkspaceStatus();
     return;
   }
   if (event.phase === "retry") {

@@ -137,17 +137,24 @@ export function appendAutopilotHistory(session, decision) {
     action: decision?.action || "stop",
     kind: decision?.kind || "",
     reason: redactSensitiveText(String(decision?.reason || "")).slice(0, 800),
-    content: String(decision?.content || "").slice(0, 1200),
+    content: redactSensitiveText(String(decision?.content || "")).slice(0, 1200),
   };
   session.autopilotHistory.push(entry);
   session.autopilotHistory = session.autopilotHistory.slice(-50);
   return entry;
 }
 
-export function summarizeAutopilotFeed(history, { limit = 2 } = {}) {
-  if (!Array.isArray(history) || limit <= 0) return [];
+export function autopilotFeedLimit(limit = runtime.autopilotFeedLimit) {
+  const value = Number(limit);
+  if (!Number.isFinite(value)) return 2;
+  return Math.max(0, Math.min(10, Math.round(value)));
+}
+
+export function summarizeAutopilotFeed(history, { limit = runtime.autopilotFeedLimit } = {}) {
+  const max = autopilotFeedLimit(limit);
+  if (!Array.isArray(history) || max <= 0) return [];
   return history
-    .slice(-Math.max(1, Math.round(Number(limit) || 1)))
+    .slice(-max)
     .reverse()
     .map((entry) => ({
       at: String(entry?.at || ""),
@@ -157,10 +164,16 @@ export function summarizeAutopilotFeed(history, { limit = 2 } = {}) {
     }));
 }
 
+export function clearAutopilotHistory(session) {
+  session.autopilotHistory = [];
+  session.autopilotFeed = [];
+  return session;
+}
+
 export function autopilotMemoryArgs(decision) {
   const action = decision?.action || "stop";
   const kind = decision?.kind || action;
-  const reason = String(decision?.reason || "").trim();
+  const reason = redactSensitiveText(String(decision?.reason || "")).trim();
   const text = [`Autopilot ${action}/${kind}`, reason ? `reason: ${reason}` : ""].filter(Boolean).join(" - ");
   return {
     scope: "project",

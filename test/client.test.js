@@ -158,6 +158,8 @@ test("autopilot feed helpers keep sidebar labels compact", () => {
   assert.equal(feed[0].reason.length, 80);
   assert.equal(feed[0].content, undefined);
   assert.equal(autopilotFeedEntryLabel(feed[0], Date.parse("2026-05-27T10:02:00.000Z")), "continue - 2m ago");
+  assert.equal(normalizeAutopilotFeed(feed, { limit: 0 }).length, 0);
+  assert.equal(normalizeAutopilotFeed(feed, { limit: 99 }).length, 2);
   assert.deepEqual(normalizeAutopilotFeed(null), []);
 });
 

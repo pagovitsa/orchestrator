@@ -74,6 +74,7 @@ export const runtime = {
   autopilotIdleWarningMs: envNumber("ORCH_AUTOPILOT_IDLE_WARNING_MS", 60000), // warn 1m before stop
   autopilotRetryAttempts: envNumber("ORCH_AUTOPILOT_RETRY_ATTEMPTS", 3),
   autopilotRetryBackoffMs: envNumber("ORCH_AUTOPILOT_RETRY_BACKOFF_MS", 2000),
+  autopilotFeedLimit: envNumber("ORCH_AUTOPILOT_FEED_LIMIT", 2),
   usagePollIntervalMs: envNumber("ORCH_USAGE_POLL_INTERVAL_MS", 300000), // 5m; 0 = disabled
   budgetWarningUsd: envNumber("ORCH_BUDGET_WARNING_USD", envNumber("ORCH_BUDGET_USD", 0)),
   maxUploadBytes: envNumber("ORCH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),

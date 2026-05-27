@@ -19,7 +19,7 @@ import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../doma
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
 import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
-import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNextWithRetry } from "../domain/autopilot.js";
+import { appendAutopilotHistory, autopilotMemoryArgs, clearAutopilotHistory, decideAutopilotNextWithRetry } from "../domain/autopilot.js";
 import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
 import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../domain/idle-timeout.js";
 import {
@@ -689,6 +689,7 @@ export async function handleApi(req, res, url) {
       devServerHost: runtime.devServerHost,
       previewPorts: runtime.previewPorts,
       maxUploadBytes: runtime.maxUploadBytes,
+      autopilotFeedLimit: runtime.autopilotFeedLimit,
       allowWorkspaceRoot: runtime.allowWorkspaceRoot,
     });
   }
@@ -764,6 +765,23 @@ export async function handleApi(req, res, url) {
     broadcastRunEvent(session.id, "", {
       type: "autopilot",
       phase: "state",
+      project: session.cwd,
+      supervisor: session.supervisor,
+      session,
+      at: new Date().toISOString(),
+    });
+    return sendJson(res, 200, { session });
+  }
+  const autopilotHistoryMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/autopilot-history$/);
+  if (autopilotHistoryMatch && req.method === "DELETE") {
+    if (activeRuns.has(autopilotHistoryMatch[1])) {
+      throw Object.assign(new Error("Stop the running model before clearing Autopilot activity"), { status: 409 });
+    }
+    const existing = await loadSession(autopilotHistoryMatch[1]);
+    const session = await updateSessionForCwd(existing.cwd, (fresh) => clearAutopilotHistory(fresh));
+    broadcastRunEvent(session.id, "", {
+      type: "autopilot",
+      phase: "history-cleared",
       project: session.cwd,
       supervisor: session.supervisor,
       session,

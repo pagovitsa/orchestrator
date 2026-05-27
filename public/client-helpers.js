@@ -75,8 +75,9 @@ export function autopilotStateLabel(autopilotState = {}, enabled = false) {
 }
 
 export function normalizeAutopilotFeed(feed = [], { limit = 2 } = {}) {
-  if (!Array.isArray(feed) || limit <= 0) return [];
-  return feed.slice(0, Math.max(1, Math.round(Number(limit) || 1))).map((entry) => ({
+  const max = Math.max(0, Math.min(10, Math.round(Number(limit) || 0)));
+  if (!Array.isArray(feed) || max <= 0) return [];
+  return feed.slice(0, max).map((entry) => ({
     at: String(entry?.at || ""),
     action: String(entry?.action || "stop").slice(0, 32),
     kind: String(entry?.kind || entry?.action || "stop").slice(0, 32),

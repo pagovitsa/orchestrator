@@ -6,7 +6,9 @@ import path from "node:path";
 import { safeUploadName, isTextAttachment, saveAttachments } from "../src/domain/attachments.js";
 import {
   appendAutopilotHistory,
+  autopilotFeedLimit,
   autopilotMemoryArgs,
+  clearAutopilotHistory,
   decideAutopilotNextWithRetry,
   isRetriableAutopilotError,
   normalizeAutopilotDecision,
@@ -425,26 +427,38 @@ test("autopilot history and memory args are bounded", () => {
 
   assert.equal(session.autopilotHistory.length, 50);
   assert.equal(session.autopilotHistory.at(-1).reason, "next 54");
-  appendAutopilotHistory(session, { action: "stop", kind: "stop", reason: "token=secret-value" });
+  appendAutopilotHistory(session, { action: "stop", kind: "stop", reason: "token=secret-value", content: "password=secret value should not persist" });
   assert.match(session.autopilotHistory.at(-1).reason, /\[redacted\]/i);
-  const memory = autopilotMemoryArgs({ action: "message", kind: "continue", reason: "phase done" });
+  assert.match(session.autopilotHistory.at(-1).content, /\[redacted\]/i);
+  const memory = autopilotMemoryArgs({ action: "message", kind: "continue", reason: "phase done token=secret-value" });
   assert.equal(memory.namespace, "autopilot");
   assert.deepEqual(memory.tags, ["autopilot", "continue"]);
+  assert.match(memory.text, /\[redacted\]/i);
 });
 
-test("autopilot feed summaries are bounded and redacted", () => {
+test("autopilot feed summaries are configurable, bounded, and redacted", () => {
   const feed = summarizeAutopilotFeed([
     { at: "2026-05-27T10:00:00.000Z", action: "message", kind: "continue", reason: "first", content: "hidden" },
     { at: "2026-05-27T10:01:00.000Z", action: "stop", kind: "stop", reason: "password=secret value should not leak" },
     { at: "2026-05-27T10:02:00.000Z", action: "message", kind: "answer", reason: "x".repeat(120) },
-  ]);
+  ], { limit: 3 });
 
-  assert.equal(feed.length, 2);
+  assert.equal(feed.length, 3);
   assert.equal(feed[0].kind, "answer");
   assert.equal(feed[0].reason.length, 80);
   assert.equal(feed[0].content, undefined);
   assert.match(feed[1].reason, /\[redacted\]/i);
+  assert.equal(summarizeAutopilotFeed(feed, { limit: 0 }).length, 0);
+  assert.equal(autopilotFeedLimit(99), 10);
+  assert.equal(autopilotFeedLimit(-1), 0);
   assert.deepEqual(summarizeAutopilotFeed(null), []);
+});
+
+test("clearAutopilotHistory removes persisted feed source", () => {
+  const session = { autopilotHistory: [{ reason: "done" }], autopilotFeed: [{ reason: "done" }] };
+  clearAutopilotHistory(session);
+  assert.deepEqual(session.autopilotHistory, []);
+  assert.deepEqual(session.autopilotFeed, []);
 });
 
 test("autopilot workflow state normalizes and gates runnable states", () => {
