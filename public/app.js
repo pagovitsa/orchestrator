@@ -1,4 +1,4 @@
-import { applyTerminalFlags, createSessionSendGate, messageClassNames, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -1702,10 +1702,12 @@ function createMessageElement(message) {
 
   const who = document.createElement("span");
   who.textContent = message.role === "assistant" ? (message.supervisor || "assistant") : "You";
+  const stateLabel = messageStateLabel(message);
+  if (stateLabel && stateLabel !== "live") who.textContent += ` (${stateLabel})`;
 
   const when = document.createElement("span");
   when.className = "message-time";
-  when.textContent = message.streaming ? "live" : formatDate(message.at);
+  when.textContent = stateLabel === "live" ? "live" : formatDate(message.at);
 
   const body = document.createElement("div");
   body.className = "message-body";
@@ -2485,7 +2487,7 @@ async function sendMessageForSession(targetSession, content, files = [], options
     draft.streaming = false;
     run.streaming = false;
     draft.status = "";
-    draft.content = draft.content || `Error: ${error.message}`;
+    draft.content = appendMessageError(draft.content, error.message);
     if (viewing()) {
       setStatus(`Error: ${error.message}`);
       updateLastMessage(draft);

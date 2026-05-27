@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyTerminalFlags, createSessionSendGate, messageClassNames, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -119,6 +119,18 @@ test("messageClassNames includes stopped and error states", () => {
     messageClassNames({ role: "assistant", streaming: true, error: true, stopped: true }),
     "message assistant streaming error stopped",
   );
+});
+
+test("messageStateLabel exposes terminal state text", () => {
+  assert.equal(messageStateLabel({ error: true, stopped: true }), "error");
+  assert.equal(messageStateLabel({ stopped: true }), "stopped");
+  assert.equal(messageStateLabel({ streaming: true }), "live");
+  assert.equal(messageStateLabel({}), "");
+});
+
+test("appendMessageError keeps partial output visibly marked", () => {
+  assert.equal(appendMessageError("partial answer", "Stream ended before completion"), "partial answer\n\nError: Stream ended before completion");
+  assert.equal(appendMessageError("", "network failed"), "Error: network failed");
 });
 
 test("applyTerminalFlags preserves stopped and error metadata", () => {

@@ -44,6 +44,19 @@ export function messageClassNames(message) {
     .join(" ");
 }
 
+export function messageStateLabel(message) {
+  if (message?.error) return "error";
+  if (message?.stopped) return "stopped";
+  if (message?.streaming) return "live";
+  return "";
+}
+
+export function appendMessageError(content, errorMessage) {
+  const text = String(content || "").trimEnd();
+  const errorText = `Error: ${errorMessage || "Stream failed"}`;
+  return text ? `${text}\n\n${errorText}` : errorText;
+}
+
 export function applyTerminalFlags(target, draft) {
   if (!target || !draft) return;
   if (draft.error) target.error = true;

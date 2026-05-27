@@ -43,6 +43,10 @@ From another PC on the same LAN, open the UI with the host machine IP:
 http://<host-lan-ip>:8787
 ```
 
+## Security and LAN Access
+
+Set `ORCH_AUTH_PASSWORD` before exposing the UI beyond loopback. The server refuses non-loopback or host-network startup without a password. Preview ports are not auth-protected, so keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` for local-only previews or set it to `0.0.0.0` only when the selected preview ports are acceptable on your LAN/Tailscale network.
+
 ## Host Network Mode
 
 On Linux you can run `orch-ui` on the host network instead of Docker bridge/port publishing:
