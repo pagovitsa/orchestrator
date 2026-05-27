@@ -1,3 +1,5 @@
+import { applyTerminalFlags, createSessionSendGate, messageClassNames, readAttachments, streamApi } from "./client-helpers.js";
+
 const state = {
   config: null,
   sessions: [],
@@ -28,6 +30,7 @@ const state = {
   openTimelineCards: new Set(),
   eventSource: null,
   runs: new Map(),
+  pendingSends: createSessionSendGate(),
   statusText: "Ready",
 };
 
@@ -1692,9 +1695,7 @@ function renderMessages({ forceScroll = false } = {}) {
 
 function createMessageElement(message) {
   const article = document.createElement("article");
-  article.className = ["message", message.role, message.streaming ? "streaming" : "", message.error ? "error" : ""]
-    .filter(Boolean)
-    .join(" ");
+  article.className = messageClassNames(message);
 
   const head = document.createElement("div");
   head.className = "message-head";
@@ -2031,9 +2032,7 @@ function updateLastMessage(message) {
     renderMessages();
     return;
   }
-  last.className = ["message", message.role, message.streaming ? "streaming" : "", message.error ? "error" : ""]
-    .filter(Boolean)
-    .join(" ");
+  last.className = messageClassNames(message);
   const when = last.querySelector(".message-time");
   const body = last.querySelector(".message-body");
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
@@ -2079,34 +2078,6 @@ function renderSelectedAttachments() {
   el.attachmentList.innerHTML = "";
   if (!state.selectedFiles.length) return;
   el.attachmentList.appendChild(createAttachmentList(state.selectedFiles, true));
-}
-
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return btoa(binary);
-}
-
-async function fileToAttachment(file) {
-  const buffer = await file.arrayBuffer();
-  return {
-    name: file.name,
-    type: file.type || "application/octet-stream",
-    size: file.size,
-    dataBase64: arrayBufferToBase64(buffer),
-  };
-}
-
-async function readAttachments(files) {
-  const totalBytes = files.reduce((total, file) => total + file.size, 0);
-  if (state.config?.maxUploadBytes && totalBytes > state.config.maxUploadBytes) {
-    throw new Error(`Attached files exceed ${formatBytes(state.config.maxUploadBytes)}`);
-  }
-  return Promise.all(files.map(fileToAttachment));
 }
 
 function setComposerEnabled(enabled) {
@@ -2328,20 +2299,33 @@ function browserContext() {
   };
 }
 
-async function sendMessage(content, files = []) {
+async function sendMessage(content, files = [], options = {}) {
   if (!state.currentSession) {
     setStatus("Create a new chat first");
     await openNewChatModal();
-    return;
+    return false;
   }
-  return sendMessageForSession(state.currentSession, content, files);
+  return sendMessageForSession(state.currentSession, content, files, options);
 }
 
-async function sendMessageForSession(targetSession, content, files = []) {
+async function sendMessageForSession(targetSession, content, files = [], options = {}) {
   const session = targetSession;
-  if (!session?.id) return;
-  if (state.runs.has(session.id)) return; // a run is already streaming for this project
+  if (!session?.id) return false;
   const supervisor = session.supervisor;
+  const viewingSession = () => isViewing(session.id);
+  if (state.runs.has(session.id) || !state.pendingSends.tryStart(session.id)) {
+    if (viewingSession()) setStatus("A run is already in progress");
+    return false;
+  }
+  if (viewingSession()) setStatus(files.length ? "Reading files..." : `Running ${supervisor}...`);
+  let attachments;
+  try {
+    attachments = await readAttachments(files, { maxUploadBytes: state.config?.maxUploadBytes });
+  } catch (error) {
+    state.pendingSends.finish(session.id);
+    if (viewingSession()) setStatus(`Error: ${error.message}`);
+    return false;
+  }
   let autopilotCandidate = null;
   const userMessage = {
     role: "user",
@@ -2362,9 +2346,11 @@ async function sendMessageForSession(targetSession, content, files = []) {
 
   session.messages ||= [];
   session.messages.push(userMessage, draft);
+  options.onAccepted?.();
 
   const run = { sessionId: session.id, session, draft, supervisor, streaming: true, stopInFlight: false, heartbeat: null };
   state.runs.set(session.id, run);
+  state.pendingSends.finish(session.id);
   markLocalUsageActive(supervisor);
   updateWakeLock();
   startTypingSound(run.sessionId);
@@ -2389,7 +2375,6 @@ async function sendMessageForSession(targetSession, content, files = []) {
   }, 1000);
 
   try {
-    const attachments = await readAttachments(files);
     if (viewing()) setStatus(`Running ${supervisor}...`);
     await streamApi(`/api/sessions/${run.sessionId}/messages/stream`, {
       clientId: state.clientId,
@@ -2453,10 +2438,12 @@ async function sendMessageForSession(targetSession, content, files = []) {
       error(event) {
         stopTypingSound(run.sessionId);
         draft.streaming = false;
+        draft.error = true;
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) {
+          applyTerminalFlags(last, draft);
           last.trace = draft.trace;
           last.timeline = draft.timeline;
         }
@@ -2471,10 +2458,12 @@ async function sendMessageForSession(targetSession, content, files = []) {
       stopped(event) {
         stopTypingSound(run.sessionId);
         draft.streaming = false;
+        draft.stopped = true;
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) {
+          applyTerminalFlags(last, draft);
           last.trace = draft.trace;
           last.timeline = draft.timeline;
         }
@@ -2514,51 +2503,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
     await refreshUsage();
     if (autopilotCandidate) scheduleAutopilot(autopilotCandidate);
   }
-}
-
-async function streamApi(path, body, handlers = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.error || `HTTP ${response.status}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        handlers.trace?.({ content: "[client] ignored malformed stream line\n" });
-        continue;
-      }
-      handlers[event.type]?.(event);
-    }
-  }
-
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    try {
-      const event = JSON.parse(buffer);
-      handlers[event.type]?.(event);
-    } catch {
-      handlers.trace?.({ content: "[client] ignored malformed final stream line\n" });
-    }
-  }
+  return true;
 }
 
 function sessionSummaryFromSession(session) {
@@ -2709,6 +2654,7 @@ function finishLiveRun(event) {
     if (event.type === "stopped") draft.stopped = true;
   }
   const last = session.messages?.at(-1);
+  applyTerminalFlags(last, draft);
   if (last && draft?.trace?.length) last.trace = [...draft.trace];
   if (last && draft?.timeline?.length) last.timeline = [...draft.timeline];
   if (run?.heartbeat) clearInterval(run.heartbeat);
@@ -2914,10 +2860,13 @@ el.composer.addEventListener("submit", async (event) => {
   const content = el.messageInput.value.trim();
   const files = [...state.selectedFiles];
   if (!content && !files.length) return;
-  el.messageInput.value = "";
-  state.selectedFiles = [];
-  renderSelectedAttachments();
-  await sendMessage(content, files);
+  await sendMessage(content, files, {
+    onAccepted() {
+      el.messageInput.value = "";
+      state.selectedFiles = [];
+      renderSelectedAttachments();
+    },
+  });
 });
 el.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {

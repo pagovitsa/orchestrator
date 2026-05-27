@@ -566,6 +566,10 @@ input {
   border-color: var(--danger);
 }
 
+.message.stopped {
+  border-color: var(--muted);
+}
+
 .message-head {
   display: flex;
   justify-content: space-between;
