@@ -360,7 +360,7 @@ function renderModelStatus(connections = state.connections) {
     dot.className = "model-chip-dot";
     dot.setAttribute("aria-hidden", "true");
 
-    chip.append(icon, createUsageBars(usage), dot);
+    chip.append(icon, createUsageBars(connection, usage), dot);
     chip.addEventListener("click", openConnectModal);
     el.status.appendChild(chip);
   }
@@ -373,10 +373,10 @@ function usageForModel(id) {
 function usageTitle(connection, usage) {
   const connected = connection.connected ? "on" : "off";
   if (!usage) return `${connection.label}: ${connected} - usage unknown`;
-  const source = usage.mode === "provider" ? "provider signal" : "observed runs";
+  const source = usage.mode === "provider" ? `${usage.percent || 0}% real provider limit` : "real limit unknown";
   const parts = [
     `${connection.label}: ${connected}`,
-    `${usage.percent || 0}% ${source}`,
+    source,
     `${usage.runsToday || 0} runs today`,
   ];
   if (usage.active) parts.push("running now");
@@ -386,11 +386,16 @@ function usageTitle(connection, usage) {
   return parts.join(" - ");
 }
 
-function createUsageBars(usage) {
+function usageLevel(connection, usage) {
   const percent = Math.max(0, Math.min(100, Number(usage?.percent || 0)));
-  const level = Math.ceil(percent / 25);
+  if (usage?.mode === "provider") return Math.ceil(percent / 25);
+  return usage?.active && connection.connected ? 4 : 0;
+}
+
+function createUsageBars(connection, usage) {
+  const level = usageLevel(connection, usage);
   const bars = document.createElement("span");
-  bars.className = `usage-bars ${usage?.active ? "active" : ""} ${usage?.mode === "provider" ? "provider" : "observed"}`;
+  bars.className = `usage-bars ${connection.connected ? "connected" : "disconnected"} ${usage?.active ? "active" : ""} ${usage?.mode === "provider" ? "provider" : "unknown"}`;
   bars.setAttribute("aria-hidden", "true");
   for (let index = 1; index <= 4; index += 1) {
     const bar = document.createElement("span");
@@ -409,7 +414,6 @@ function markLocalUsageActive(supervisor) {
   }
   usage.active = true;
   usage.runsToday = (usage.runsToday || 0) + 1;
-  if (usage.mode !== "provider") usage.percent = Math.min(100, (usage.runsToday || 0) * 5);
   renderModelStatus();
 }
 

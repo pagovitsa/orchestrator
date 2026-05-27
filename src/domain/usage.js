@@ -119,12 +119,11 @@ export async function listUsage() {
     const model = store.models[id] || defaultModelUsage(id);
     const runsToday = model.days?.[today]?.runs || 0;
     const hasKnownPercent = Number.isFinite(model.lastKnownPercent);
-    const observedPercent = Math.min(100, runsToday * 5);
     return {
       id,
       label: supervisors[id].label,
-      percent: hasKnownPercent ? model.lastKnownPercent : observedPercent,
-      mode: hasKnownPercent ? "provider" : "observed",
+      percent: hasKnownPercent ? model.lastKnownPercent : null,
+      mode: hasKnownPercent ? "provider" : "unknown",
       active: Boolean(model.active),
       runsToday,
       totalRuns: model.totalRuns || 0,

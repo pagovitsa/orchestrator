@@ -166,6 +166,7 @@ label,
   width: 3px;
   border-radius: 999px;
   background: #394146;
+  box-shadow: inset 0 0 0 1px #4a5459;
 }
 
 .usage-bars span:nth-child(1) {
@@ -186,6 +187,7 @@ label,
 
 .usage-bars .filled {
   background: var(--soft);
+  box-shadow: none;
 }
 
 .usage-bars.provider .filled {
@@ -194,6 +196,10 @@ label,
 
 .usage-bars.active .filled {
   background: #f4f5f2;
+}
+
+.model-chip.off .usage-bars span {
+  opacity: 0.45;
 }
 
 .primary,
