@@ -3,13 +3,17 @@ import path from "node:path";
 import { paths, runtime, supervisorPeers, supervisors } from "../config/env.js";
 import {
   forgetMemory,
+  memoryNamespaces,
   readMemory,
   rememberMemory,
   updateMemorySummary,
 } from "../domain/memory.js";
 import { loadPrompt } from "../domain/prompts.js";
+import { createTimelineEvent } from "../domain/run-timeline.js";
 import { resolveCwd, requireScopedCwd } from "../domain/workspace.js";
 import { peerRoutingText, writeScopedPeerConfigs } from "./mcp.js";
+
+let timelineSequence = 0;
 
 function compactHistory(messages, limit = 18) {
   return messages
@@ -62,12 +66,8 @@ function browserEnv(context = {}) {
   return env;
 }
 
-function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
-  const history = compactHistory(session.messages || []);
+function runtimeContextText(session, options = {}) {
   return [
-    "SYSTEM PROMPT:",
-    systemPrompt,
-    "",
     `ACTIVE SUPERVISOR: ${session.supervisor}`,
     `MOUNTED WORKSPACE ROOT: ${paths.workspaceRoot}`,
     `ALLOWED SESSION ROOT: ${resolveCwd(session.cwd)}`,
@@ -76,19 +76,50 @@ function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
     "ACCESS POLICY: Read and edit only inside ALLOWED SESSION ROOT. Do not inspect, modify, create, delete, or run commands against sibling folders under /workspace.",
     previewServerInstruction(),
     browserContextInstruction(options.browserContext),
+  ].filter(Boolean).join("\n");
+}
+
+function peerRoutingForPrompt(session, options = {}) {
+  if (options.enablePeerMcp === false) {
+    return [
+      "Peer MCP is disabled for this nested consultation.",
+      "Answer directly from the prompt and do not attempt to call other model peers or MCP tools.",
+    ].join("\n");
+  }
+  return peerRoutingText(session.supervisor);
+}
+
+function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
+  const history = compactHistory(session.messages || []);
+  const sections = [];
+  if (options.includeSystemPrompt !== false) {
+    sections.push("SYSTEM PROMPT:", systemPrompt, "");
+  }
+  sections.push(
+    runtimeContextText(session, options),
     "",
     "PEER MODEL ROUTING:",
-    peerRoutingText(session.supervisor),
+    peerRoutingForPrompt(session, options),
     "",
     history ? `SESSION HISTORY:\n${history}\n` : "SESSION HISTORY:\n(empty)\n",
     "NEW USER MESSAGE:",
     userContent,
-  ].join("\n");
+  );
+  return sections.join("\n");
 }
 
 function emitTrace(options, content, stream = "trace") {
   if (!content) return;
   options.onTrace?.({ stream, content: content.endsWith("\n") ? content : `${content}\n` });
+}
+
+function nextTimelineId(prefix) {
+  timelineSequence += 1;
+  return `${prefix}-${Date.now().toString(36)}-${timelineSequence}`;
+}
+
+function emitTimeline(options, event) {
+  options.onTask?.(createTimelineEvent(event));
 }
 
 function emitUsage(options, usage) {
@@ -139,12 +170,33 @@ function formatCommand(command, args) {
 
 function tracePeerSetup(session, scoped, options) {
   emitTrace(options, `[${session.supervisor}] workspace: ${scoped.scopedCwd}`);
+  emitTimeline(options, {
+    id: nextTimelineId("setup"),
+    kind: "model",
+    status: "info",
+    title: `${session.supervisor} workspace`,
+    detail: scoped.scopedCwd,
+  });
   if (options.enablePeerMcp === false) {
     emitTrace(options, `[${session.supervisor}] PAL peers disabled for this nested call`);
+    emitTimeline(options, {
+      id: nextTimelineId("peers"),
+      kind: "tool",
+      status: "info",
+      title: "PAL peers disabled",
+      detail: "Nested consultation is non-recursive; peer MCP is intentionally disabled.",
+    });
     return;
   }
   const peers = supervisorPeers[session.supervisor] || [];
   emitTrace(options, `[${session.supervisor}] PAL MCP attached: ${peers.map((peer) => `pal-${peer}`).join(", ") || "(none)"}`);
+  emitTimeline(options, {
+    id: nextTimelineId("peers"),
+    kind: "tool",
+    status: "info",
+    title: "PAL MCP attached",
+    detail: peers.map((peer) => `pal-${peer}`).join(", ") || "(none)",
+  });
 }
 
 function createStderrTraceFilter(command, options) {
@@ -218,12 +270,23 @@ function sanitizedProcessEnv(extra = {}) {
   return { ...env, ...extra };
 }
 
-function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, stdoutHandler, signal, browserContext }) {
+function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, onTask, stdoutHandler, signal, browserContext }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
+    const timelineOptions = { onTask };
     const stderrTrace = createStderrTraceFilter(command, traceOptions);
-    emitTrace(traceOptions, `$ ${formatCommand(command, args)}`);
+    const taskId = nextTimelineId("cmd");
+    const commandText = formatCommand(command, args);
+    const startedAt = Date.now();
+    emitTrace(traceOptions, `$ ${commandText}`);
     emitTrace(traceOptions, `[cwd] ${cwd}`);
+    emitTimeline(timelineOptions, {
+      id: taskId,
+      kind: "command",
+      status: "running",
+      title: commandText,
+      detail: `[cwd] ${cwd}\n`,
+    });
     const child = spawn(command, args, {
       cwd,
       env: sanitizedProcessEnv({ ...browserEnv(browserContext), ...env }),
@@ -270,6 +333,15 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
       stderrTrace.flush();
       if (signal) signal.removeEventListener("abort", abort);
       emitTrace(traceOptions, `[spawn error] ${error.message}`);
+      emitTimeline(timelineOptions, {
+        id: taskId,
+        kind: "command",
+        status: "failed",
+        title: commandText,
+        detail: [`[cwd] ${cwd}`, `[spawn error] ${error.message}`].join("\n"),
+        endedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+      });
       resolve({ ok: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), code: -1, timedOut });
     });
     child.on("close", (code) => {
@@ -277,6 +349,20 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
       stderrTrace.flush();
       if (signal) signal.removeEventListener("abort", abort);
       emitTrace(traceOptions, `[exit] code=${code}${timedOut ? " timed out" : ""}`);
+      const ok = code === 0 && !timedOut && !stdinError;
+      emitTimeline(timelineOptions, {
+        id: taskId,
+        kind: "command",
+        status: ok ? "completed" : "failed",
+        title: commandText,
+        detail: [
+          `[cwd] ${cwd}`,
+          `[exit] code=${code}${timedOut ? " timed out" : ""}`,
+          stdinError ? `[stdin error] ${stdinError}` : "",
+        ].filter(Boolean).join("\n"),
+        endedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+      });
       resolve({ ok: code === 0 && !timedOut && !stdinError, stdout, stderr, code, timedOut });
     });
     try {
@@ -342,7 +428,16 @@ function createClaudeStreamParser(options = {}) {
 
   const traceToolResult = (toolUseId, content) => {
     const name = tools.get(toolUseId) || toolUseId || "tool";
-    emitTrace(options, `[result] ${palToolLabel(name)} ${summarizeToolResult(content)}`.trim());
+    const summary = summarizeToolResult(content);
+    emitTrace(options, `[result] ${palToolLabel(name)} ${summary}`.trim());
+    emitTimeline(options, {
+      id: `tool-${toolUseId}`,
+      kind: "tool",
+      status: "completed",
+      title: palToolLabel(name),
+      detail: summary,
+      endedAt: new Date().toISOString(),
+    });
   };
 
   const handleEvent = (event) => {
@@ -377,6 +472,13 @@ function createClaudeStreamParser(options = {}) {
           tools.set(part.id, part.name);
           const input = summarizeToolInput(part.input);
           emitTrace(options, `[tool] ${palToolLabel(part.name)}${input ? ` ${input}` : ""}`);
+          emitTimeline(options, {
+            id: `tool-${part.id}`,
+            kind: "tool",
+            status: "running",
+            title: palToolLabel(part.name),
+            detail: input,
+          });
         }
       }
       return;
@@ -432,18 +534,19 @@ function createClaudeStreamParser(options = {}) {
 }
 
 async function callClaude(session, prompt, options = {}) {
+  const { systemPrompt, ...runOptions } = options;
   const scoped = options.enablePeerMcp === false
     ? { scopedCwd: requireScopedCwd(session.cwd), claudeConfigPath: null }
     : await writeScopedPeerConfigs(session);
-  tracePeerSetup(session, scoped, options);
-  const args = ["--print", "--output-format", "stream-json", "--verbose", "--system-prompt", await loadPrompt(session.supervisor)];
-  if (options.enablePeerMcp !== false) args.push("--mcp-config", scoped.claudeConfigPath, "--strict-mcp-config");
+  tracePeerSetup(session, scoped, runOptions);
+  const args = ["--print", "--output-format", "stream-json", "--verbose", "--system-prompt", systemPrompt ?? await loadPrompt(session.supervisor)];
+  if (runOptions.enablePeerMcp !== false) args.push("--mcp-config", scoped.claudeConfigPath, "--strict-mcp-config");
   if (process.env.CLAUDE_MODEL) args.push("--model", process.env.CLAUDE_MODEL);
   if (runtime.allowWrite) args.push("--dangerously-skip-permissions", "--permission-mode", "bypassPermissions");
   else args.push("--permission-mode", "plan");
   args.push("-");
   const parser = createClaudeStreamParser(options);
-  const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, env: { MCP_TIMEOUT: "60000" }, stdoutHandler: parser.push.bind(parser), ...options });
+  const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, env: { MCP_TIMEOUT: "60000" }, stdoutHandler: parser.push.bind(parser), ...runOptions });
   parser.flush();
   if (result.ok) return parser.answer() || cliResult(result);
   return cliResult(result);
@@ -517,7 +620,7 @@ async function callDeepSeek(session, userContent, systemPrompt, options = {}) {
       content: [
         systemPrompt,
         "",
-        browserContextInstruction(options.browserContext),
+        runtimeContextText(session, options),
         "",
         `PEER MODEL ROUTING:\n${peerRoutingText("deepseek")}`,
       ].filter(Boolean).join("\n"),
@@ -596,6 +699,7 @@ function deepSeekMemoryTools() {
           type: "object",
           properties: {
             scope: { type: "string", enum: ["all", "user", "project"] },
+            namespace: { type: "string", enum: ["all", ...memoryNamespaces] },
             query: { type: "string" },
             limit: { type: "number" },
           },
@@ -613,6 +717,7 @@ function deepSeekMemoryTools() {
           properties: {
             query: { type: "string" },
             scope: { type: "string", enum: ["all", "user", "project"] },
+            namespace: { type: "string", enum: ["all", ...memoryNamespaces] },
             limit: { type: "number" },
           },
           required: ["query"],
@@ -630,6 +735,7 @@ function deepSeekMemoryTools() {
           properties: {
             scope: { type: "string", enum: ["user", "project"] },
             kind: { type: "string", enum: ["fact", "preference", "decision", "summary", "note"] },
+            namespace: { type: "string", enum: memoryNamespaces },
             text: { type: "string" },
             tags: { type: "array", items: { type: "string" } },
             source: { type: "string" },
@@ -756,11 +862,35 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
         result = await runDeepSeekPeerTool(session, toolName, prompt, options);
         emitTrace(options, `[deepseek] ${toolName} <- completed (${result.length} chars)`);
       } else if (toolName.startsWith("memory_")) {
+        const taskId = nextTimelineId("memory");
         emitTrace(options, `[deepseek] ${toolName} -> memory`);
+        emitTimeline(options, {
+          id: taskId,
+          kind: "memory",
+          status: "running",
+          title: toolName,
+          detail: compactTraceText(JSON.stringify(args), 600),
+        });
         try {
           result = await runDeepSeekMemoryTool(session, toolName, args);
+          emitTimeline(options, {
+            id: taskId,
+            kind: "memory",
+            status: "completed",
+            title: toolName,
+            detail: compactTraceText(result, 1000),
+            endedAt: new Date().toISOString(),
+          });
         } catch (error) {
           result = `Memory tool error: ${error.message || String(error)}`;
+          emitTimeline(options, {
+            id: taskId,
+            kind: "memory",
+            status: "failed",
+            title: toolName,
+            detail: result,
+            endedAt: new Date().toISOString(),
+          });
         }
         emitTrace(options, `[deepseek] ${toolName} <- memory completed`);
       } else {
@@ -786,14 +916,54 @@ async function runDeepSeekMemoryTool(session, toolName, args) {
 async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}) {
   const peer = toolName.replace(/^ask_/, "");
   if (!["claude", "codex", "gemini"].includes(peer)) throw new Error(`Unknown DeepSeek peer tool: ${toolName}`);
+  const taskId = nextTimelineId("peer");
   const peerSession = { ...session, supervisor: peer, messages: [], cwd: session.cwd || "." };
   const systemPrompt = await loadPrompt(peerSession.supervisor);
-  const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, parentOptions);
-  const options = { enablePeerMcp: false, enablePeerTools: false, onTrace: parentOptions.onTrace };
-  if (peer === "claude") return callClaude(peerSession, peerPrompt, options);
-  if (peer === "codex") return callCodex(peerSession, peerPrompt, options);
-  if (peer === "gemini") return callGemini(peerSession, peerPrompt, options);
-  throw new Error(`Unknown peer: ${peer}`);
+  const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, {
+    ...parentOptions,
+    enablePeerMcp: false,
+    includeSystemPrompt: peer !== "claude",
+  });
+  const options = {
+    enablePeerMcp: false,
+    enablePeerTools: false,
+    onTrace: parentOptions.onTrace,
+    onTask: parentOptions.onTask,
+    ...(peer === "claude" ? { systemPrompt } : {}),
+  };
+  emitTimeline(parentOptions, {
+    id: taskId,
+    kind: "tool",
+    status: "running",
+    title: `DeepSeek -> ${peer}`,
+    detail: compactTraceText(prompt, 1200),
+  });
+  try {
+    let answer;
+    if (peer === "claude") answer = await callClaude(peerSession, peerPrompt, options);
+    else if (peer === "codex") answer = await callCodex(peerSession, peerPrompt, options);
+    else if (peer === "gemini") answer = await callGemini(peerSession, peerPrompt, options);
+    else throw new Error(`Unknown peer: ${peer}`);
+    emitTimeline(parentOptions, {
+      id: taskId,
+      kind: "tool",
+      status: "completed",
+      title: `DeepSeek -> ${peer}`,
+      detail: `${answer.length} chars returned`,
+      endedAt: new Date().toISOString(),
+    });
+    return answer;
+  } catch (error) {
+    emitTimeline(parentOptions, {
+      id: taskId,
+      kind: "tool",
+      status: "failed",
+      title: `DeepSeek -> ${peer}`,
+      detail: error.message || String(error),
+      endedAt: new Date().toISOString(),
+    });
+    throw error;
+  }
 }
 
 async function readDeepSeekStream(body, options = {}) {
@@ -842,11 +1012,50 @@ async function readDeepSeekStream(body, options = {}) {
 export async function runSupervisor(session, userContent, options = {}) {
   const supervisor = supervisors[session.supervisor] ? session.supervisor : runtime.defaultSupervisor;
   const runSession = { ...session, supervisor };
-  const systemPrompt = await loadPrompt(supervisor);
-  if (supervisor === "deepseek") return callDeepSeek(runSession, userContent, systemPrompt, options);
-  const prompt = buildCliPrompt(runSession, userContent, systemPrompt, options);
-  if (supervisor === "claude") return callClaude(runSession, prompt, options);
-  if (supervisor === "codex") return callCodex(runSession, prompt, options);
-  if (supervisor === "gemini") return callGemini(runSession, prompt, options);
-  throw new Error(`Unknown supervisor: ${supervisor}`);
+  const taskId = nextTimelineId("supervisor");
+  emitTimeline(options, {
+    id: taskId,
+    kind: "supervisor",
+    status: "running",
+    title: `${supervisor} supervisor`,
+    detail: `cwd=${runSession.cwd || "."}`,
+  });
+  const startedAt = Date.now();
+  try {
+    const systemPrompt = await loadPrompt(supervisor);
+    let answer;
+    if (supervisor === "deepseek") {
+      answer = await callDeepSeek(runSession, userContent, systemPrompt, options);
+    } else {
+      const prompt = buildCliPrompt(runSession, userContent, systemPrompt, {
+        ...options,
+        includeSystemPrompt: supervisor !== "claude",
+      });
+      if (supervisor === "claude") answer = await callClaude(runSession, prompt, { ...options, systemPrompt });
+      else if (supervisor === "codex") answer = await callCodex(runSession, prompt, options);
+      else if (supervisor === "gemini") answer = await callGemini(runSession, prompt, options);
+      else throw new Error(`Unknown supervisor: ${supervisor}`);
+    }
+    emitTimeline(options, {
+      id: taskId,
+      kind: "supervisor",
+      status: "completed",
+      title: `${supervisor} supervisor`,
+      detail: `${String(answer || "").length} chars returned`,
+      endedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+    });
+    return answer;
+  } catch (error) {
+    emitTimeline(options, {
+      id: taskId,
+      kind: "supervisor",
+      status: options.signal?.aborted ? "stopped" : "failed",
+      title: `${supervisor} supervisor`,
+      detail: error.message || String(error),
+      endedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+    });
+    throw error;
+  }
 }

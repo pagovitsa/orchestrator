@@ -12,10 +12,12 @@ import {
   loadSession,
   saveSession,
 } from "../domain/sessions.js";
-import { listPrompts, savePrompts } from "../domain/prompts.js";
+import { listPrompts, resetPrompts, savePrompts } from "../domain/prompts.js";
+import { emitHookEvent } from "../domain/hooks.js";
 import { extractUserMemoriesFromText, rememberMemory } from "../domain/memory.js";
+import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
-import { decideAutopilotNext } from "../domain/autopilot.js";
+import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
 import {
   connectionStatus,
   disconnectConnection,
@@ -25,6 +27,7 @@ import {
   startConnection,
 } from "../domain/connections.js";
 import { deleteProject, ensureProject, listProjects, requireScopedCwd, resolveCwd } from "../domain/workspace.js";
+import { mcpToolCatalog } from "../supervisors/mcp.js";
 import { runSupervisor } from "../supervisors/runner.js";
 import { readBody, sendJson, writeStreamEvent } from "./response.js";
 
@@ -191,6 +194,17 @@ async function autoRememberUserFacts(session, content) {
   }
 }
 
+async function rememberAutopilotDecision(session, decision) {
+  try {
+    await rememberMemory({
+      globalFile: path.join(paths.dataDir, "orch-memory", "user.json"),
+      projectFile: path.join(requireScopedCwd(session.cwd), ".remember", "orchestrator-memory.json"),
+    }, autopilotMemoryArgs(decision));
+  } catch (error) {
+    console.error("autopilot memory failed:", error.message || error);
+  }
+}
+
 async function appendUserMessage(session, body) {
   const content = String(body.content || "").trim();
   const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
@@ -242,6 +256,7 @@ async function handleStreamMessage(req, res, id) {
     content: "",
     status: "Starting...",
     trace: [],
+    timeline: [],
     at: new Date().toISOString(),
     streaming: true,
   };
@@ -253,6 +268,13 @@ async function handleStreamMessage(req, res, id) {
     "x-accel-buffering": "no",
   });
   emitRunEvent(res, id, clientId, { type: "session", session, draft: activeRun.draft });
+  emitHookEvent({
+    type: "run.start",
+    sessionId: id,
+    project: session.cwd,
+    supervisor: session.supervisor,
+    status: "running",
+  });
 
   res.on("close", () => {
     if (completed) return;
@@ -280,6 +302,12 @@ async function handleStreamMessage(req, res, id) {
     }
     emitRunEvent(res, id, clientId, { type: "trace", stream, content, at: new Date().toISOString() });
   };
+  const onTask = (event) => {
+    if (activeRun.draft) {
+      activeRun.draft.timeline = mergeTimelineEvent(activeRun.draft.timeline || [], event);
+    }
+    emitRunEvent(res, id, clientId, { type: "task", event, at: new Date().toISOString() });
+  };
 
   try {
     usageStarted = true;
@@ -288,6 +316,7 @@ async function handleStreamMessage(req, res, id) {
       browserContext,
       onOutput,
       onTrace,
+      onTask,
       onUsage: captureUsage(session.supervisor),
       signal: abortController.signal,
     });
@@ -296,11 +325,21 @@ async function handleStreamMessage(req, res, id) {
       supervisor: session.supervisor,
       content: answer || transcript.trim() || "(empty response)",
       at: new Date().toISOString(),
+      trace: activeRun.draft?.trace || [],
+      timeline: activeRun.draft?.timeline || [],
     });
     await saveSession(session);
     activeRun.session = session;
     activeRun.draft = null;
     emitRunEvent(res, id, clientId, { type: "done", session, message: session.messages.at(-1) });
+    emitHookEvent({
+      type: "run.end",
+      sessionId: id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: "done",
+      detail: `${answer?.length || transcript.length || 0} chars`,
+    });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
   } catch (error) {
     if (clientClosed && abortController.signal.aborted) {
@@ -316,6 +355,8 @@ async function handleStreamMessage(req, res, id) {
         ? [transcript.trim(), details].filter(Boolean).join("\n\n")
         : [transcript.trim(), `Error: ${details}`].filter(Boolean).join("\n\n"),
       at: new Date().toISOString(),
+      trace: activeRun.draft?.trace || [],
+      timeline: activeRun.draft?.timeline || [],
       error: !stopped,
       stopped,
     });
@@ -323,6 +364,14 @@ async function handleStreamMessage(req, res, id) {
     activeRun.session = session;
     activeRun.draft = null;
     emitRunEvent(res, id, clientId, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
+    emitHookEvent({
+      type: "run.end",
+      sessionId: id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: stopped ? "stopped" : "error",
+      detail: details,
+    });
     if (usageStarted) {
       await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: details, stopped }));
     }
@@ -348,6 +397,13 @@ async function handleJsonMessage(req, res, id) {
     const modelContent = await appendUserMessage(session, body);
     usageStarted = true;
     await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
+    emitHookEvent({
+      type: "run.start",
+      sessionId: id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: "running",
+    });
     const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
       browserContext,
       signal: abortController.signal,
@@ -361,6 +417,14 @@ async function handleJsonMessage(req, res, id) {
     });
     await saveSession(session);
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
+    emitHookEvent({
+      type: "run.end",
+      sessionId: id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: "done",
+      detail: `${answer?.length || 0} chars`,
+    });
     completed = true;
     return sendJson(res, 200, { session, message: session.messages.at(-1) });
   } catch (error) {
@@ -368,6 +432,14 @@ async function handleJsonMessage(req, res, id) {
       if (usageStarted) {
         await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: error.message || String(error) }));
       }
+      emitHookEvent({
+        type: "run.end",
+        sessionId: id,
+        project: session.cwd,
+        supervisor: session.supervisor,
+        status: "error",
+        detail: error.message || String(error),
+      });
       throw error;
     }
     session.messages.push({
@@ -379,6 +451,14 @@ async function handleJsonMessage(req, res, id) {
     });
     await saveSession(session);
     if (usageStarted) await safelyRecordUsage(`stop for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { stopped: true }));
+    emitHookEvent({
+      type: "run.end",
+      sessionId: id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: "stopped",
+      detail: runStopReason(abortController.signal),
+    });
     completed = true;
     return sendJson(res, 200, { session, message: session.messages.at(-1), stopped: true });
   } finally {
@@ -398,6 +478,7 @@ export async function handleApi(req, res, url) {
       workspaceRoot: paths.workspaceRoot,
       promptFile: paths.promptFile,
       supervisorPeers,
+      mcpToolCatalog: Object.fromEntries(Object.keys(supervisors).map((id) => [id, mcpToolCatalog(id)])),
       networkMode: runtime.networkMode,
       devServerHost: runtime.devServerHost,
       previewPorts: runtime.previewPorts,
@@ -413,6 +494,9 @@ export async function handleApi(req, res, url) {
   }
   if (req.method === "PUT" && url.pathname === "/api/prompts") {
     return sendJson(res, 200, await savePrompts(await readBody(req)));
+  }
+  if (req.method === "POST" && url.pathname === "/api/prompts/reset") {
+    return sendJson(res, 200, await resetPrompts(await readBody(req)));
   }
   if (req.method === "GET" && url.pathname === "/api/connections") {
     return sendJson(res, 200, { connections: await connectionStatus() });
@@ -485,6 +569,17 @@ export async function handleApi(req, res, url) {
     }
     const session = await loadSession(autopilotMatch[1]);
     const decision = await decideAutopilotNext(session);
+    appendAutopilotHistory(session, decision);
+    await saveSession(session);
+    void rememberAutopilotDecision(session, decision);
+    emitHookEvent({
+      type: "autopilot.decision",
+      sessionId: session.id,
+      project: session.cwd,
+      supervisor: session.supervisor,
+      status: decision.action,
+      detail: decision.reason || decision.kind || "",
+    });
     return sendJson(res, 200, { decision });
   }
 

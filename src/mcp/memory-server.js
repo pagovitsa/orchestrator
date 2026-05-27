@@ -2,6 +2,7 @@
 import readline from "node:readline";
 import {
   forgetMemory,
+  memoryNamespaces,
   readMemory,
   rememberMemory,
   updateMemorySummary,
@@ -20,6 +21,7 @@ const tools = [
       type: "object",
       properties: {
         scope: { type: "string", enum: ["all", "user", "project"], default: "all" },
+        namespace: { type: "string", enum: ["all", ...memoryNamespaces], default: "all" },
         query: { type: "string", description: "Optional search query to filter memory." },
         limit: { type: "number", description: "Maximum memories per scope, default 25." },
       },
@@ -34,6 +36,7 @@ const tools = [
       properties: {
         query: { type: "string", description: "Search terms." },
         scope: { type: "string", enum: ["all", "user", "project"], default: "all" },
+        namespace: { type: "string", enum: ["all", ...memoryNamespaces], default: "all" },
         limit: { type: "number", description: "Maximum memories per scope, default 25." },
       },
       required: ["query"],
@@ -48,6 +51,7 @@ const tools = [
       properties: {
         scope: { type: "string", enum: ["user", "project"] },
         kind: { type: "string", enum: ["fact", "preference", "decision", "summary", "note"], default: "note" },
+        namespace: { type: "string", enum: memoryNamespaces, default: "general" },
         text: { type: "string", description: "Plain-language memory. Never store secrets." },
         tags: { type: "array", items: { type: "string" }, description: "Optional short tags." },
         source: { type: "string", description: "Optional source note, e.g. user-stated." },

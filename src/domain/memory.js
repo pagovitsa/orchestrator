@@ -4,6 +4,8 @@ import path from "node:path";
 
 const validScopes = new Set(["user", "project"]);
 const validKinds = new Set(["fact", "preference", "decision", "summary", "note"]);
+export const memoryNamespaces = ["general", "profile", "tasks", "solutions", "patterns", "feedback", "security", "autopilot"];
+const validNamespaces = new Set(memoryNamespaces);
 const secretPattern = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|bearer|password|passwd|secret|private[_ -]?key)\b/i;
 
 function nowIso() {
@@ -12,7 +14,7 @@ function nowIso() {
 
 function emptyStore(scope) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     scope,
     summary: "",
     memories: [],
@@ -37,6 +39,17 @@ function normalizeKind(kind) {
   return validKinds.has(clean) ? clean : "note";
 }
 
+function defaultNamespaceFor(kind, scope) {
+  if (scope === "user" && (kind === "fact" || kind === "preference")) return "profile";
+  if (kind === "decision") return "tasks";
+  return "general";
+}
+
+export function normalizeMemoryNamespace(namespace, kind = "note", scope = "project") {
+  const clean = normalizeText(namespace, 32).toLowerCase();
+  return validNamespaces.has(clean) ? clean : defaultNamespaceFor(normalizeKind(kind), scope);
+}
+
 function normalizeScope(scope, fallback = "project") {
   const clean = normalizeText(scope, 32).toLowerCase();
   return validScopes.has(clean) ? clean : fallback;
@@ -50,6 +63,7 @@ function normalizeMemory(memory, scope) {
     id: /^[a-f0-9-]{36}$/.test(memory.id || "") ? memory.id : randomUUID(),
     scope,
     kind: normalizeKind(memory.kind),
+    namespace: normalizeMemoryNamespace(memory.namespace, memory.kind, scope),
     text,
     tags: normalizeTags(memory.tags),
     source: normalizeText(memory.source, 160),
@@ -136,14 +150,22 @@ function limitMemories(memories, limit = 25) {
 }
 
 function scoreMemory(memory, terms) {
-  const haystack = `${memory.text} ${memory.kind} ${(memory.tags || []).join(" ")}`.toLowerCase();
+  const haystack = `${memory.text} ${memory.kind} ${memory.namespace || ""} ${(memory.tags || []).join(" ")}`.toLowerCase();
   return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
 }
 
-function filterByQuery(memories, query) {
+function filterByNamespace(memories, namespace) {
+  const clean = normalizeText(namespace, 32).toLowerCase();
+  if (!clean || clean === "all") return memories;
+  if (!validNamespaces.has(clean)) return [];
+  return memories.filter((memory) => memory.namespace === clean);
+}
+
+function filterByQuery(memories, query, namespace) {
+  const scoped = filterByNamespace(memories, namespace);
   const terms = normalizeText(query, 300).toLowerCase().split(/\s+/).filter(Boolean);
-  if (!terms.length) return sortMemories(memories);
-  return memories
+  if (!terms.length) return sortMemories(scoped);
+  return scoped
     .map((memory) => ({ memory, score: scoreMemory(memory, terms) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || String(b.memory.updatedAt).localeCompare(String(a.memory.updatedAt)))
@@ -170,6 +192,7 @@ export function extractUserMemoriesFromText(text) {
       return [{
         scope: "user",
         kind: "fact",
+        namespace: "profile",
         text: `The user's name is ${name}`,
         tags: ["identity", "name"],
         source: "auto-detected from user message",
@@ -179,7 +202,7 @@ export function extractUserMemoriesFromText(text) {
   return [];
 }
 
-export async function readMemory(files, { scope = "all", query = "", limit = 25 } = {}) {
+export async function readMemory(files, { scope = "all", query = "", namespace = "all", limit = 25 } = {}) {
   validateFiles(files);
   const cleanScope = normalizeText(scope, 16).toLowerCase();
   const result = {};
@@ -187,14 +210,14 @@ export async function readMemory(files, { scope = "all", query = "", limit = 25 
     const store = await readStore(files.globalFile, "user");
     result.user = {
       summary: store.summary,
-      memories: limitMemories(filterByQuery(store.memories, query), limit),
+      memories: limitMemories(filterByQuery(store.memories, query, namespace), limit),
     };
   }
   if (cleanScope === "all" || cleanScope === "project") {
     const store = await readStore(files.projectFile, "project");
     result.project = {
       summary: store.summary,
-      memories: limitMemories(filterByQuery(store.memories, query), limit),
+      memories: limitMemories(filterByQuery(store.memories, query, namespace), limit),
     };
   }
   return result;
@@ -213,6 +236,7 @@ export async function rememberMemory(files, args = {}) {
     const existing = store.memories.find((memory) => memory.text.toLowerCase() === normalizedText);
     if (existing) {
       existing.kind = normalizeKind(args.kind || existing.kind);
+      existing.namespace = normalizeMemoryNamespace(args.namespace || existing.namespace, existing.kind, scope);
       existing.tags = normalizeTags([...(existing.tags || []), ...(Array.isArray(args.tags) ? args.tags : [])]);
       existing.source = normalizeText(args.source || existing.source, 160);
       existing.updatedAt = nowIso();
@@ -222,6 +246,7 @@ export async function rememberMemory(files, args = {}) {
     const memory = normalizeMemory({
       text,
       kind: args.kind,
+      namespace: args.namespace,
       tags: args.tags,
       source: args.source,
       createdAt: nowIso(),

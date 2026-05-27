@@ -126,6 +126,35 @@ function autopilotPrompt(session, lastAssistant) {
   ].join("\n");
 }
 
+export function appendAutopilotHistory(session, decision) {
+  session.autopilotHistory = Array.isArray(session.autopilotHistory) ? session.autopilotHistory : [];
+  const entry = {
+    at: new Date().toISOString(),
+    action: decision?.action || "stop",
+    kind: decision?.kind || "",
+    reason: String(decision?.reason || "").slice(0, 800),
+    content: String(decision?.content || "").slice(0, 1200),
+  };
+  session.autopilotHistory.push(entry);
+  session.autopilotHistory = session.autopilotHistory.slice(-50);
+  return entry;
+}
+
+export function autopilotMemoryArgs(decision) {
+  const action = decision?.action || "stop";
+  const kind = decision?.kind || action;
+  const reason = String(decision?.reason || "").trim();
+  const text = [`Autopilot ${action}/${kind}`, reason ? `reason: ${reason}` : ""].filter(Boolean).join(" - ");
+  return {
+    scope: "project",
+    kind: "decision",
+    namespace: "autopilot",
+    text,
+    tags: ["autopilot", kind].filter(Boolean),
+    source: "orch-ui autopilot",
+  };
+}
+
 export async function decideAutopilotNext(session, { signal } = {}) {
   const lastAssistant = latestAssistantMessage(session);
   if (hasRunError(lastAssistant)) {

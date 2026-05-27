@@ -53,6 +53,7 @@ function normalizeProjectSession(session, cwd) {
     createdAt: session.createdAt || new Date().toISOString(),
     updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
     messages: Array.isArray(session.messages) ? session.messages : [],
+    autopilotHistory: Array.isArray(session.autopilotHistory) ? session.autopilotHistory.slice(-50) : [],
   };
 }
 

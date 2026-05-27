@@ -1031,6 +1031,10 @@ input {
   min-width: 90px;
 }
 
+.prompt-reset-button {
+  margin-right: auto;
+}
+
 .prompt-panel {
   grid-template-rows: auto auto minmax(260px, 1fr) auto auto;
 }
@@ -1053,7 +1057,70 @@ input {
 }
 
 .terminal-panel {
-  grid-template-rows: auto minmax(260px, 1fr);
+  grid-template-rows: auto auto minmax(240px, 1fr);
+}
+
+.terminal-timeline {
+  display: grid;
+  gap: 8px;
+  max-height: min(34vh, 280px);
+  overflow: auto;
+}
+
+.timeline-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #121719;
+}
+
+.timeline-card.running {
+  border-color: rgba(37, 169, 154, 0.55);
+}
+
+.timeline-card.failed {
+  border-color: rgba(228, 93, 82, 0.62);
+}
+
+.timeline-card.completed {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.timeline-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.timeline-title {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.timeline-detail {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  color: #cbd7d2;
+  padding: 10px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .terminal-output {

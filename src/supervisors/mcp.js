@@ -4,6 +4,62 @@ import { disabledTools, paths, runtime, supervisorPeers, supervisors } from "../
 import { tomlArray, tomlString } from "../utils/format.js";
 import { requireScopedCwd } from "../domain/workspace.js";
 
+const sharedToolCatalog = {
+  serena: {
+    group: "code-intel",
+    namespace: "repo",
+    label: "Serena code intelligence",
+    description: "Project-aware code navigation and editing context.",
+  },
+  context7: {
+    group: "docs",
+    namespace: "docs",
+    label: "Context7 docs",
+    description: "Current library and framework documentation lookup.",
+  },
+  memory: {
+    group: "memory",
+    namespace: "memory",
+    label: "Orch memory",
+    description: "Durable user/global and project memory tools.",
+  },
+  playwright: {
+    group: "browser",
+    namespace: "browser",
+    label: "Playwright browser",
+    description: "Browser automation for UI verification.",
+  },
+};
+
+export function mcpToolCatalog(supervisor) {
+  const peers = (supervisorPeers[supervisor] || []).map((peer) => ({
+    name: `pal-${peer}`,
+    group: "peer-model",
+    namespace: "pal",
+    enabled: true,
+    label: supervisors[peer]?.label || peer,
+    description: `Peer delegate for ${peer}.`,
+  }));
+  const shared = Object.entries(sharedToolCatalog).map(([name, entry]) => ({
+    name,
+    ...entry,
+    enabled: runtime.enabledTools.includes(name),
+  }));
+  return [...peers, ...shared];
+}
+
+function toolCatalogText(supervisor) {
+  const enabled = mcpToolCatalog(supervisor).filter((tool) => tool.enabled);
+  const groups = new Map();
+  for (const tool of enabled) {
+    const names = groups.get(tool.group) || [];
+    names.push(tool.name);
+    groups.set(tool.group, names);
+  }
+  if (!groups.size) return "MCP tool groups enabled: (none).";
+  return `MCP tool groups enabled: ${[...groups.entries()].map(([group, names]) => `${group}=${names.join(",")}`).join("; ")}.`;
+}
+
 export function peerRoutingText(supervisor) {
   const peers = supervisorPeers[supervisor] || [];
   const palPeers = peers.map((peer) => `pal-${peer}`).join(", ") || "(none)";
@@ -17,6 +73,7 @@ export function peerRoutingText(supervisor) {
     peers.includes("deepseek")
       ? "Use pal-deepseek chat/listmodels for DeepSeek V4 Pro API. The default model is deepseek-v4-pro."
       : "Do not call DeepSeek as a peer from this session.",
+    toolCatalogText(supervisor),
     "Do not delegate back to the active supervisor.",
   ].join("\n");
 }

@@ -66,6 +66,26 @@ async function fallbackPrompt(id) {
   return "# Orchestrator Prompt\n";
 }
 
+async function promptDetails(id, manifest = {}) {
+  const live = await readPromptFile(id);
+  const source = await readSourcePrompt(id);
+  const content = live ?? source ?? await fallbackPrompt(id);
+  const sourceHash = source === null ? "" : hashContent(source);
+  const liveHash = live === null ? "" : hashContent(live);
+  return {
+    id,
+    label: supervisors[id].label,
+    path: promptPath(id),
+    sourcePath: sourcePromptFiles[id],
+    content,
+    sourceAvailable: source !== null,
+    sourceHash,
+    liveHash,
+    userOwned: manifest[id] === USER_OWNED,
+    outdated: Boolean(source !== null && live !== null && liveHash !== sourceHash),
+  };
+}
+
 // Seeds /data/prompts from the repo source prompts and refreshes copies the user has not edited.
 // A file is "pristine" when its content still matches the hash we last seeded; pristine files are
 // rewritten when the source changes, while user-edited files (marked user-owned) are left untouched.
@@ -131,16 +151,37 @@ export async function loadPrompt(id) {
 }
 
 export async function listPrompts() {
+  const manifest = await readManifest();
   return {
     promptDir: paths.promptDir,
-    prompts: await Promise.all(promptIds.map(async (id) => ({
-      id,
-      label: supervisors[id].label,
-      path: promptPath(id),
-      sourcePath: sourcePromptFiles[id],
-      content: await loadPrompt(id),
-    }))),
+    prompts: await Promise.all(promptIds.map((id) => promptDetails(id, manifest))),
   };
+}
+
+export async function resetPrompts(body = {}) {
+  await mkdir(paths.promptDir, { recursive: true });
+  const rawIds = body.ids === undefined
+    ? promptIds
+    : Array.isArray(body.ids)
+      ? body.ids
+      : [body.ids];
+  const ids = [...new Set(rawIds.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!ids.length) throw Object.assign(new Error("Select at least one prompt to reset"), { status: 400 });
+  for (const id of ids) {
+    if (!supervisors[id]) throw Object.assign(new Error(`Unknown prompt target: ${id}`), { status: 400 });
+  }
+
+  const manifest = await readManifest();
+  for (const id of ids) {
+    const source = await readSourcePrompt(id);
+    if (source === null) {
+      throw Object.assign(new Error(`${supervisors[id].label} canonical prompt is unavailable`), { status: 404 });
+    }
+    await writeAtomic(promptPath(id), source);
+    manifest[id] = hashContent(source);
+  }
+  await writeAtomic(manifestPath(), `${JSON.stringify(manifest, null, 2)}\n`);
+  return listPrompts();
 }
 
 export async function savePrompts(body = {}) {

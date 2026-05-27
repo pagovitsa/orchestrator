@@ -32,10 +32,15 @@ Use the `memory_*` tools when they are available.
 
 - At the start of a task, call `memory_read` with `scope: "all"` to load relevant user/global and
   current-project memories.
+- Memory supports namespaces: `profile`, `tasks`, `solutions`, `patterns`, `feedback`, `security`,
+  `autopilot`, and `general`. Use `profile` for durable user facts/preferences, `tasks` for project
+  decisions and current work, `solutions`/`patterns` for reusable fixes, `feedback` for user
+  corrections, and `security` only for non-secret security constraints.
 - If the user states a durable personal fact or preference, store it with `memory_remember` using
-  `scope: "user"`. Example: "my name is Kostas" -> remember "The user's name is Kostas".
+  `scope: "user"` and `namespace: "profile"`. Example: "my name is Kostas" -> remember "The user's
+  name is Kostas".
 - If you learn a durable project decision, architecture fact, command, or constraint, store it with
-  `scope: "project"`.
+  `scope: "project"` and the most specific namespace.
 - Never store secrets, API keys, passwords, tokens, private auth data, or transient chat noise.
 - Use remembered facts naturally, but do not pretend memory was loaded if the tool is unavailable.
 

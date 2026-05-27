@@ -4,9 +4,22 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
-import { normalizeAutopilotDecision, parseAutopilotDecision } from "../src/domain/autopilot.js";
-import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../src/domain/memory.js";
+import {
+  appendAutopilotHistory,
+  autopilotMemoryArgs,
+  normalizeAutopilotDecision,
+  parseAutopilotDecision,
+} from "../src/domain/autopilot.js";
+import { normalizeHookEvent } from "../src/domain/hooks.js";
+import {
+  extractUserMemoriesFromText,
+  normalizeMemoryNamespace,
+  readMemory,
+  rememberMemory,
+} from "../src/domain/memory.js";
+import { mergeTimelineEvent } from "../src/domain/run-timeline.js";
 import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
+import { mcpToolCatalog } from "../src/supervisors/mcp.js";
 import {
   calculateBalanceUsage,
   parseClaudeUsagePayload,
@@ -68,6 +81,7 @@ test("memory keeps user facts global across project files", async () => {
     await rememberMemory({ globalFile, projectFile: projectA }, {
       scope: "user",
       kind: "fact",
+      namespace: "profile",
       text: "The user's name is Kostas",
       tags: ["identity", "name"],
     });
@@ -79,8 +93,40 @@ test("memory keeps user facts global across project files", async () => {
 
     const projectBMemory = await readMemory({ globalFile, projectFile: projectB }, { scope: "all" });
     assert.equal(projectBMemory.user.memories[0].text, "The user's name is Kostas");
+    assert.equal(projectBMemory.user.memories[0].namespace, "profile");
     assert.deepEqual(projectBMemory.user.memories[0].tags, ["identity", "name"]);
     assert.equal(projectBMemory.project.memories.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("memory namespaces filter durable project knowledge", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
+  try {
+    const files = {
+      globalFile: path.join(dir, "user.json"),
+      projectFile: path.join(dir, "project.json"),
+    };
+    await rememberMemory(files, {
+      scope: "project",
+      kind: "decision",
+      namespace: "solutions",
+      text: "Use lazy terminal details for long traces",
+    });
+    await rememberMemory(files, {
+      scope: "project",
+      kind: "note",
+      namespace: "feedback",
+      text: "The user prefers compact status cards",
+    });
+
+    const solutions = await readMemory(files, { scope: "project", namespace: "solutions" });
+    assert.equal(solutions.project.memories.length, 1);
+    assert.equal(solutions.project.memories[0].namespace, "solutions");
+
+    const profileDefault = normalizeMemoryNamespace("", "fact", "user");
+    assert.equal(profileDefault, "profile");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -107,8 +153,69 @@ test("memory extracts a stated user name for global recall", () => {
 
   assert.equal(memories.length, 1);
   assert.equal(memories[0].scope, "user");
+  assert.equal(memories[0].namespace, "profile");
   assert.equal(memories[0].text, "The user's name is KOstas");
   assert.deepEqual(memories[0].tags, ["identity", "name"]);
+});
+
+test("run timeline events merge updates by id", () => {
+  const timeline = mergeTimelineEvent([], {
+    id: "cmd-1",
+    kind: "command",
+    status: "running",
+    title: "npm test",
+    detail: "[cwd] /workspace/app",
+  });
+  const merged = mergeTimelineEvent(timeline, {
+    id: "cmd-1",
+    kind: "command",
+    status: "completed",
+    title: "npm test",
+    durationMs: 1234,
+  });
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].status, "completed");
+  assert.equal(merged[0].detail, "[cwd] /workspace/app");
+  assert.equal(merged[0].durationMs, 1234);
+});
+
+test("mcpToolCatalog groups peers and shared tools", () => {
+  const catalog = mcpToolCatalog("claude");
+  assert.ok(catalog.some((tool) => tool.group === "peer-model" && tool.name === "pal-codex"));
+  assert.ok(catalog.some((tool) => tool.group === "memory" && tool.name === "memory"));
+});
+
+test("autopilot history and memory args are bounded", () => {
+  const session = {};
+  for (let index = 0; index < 55; index += 1) {
+    appendAutopilotHistory(session, {
+      action: "message",
+      kind: "continue",
+      reason: `next ${index}`,
+      content: "continue carefully",
+    });
+  }
+
+  assert.equal(session.autopilotHistory.length, 50);
+  assert.equal(session.autopilotHistory.at(-1).reason, "next 54");
+  const memory = autopilotMemoryArgs({ action: "message", kind: "continue", reason: "phase done" });
+  assert.equal(memory.namespace, "autopilot");
+  assert.deepEqual(memory.tags, ["autopilot", "continue"]);
+});
+
+test("hook events are normalized for best-effort logging", () => {
+  const event = normalizeHookEvent({
+    type: "run.start",
+    sessionId: "abc",
+    project: "demo",
+    supervisor: "codex",
+    status: "running",
+    detail: "x".repeat(2000),
+  });
+
+  assert.equal(event.type, "run.start");
+  assert.equal(event.detail.length, 1200);
 });
 
 test("parseUsageProbeOutput extracts numeric status without secrets", () => {

@@ -25,6 +25,7 @@ const state = {
   speechVoicesPromise: null,
   typingSoundTimers: new Map(),
   activeTerminalMessage: null,
+  openTimelineCards: new Set(),
   eventSource: null,
   runs: new Map(),
   statusText: "Ready",
@@ -113,6 +114,7 @@ const el = {
   promptTabs: document.getElementById("promptTabs"),
   promptEditor: document.getElementById("promptEditor"),
   promptStatus: document.getElementById("promptStatus"),
+  resetPrompt: document.getElementById("resetPrompt"),
   savePrompts: document.getElementById("savePrompts"),
   modelDialog: document.getElementById("modelDialog"),
   closeModelDialog: document.getElementById("closeModelDialog"),
@@ -122,10 +124,12 @@ const el = {
   modelPromptPanel: document.getElementById("modelPromptPanel"),
   modelPromptEditor: document.getElementById("modelPromptEditor"),
   modelPromptStatus: document.getElementById("modelPromptStatus"),
+  resetModelPrompt: document.getElementById("resetModelPrompt"),
   saveModelPrompt: document.getElementById("saveModelPrompt"),
   terminalDialog: document.getElementById("terminalDialog"),
   closeTerminal: document.getElementById("closeTerminal"),
   terminalTitle: document.getElementById("terminalTitle"),
+  terminalTimeline: document.getElementById("terminalTimeline"),
   terminalOutput: document.getElementById("terminalOutput"),
   newChat: document.getElementById("newChat"),
   soundToggle: document.getElementById("soundToggle"),
@@ -275,6 +279,25 @@ function storeActiveModelPromptDraft() {
   state.promptDrafts[state.activeModelId] = el.modelPromptEditor.value;
 }
 
+function promptStatusText(prompt) {
+  if (!prompt) return "";
+  if (!prompt.sourceAvailable) return "Canonical source prompt is unavailable.";
+  if (prompt.outdated) {
+    return prompt.userOwned
+      ? "Custom live prompt differs from canonical source."
+      : "Live prompt differs from canonical source.";
+  }
+  return "Matches canonical source.";
+}
+
+function setPromptStore(body) {
+  state.prompts = body.prompts || [];
+  state.promptDrafts = Object.fromEntries(state.prompts.map((prompt) => [prompt.id, prompt.content || ""]));
+  if (!state.prompts.some((prompt) => prompt.id === state.activePromptId)) {
+    state.activePromptId = state.prompts[0]?.id || null;
+  }
+}
+
 function renderPromptTabs() {
   el.promptTabs.innerHTML = "";
   for (const prompt of state.prompts) {
@@ -300,21 +323,21 @@ function renderPromptEditor() {
   if (!prompt) {
     el.promptEditor.value = "";
     el.promptEditor.disabled = true;
+    el.resetPrompt.disabled = true;
     return;
   }
   state.activePromptId = prompt.id;
   el.promptEditor.disabled = false;
+  el.resetPrompt.disabled = !prompt.sourceAvailable;
   el.promptEditor.setAttribute("aria-labelledby", `prompt-tab-${prompt.id}`);
   el.promptEditor.value = state.promptDrafts[prompt.id] ?? prompt.content ?? "";
+  el.promptStatus.classList.toggle("is-error", !prompt.sourceAvailable);
+  el.promptStatus.textContent = promptStatusText(prompt);
 }
 
 async function loadPromptSettings() {
   const body = await api("/api/prompts");
-  state.prompts = body.prompts || [];
-  state.promptDrafts = Object.fromEntries(state.prompts.map((prompt) => [prompt.id, prompt.content || ""]));
-  if (!state.prompts.some((prompt) => prompt.id === state.activePromptId)) {
-    state.activePromptId = state.prompts[0]?.id || null;
-  }
+  setPromptStore(body);
   renderPromptTabs();
   renderPromptEditor();
   return body;
@@ -327,13 +350,43 @@ async function openPromptModal() {
   el.promptEditor.disabled = true;
   el.savePrompts.disabled = true;
   try {
-    const body = await loadPromptSettings();
-    el.promptStatus.textContent = body.promptDir ? `Saved in ${body.promptDir}` : "";
+    await loadPromptSettings();
   } catch (error) {
     el.promptStatus.classList.add("is-error");
     el.promptStatus.textContent = error.message;
   } finally {
     el.savePrompts.disabled = false;
+  }
+}
+
+async function resetPromptById(id, { modelDialog = false } = {}) {
+  const prompt = promptForModel(id);
+  if (!prompt?.sourceAvailable) return;
+  const confirmed = window.confirm(`Reset ${prompt.label} prompt to the canonical source?`);
+  if (!confirmed) return;
+  const status = modelDialog ? el.modelPromptStatus : el.promptStatus;
+  const resetButton = modelDialog ? el.resetModelPrompt : el.resetPrompt;
+  const saveButton = modelDialog ? el.saveModelPrompt : el.savePrompts;
+  resetButton.disabled = true;
+  saveButton.disabled = true;
+  status.classList.remove("is-error");
+  status.textContent = "Resetting prompt...";
+  try {
+    const body = await api("/api/prompts/reset", {
+      method: "POST",
+      body: JSON.stringify({ ids: [id] }),
+    });
+    setPromptStore(body);
+    renderPromptTabs();
+    renderPromptEditor();
+    if (modelDialog) renderModelPromptPanel();
+    status.textContent = "Reset to canonical source.";
+  } catch (error) {
+    status.classList.add("is-error");
+    status.textContent = error.message;
+  } finally {
+    resetButton.disabled = false;
+    saveButton.disabled = false;
   }
 }
 
@@ -1099,13 +1152,16 @@ function renderModelPromptPanel() {
     el.modelPromptEditor.value = "";
     el.modelPromptEditor.disabled = true;
     el.saveModelPrompt.disabled = true;
+    el.resetModelPrompt.disabled = true;
     el.modelPromptStatus.textContent = "Loading prompt...";
     return;
   }
   el.modelPromptEditor.disabled = false;
   el.saveModelPrompt.disabled = false;
+  el.resetModelPrompt.disabled = !prompt.sourceAvailable;
   el.modelPromptEditor.value = state.promptDrafts[prompt.id] ?? prompt.content ?? "";
-  el.modelPromptStatus.textContent = prompt.path ? `Saved in ${prompt.path}` : "";
+  el.modelPromptStatus.classList.toggle("is-error", !prompt.sourceAvailable);
+  el.modelPromptStatus.textContent = promptStatusText(prompt);
 }
 
 function renderModelDialog({ captureScroll = true } = {}) {
@@ -1834,7 +1890,7 @@ function renderMessageBody(body, message) {
     body.appendChild(text);
   }
 
-  if (!message.streaming && !message.trace?.length) return;
+  if (!message.streaming && !message.trace?.length && !message.timeline?.length) return;
 
   const button = document.createElement("button");
   button.type = "button";
@@ -1866,21 +1922,90 @@ function terminalText(trace = []) {
   return trace?.length ? trace.join("") : "Waiting for terminal output...";
 }
 
+function timelineStatusLabel(status) {
+  if (status === "completed") return "done";
+  if (status === "failed") return "error";
+  if (status === "stopped") return "stopped";
+  if (status === "running") return "running";
+  return "info";
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return "";
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  const seconds = Math.round(ms / 100) / 10;
+  return `${seconds}s`;
+}
+
+function createTimelineCard(event) {
+  const details = document.createElement("details");
+  details.className = `timeline-card ${event.status || "info"}`;
+  details.open = state.openTimelineCards.has(event.id);
+
+  const summary = document.createElement("summary");
+  summary.className = "timeline-summary";
+
+  const title = document.createElement("span");
+  title.className = "timeline-title";
+  title.textContent = event.title || event.kind || "step";
+
+  const meta = document.createElement("span");
+  meta.className = "timeline-meta";
+  meta.textContent = [
+    event.kind || "info",
+    timelineStatusLabel(event.status),
+    formatDuration(event.durationMs),
+  ].filter(Boolean).join(" · ");
+
+  summary.append(title, meta);
+  details.appendChild(summary);
+
+  const body = document.createElement("pre");
+  body.className = "timeline-detail";
+  let loaded = false;
+  if (details.open) {
+    body.textContent = event.detail || "No extra details for this step.";
+    loaded = true;
+  }
+  details.addEventListener("toggle", () => {
+    if (details.open) state.openTimelineCards.add(event.id);
+    else state.openTimelineCards.delete(event.id);
+    if (!details.open || loaded) return;
+    body.textContent = event.detail || "No extra details for this step.";
+    loaded = true;
+  });
+  details.appendChild(body);
+  return details;
+}
+
+function renderTerminalTimeline(timeline = []) {
+  el.terminalTimeline.innerHTML = "";
+  if (!timeline.length) {
+    el.terminalTimeline.hidden = true;
+    return;
+  }
+  el.terminalTimeline.hidden = false;
+  for (const event of timeline) el.terminalTimeline.appendChild(createTimelineCard(event));
+}
+
 function renderTerminalModal() {
   const message = state.activeTerminalMessage;
   const shouldStick = isNearBottom(el.terminalOutput);
   if (!message) {
     el.terminalTitle.textContent = "Terminal";
+    renderTerminalTimeline([]);
     el.terminalOutput.textContent = "Waiting for terminal output...";
     if (shouldStick) scrollElementToBottom(el.terminalOutput);
     return;
   }
   el.terminalTitle.textContent = terminalTitleFor(message);
+  renderTerminalTimeline(message.timeline || []);
   el.terminalOutput.textContent = terminalText(message.trace);
   if (shouldStick) scrollElementToBottom(el.terminalOutput);
 }
 
 function openTerminalModal(message) {
+  if (state.activeTerminalMessage !== message) state.openTimelineCards.clear();
   state.activeTerminalMessage = message;
   renderTerminalModal();
   if (!el.terminalDialog.open) el.terminalDialog.showModal();
@@ -1889,6 +2014,7 @@ function openTerminalModal(message) {
 
 function closeTerminalModal() {
   state.activeTerminalMessage = null;
+  state.openTimelineCards.clear();
   if (el.terminalDialog.open) el.terminalDialog.close();
 }
 
@@ -2229,6 +2355,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
     content: "",
     status: "Starting...",
     trace: [],
+    timeline: [],
     at: new Date().toISOString(),
     streaming: true,
   };
@@ -2295,13 +2422,23 @@ async function sendMessageForSession(targetSession, content, files = []) {
           syncOpenTerminal(draft);
         }
       },
+      task(event) {
+        appendTimelineToDraft(draft, event.event);
+        if (viewing()) {
+          updateLastMessage(draft);
+          syncOpenTerminal(draft);
+        }
+      },
       done(event) {
         stopTypingSound(run.sessionId);
         draft.streaming = false;
         run.streaming = false;
         run.session = event.session;
         const last = run.session.messages.at(-1);
-        if (last) last.trace = draft.trace;
+        if (last) {
+          last.trace = draft.trace;
+          last.timeline = draft.timeline;
+        }
         autopilotCandidate = run.session;
         if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("done");
         speakLatestAnswer(run.session);
@@ -2319,7 +2456,10 @@ async function sendMessageForSession(targetSession, content, files = []) {
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
-        if (last) last.trace = draft.trace;
+        if (last) {
+          last.trace = draft.trace;
+          last.timeline = draft.timeline;
+        }
         if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("error");
         if (viewing()) {
           state.currentSession = run.session;
@@ -2334,7 +2474,10 @@ async function sendMessageForSession(targetSession, content, files = []) {
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
-        if (last) last.trace = draft.trace;
+        if (last) {
+          last.trace = draft.trace;
+          last.timeline = draft.timeline;
+        }
         if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("done");
         if (viewing()) {
           state.currentSession = run.session;
@@ -2454,6 +2597,7 @@ function cloneLiveDraft(draft, session) {
     content: draft?.content || "",
     status: draft?.status || "Starting...",
     trace: Array.isArray(draft?.trace) ? [...draft.trace] : [],
+    timeline: Array.isArray(draft?.timeline) ? [...draft.timeline] : [],
     at: draft?.at || new Date().toISOString(),
     streaming: true,
   };
@@ -2473,6 +2617,23 @@ function appendTraceToDraft(draft, content) {
   while (draft.trace.length > 1 && totalChars > 60000) {
     totalChars -= draft.trace.shift().length;
   }
+}
+
+function appendTimelineToDraft(draft, event) {
+  if (!draft || !event?.id) return;
+  draft.timeline ||= [];
+  const index = draft.timeline.findIndex((item) => item.id === event.id);
+  if (index >= 0) {
+    draft.timeline[index] = {
+      ...draft.timeline[index],
+      ...event,
+      at: draft.timeline[index].at || event.at,
+      detail: event.detail || draft.timeline[index].detail || "",
+    };
+  } else {
+    draft.timeline.push(event);
+  }
+  if (draft.timeline.length > 80) draft.timeline = draft.timeline.slice(-80);
 }
 
 function syncLiveSessionView(run, { forceRender = false } = {}) {
@@ -2527,6 +2688,16 @@ function handleLiveTrace(event) {
   }
 }
 
+function handleLiveTask(event) {
+  const run = state.runs.get(event.sessionId);
+  if (!run?.draft) return;
+  appendTimelineToDraft(run.draft, event.event);
+  if (isViewing(run.sessionId)) {
+    updateLastMessage(run.draft);
+    syncOpenTerminal(run.draft);
+  }
+}
+
 function finishLiveRun(event) {
   const run = state.runs.get(event.sessionId);
   const session = event.session ? cloneLiveSession(event.session) : run?.session;
@@ -2539,6 +2710,7 @@ function finishLiveRun(event) {
   }
   const last = session.messages?.at(-1);
   if (last && draft?.trace?.length) last.trace = [...draft.trace];
+  if (last && draft?.timeline?.length) last.timeline = [...draft.timeline];
   if (run?.heartbeat) clearInterval(run.heartbeat);
   stopTypingSound(event.sessionId);
   state.runs.delete(event.sessionId);
@@ -2571,6 +2743,7 @@ function applyLiveEvent(event) {
   if (event.type === "session") handleLiveSession(event);
   else if (event.type === "chunk") handleLiveChunk(event);
   else if (event.type === "trace") handleLiveTrace(event);
+  else if (event.type === "task") handleLiveTask(event);
   else if (event.type === "done" || event.type === "error" || event.type === "stopped") finishLiveRun(event);
 }
 
@@ -2649,6 +2822,7 @@ el.promptDialog.addEventListener("click", (event) => {
 });
 el.promptDialog.querySelector("[data-close-prompts]").addEventListener("click", closePromptModal);
 el.promptEditor.addEventListener("input", storeActivePromptDraft);
+el.resetPrompt.addEventListener("click", () => resetPromptById(state.activePromptId));
 el.savePrompts.addEventListener("click", savePromptSettings);
 el.closeModelDialog.addEventListener("click", closeModelModal);
 el.modelDialog.addEventListener("click", (event) => {
@@ -2660,6 +2834,7 @@ el.modelDialog.addEventListener("close", () => {
   state.activeModelTab = "connection";
 });
 el.modelPromptEditor.addEventListener("input", storeActiveModelPromptDraft);
+el.resetModelPrompt.addEventListener("click", () => resetPromptById(state.activeModelId, { modelDialog: true }));
 el.saveModelPrompt.addEventListener("click", saveActiveModelPrompt);
 el.closeTerminal.addEventListener("click", closeTerminalModal);
 el.terminalDialog.addEventListener("click", (event) => {
