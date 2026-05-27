@@ -435,3 +435,191 @@ test("message API returns bounded provider rate-limit errors and recovers next r
   });
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
+
+test("message API rejects concurrent runs, stops a hung provider call, and recovers", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdir, mkdtemp, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-stop-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-stop-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-stop-home-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+    const originalFetch = globalThis.fetch;
+    let deepseekCalls = 0;
+    let resolveFetchStarted;
+    const fetchStarted = new Promise((resolve) => {
+      resolveFetchStarted = resolve;
+    });
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.ORCH_AUTOPILOT_IDLE_TIMEOUT_MS = "0";
+    process.env.DEEPSEEK_API_KEY = "test-deepseek-key";
+
+    globalThis.fetch = async (url, options = {}) => {
+      const target = String(url || "");
+      if (target.includes("api.deepseek.com")) {
+        deepseekCalls += 1;
+        if (deepseekCalls === 1) {
+          resolveFetchStarted();
+          return new Promise((resolve, reject) => {
+            const abort = () => reject(options.signal?.reason instanceof Error ? options.signal.reason : new Error("aborted"));
+            if (options.signal?.aborted) {
+              abort();
+              return;
+            }
+            options.signal?.addEventListener("abort", abort, { once: true });
+          });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "Recovered after stop." } }],
+          usage: { total_tokens: 11 },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-stop-a"), { recursive: true });
+      await mkdir(path.join(workspaceRoot, "project-stop-b"), { recursive: true });
+      const createdA = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "deepseek",
+        cwd: "project-stop-a",
+      });
+      const createdB = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "deepseek",
+        cwd: "project-stop-b",
+      });
+      assert.equal(createdA.status, 201);
+      assert.equal(createdB.status, 201);
+      const sessionA = createdA.body.session.id;
+      const sessionB = createdB.body.session.id;
+
+      const hangingRequest = jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/messages", {
+        content: "This request should be stopped.",
+      });
+      await fetchStarted;
+
+      const sameSession = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/messages", {
+        content: "Concurrent same-session message.",
+      });
+      assert.equal(sameSession.status, 409);
+      assert.match(sameSession.body.error, /already has a running model/);
+
+      const sameSupervisor = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionB + "/messages", {
+        content: "Concurrent same-supervisor message.",
+      });
+      assert.equal(sameSupervisor.status, 409);
+      assert.match(sameSupervisor.body.error, /already running in another project/);
+
+      const stop = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/stop");
+      assert.equal(stop.status, 202);
+      assert.equal(stop.body.stopped, true);
+
+      const stopped = await hangingRequest;
+      assert.equal(stopped.status, 200);
+      assert.equal(stopped.body.stopped, true);
+      assert.equal(stopped.body.message.stopped, true);
+      assert.equal(stopped.body.message.error, undefined);
+      assert.match(stopped.body.message.content, /Stopped by user/);
+
+      const afterStop = await loadSession(sessionA);
+      assert.equal(afterStop.messages.length, 2);
+      assert.equal(afterStop.messages[0].role, "user");
+      assert.equal(afterStop.messages[0].content, "This request should be stopped.");
+      assert.equal(afterStop.messages[1].role, "assistant");
+      assert.equal(afterStop.messages[1].stopped, true);
+
+      const stopAgain = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/stop");
+      assert.equal(stopAgain.status, 200);
+      assert.equal(stopAgain.body.stopped, false);
+
+      const recovered = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/messages", {
+        content: "This request should recover.",
+      });
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.message.content, "Recovered after stop.");
+      const loaded = await loadSession(sessionA);
+      assert.equal(loaded.messages.length, 4);
+      assert.equal(loaded.messages[2].role, "user");
+      assert.equal(loaded.messages[3].role, "assistant");
+      assert.equal(loaded.messages[3].content, "Recovered after stop.");
+      assert.equal(deepseekCalls, 2);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 15000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
