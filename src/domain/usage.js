@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { paths, runtime, supervisors } from "../config/env.js";
@@ -6,27 +6,31 @@ import { paths, runtime, supervisors } from "../config/env.js";
 const usageFile = path.join(paths.dataDir, "usage.json");
 const DEEPSEEK_BALANCE_TTL_MS = 60_000;
 const PROBE_OUTPUT_LIMIT = 5000;
+const GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal";
+const CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 let usageLock = Promise.resolve();
 let deepSeekBalanceCache = { at: 0, promise: null, result: null };
 let usagePollTimer = null;
 let usagePollInFlight = null;
+const usageProbeInFlight = new Map();
+const usageProbeVersions = new Map();
+let geminiOAuthConfigCache = null;
 
 const cliProbeConfigs = {
   claude: {
-    command: "claude",
-    slashCommand: "/usage",
-    timeoutMs: 25_000,
+    kind: "claude-oauth-usage",
+    displayCommand: "/usage",
+    timeoutMs: 15_000,
   },
   codex: {
-    command: "codex",
-    slashCommand: "/status",
-    timeoutMs: 25_000,
+    kind: "codex-app-server",
+    displayCommand: "/status",
+    timeoutMs: 20_000,
   },
   gemini: {
-    command: "gemini --skip-trust",
-    slashCommand: "/stats",
-    timeoutMs: 25_000,
-    env: { GEMINI_CLI_TRUST_WORKSPACE: "true", NO_BROWSER: "1" },
+    kind: "gemini-code-assist-quota",
+    displayCommand: "/stats model",
+    timeoutMs: 20_000,
   },
 };
 
@@ -47,6 +51,7 @@ function defaultModelUsage(id) {
     lastKnownAt: "",
     currentPercent: null,
     weeklyPercent: null,
+    sonnetWeeklyPercent: null,
     lastTokens: null,
     lastCostUsd: null,
     lastProbeAt: "",
@@ -61,6 +66,10 @@ function defaultModelUsage(id) {
     balanceToppedUp: "",
     balanceUpdatedAt: "",
     balanceError: "",
+    balanceObservedMax: null,
+    balanceRemaining: null,
+    balanceSpent: null,
+    balanceUsagePercent: null,
     days: {},
   };
 }
@@ -94,6 +103,22 @@ function withUsageLock(task) {
   return run;
 }
 
+async function pathExists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasAuthFile(dir, names) {
+  for (const name of names) {
+    if (await pathExists(path.join(dir, name))) return true;
+  }
+  return false;
+}
+
 function daily(model) {
   const key = todayKey();
   model.days[key] ||= { runs: 0 };
@@ -105,6 +130,12 @@ function clampPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
   return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function stripAnsi(text) {
@@ -152,13 +183,21 @@ function usagePercentLabel(line) {
   return "other";
 }
 
+function usagePercentFromLine(value, line) {
+  const percent = clampPercent(value);
+  if (percent === null) return null;
+  const reportsRemaining = /\b(remain(?:ing)?|left|available|unused|free)\b/i.test(line) &&
+    !/\b(usage|used|spent|consumed)\b/i.test(line);
+  return reportsRemaining ? 100 - percent : percent;
+}
+
 export function parseUsageProbeOutput(output) {
   const clean = redactProbeText(output);
   const percentages = [];
   for (const line of clean.split("\n")) {
     if (!/usage|limit|remaining|reset|quota|capacity|rate|current|session|today|daily|week|weekly|7d/i.test(line)) continue;
     for (const match of line.matchAll(/\b(\d{1,3})\s*%/g)) {
-      const percent = clampPercent(match[1]);
+      const percent = usagePercentFromLine(match[1], line);
       if (percent === null) continue;
       percentages.push({ percent, label: usagePercentLabel(line), line });
     }
@@ -178,6 +217,156 @@ export function parseUsageProbeOutput(output) {
     weeklyPercent: weekly,
     tokens: tokenMatch ? Number(tokenMatch[1].replace(/,/g, "")) : null,
     label: percentages.find((item) => item.percent === percent)?.line || bestStatusLine(clean),
+  };
+}
+
+function maxPercent(...values) {
+  return values.reduce((max, value) => {
+    const percent = clampPercent(value);
+    if (percent === null) return max;
+    return max === null ? percent : Math.max(max, percent);
+  }, null);
+}
+
+function isoResetLabel(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function claudeUsageWindowLabel(label, window) {
+  const percent = clampPercent(window?.utilization);
+  if (percent === null) return "";
+  const reset = isoResetLabel(window?.resets_at);
+  return `${label} ${percent}%${reset ? ` reset ${reset}` : ""}`;
+}
+
+export function parseClaudeUsagePayload(payload = {}) {
+  const currentPercent = clampPercent(payload.five_hour?.utilization);
+  const weeklyPercent = clampPercent(payload.seven_day?.utilization);
+  const sonnetWeeklyPercent = clampPercent(payload.seven_day_sonnet?.utilization);
+  const percent = maxPercent(currentPercent, weeklyPercent, sonnetWeeklyPercent);
+  const parts = [
+    claudeUsageWindowLabel("5h", payload.five_hour),
+    claudeUsageWindowLabel("7d", payload.seven_day),
+    claudeUsageWindowLabel("sonnet", payload.seven_day_sonnet),
+  ].filter(Boolean);
+  const extra = payload.extra_usage;
+  if (extra && typeof extra === "object" && extra.is_enabled) {
+    const used = numberOrNull(extra.used_credits);
+    const limit = numberOrNull(extra.monthly_limit);
+    const currency = String(extra.currency || "").trim();
+    if (used !== null && limit !== null) {
+      parts.push(`usage credits ${currency ? `${currency} ` : ""}${used}/${limit}`);
+    } else {
+      parts.push("usage credits enabled");
+    }
+  }
+  const output = parts.length ? parts.join("\n") : "Claude usage endpoint returned no limits";
+  return {
+    output,
+    percent,
+    currentPercent,
+    weeklyPercent,
+    sonnetWeeklyPercent,
+    label: parts.length ? `Claude usage: ${parts.join(" · ")}` : "Claude usage unavailable",
+  };
+}
+
+function unixResetLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return new Date(number * 1000).toISOString();
+}
+
+function rateLimitWindowLabel(label, window) {
+  const percent = clampPercent(window?.usedPercent);
+  if (percent === null) return "";
+  const minutes = Number(window?.windowDurationMins);
+  const duration = Number.isFinite(minutes) && minutes > 0
+    ? minutes >= 60 * 24 ? `${Math.round(minutes / (60 * 24))}d` : `${Math.round(minutes / 60)}h`
+    : label;
+  const reset = unixResetLabel(window?.resetsAt);
+  return `${duration} ${percent}%${reset ? ` reset ${reset}` : ""}`;
+}
+
+function codexSnapshotSignal(snapshot = {}) {
+  const currentPercent = clampPercent(snapshot.primary?.usedPercent);
+  const weeklyPercent = clampPercent(snapshot.secondary?.usedPercent);
+  const percent = maxPercent(currentPercent, weeklyPercent);
+  if (percent === null) return null;
+  const labelParts = [
+    snapshot.limitName || snapshot.limitId || "codex",
+    snapshot.planType ? `plan ${snapshot.planType}` : "",
+    rateLimitWindowLabel("current", snapshot.primary),
+    rateLimitWindowLabel("week", snapshot.secondary),
+  ].filter(Boolean);
+  return {
+    percent,
+    currentPercent,
+    weeklyPercent,
+    label: `Codex rate limits: ${labelParts.join(" · ")}`,
+    output: labelParts.join("\n"),
+  };
+}
+
+export function parseCodexRateLimitPayload(payload = {}) {
+  const snapshots = Object.values(payload.rateLimitsByLimitId || {}).filter(Boolean);
+  if (payload.rateLimits) snapshots.push(payload.rateLimits);
+  const signals = snapshots.map(codexSnapshotSignal).filter(Boolean);
+  if (!signals.length) {
+    return {
+      percent: null,
+      currentPercent: null,
+      weeklyPercent: null,
+      label: "Codex rate limits unavailable",
+      output: "Codex app-server returned no rate limit buckets",
+    };
+  }
+  return signals.reduce((best, signal) => signal.percent > best.percent ? signal : best);
+}
+
+function geminiBucketSignal(bucket = {}) {
+  const remainingFraction = Number(bucket.remainingFraction);
+  const remainingAmount = numberOrNull(bucket.remainingAmount);
+  if (!Number.isFinite(remainingFraction)) return null;
+  const percent = clampPercent((1 - remainingFraction) * 100);
+  if (percent === null) return null;
+  const reset = bucket.resetTime ? new Date(bucket.resetTime).toISOString() : "";
+  const remainingText = remainingAmount !== null
+    ? `${remainingAmount} left`
+    : `${Math.max(0, Math.round(remainingFraction * 100))}% left`;
+  return {
+    percent,
+    currentPercent: percent,
+    weeklyPercent: null,
+    label: `${bucket.modelId || "Gemini model"} ${percent}% used (${remainingText})${reset ? ` reset ${reset}` : ""}`,
+    output: [
+      `model ${bucket.modelId || "unknown"}`,
+      `used ${percent}%`,
+      remainingText,
+      reset ? `reset ${reset}` : "",
+    ].filter(Boolean).join("\n"),
+  };
+}
+
+export function parseGeminiQuotaPayload(payload = {}, loadInfo = {}) {
+  const buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
+  const signals = buckets.map(geminiBucketSignal).filter(Boolean);
+  if (!signals.length) {
+    return {
+      percent: null,
+      currentPercent: null,
+      weeklyPercent: null,
+      label: "Gemini quota unavailable",
+      output: "Gemini Code Assist returned no quota buckets",
+    };
+  }
+  const best = signals.reduce((max, signal) => signal.percent > max.percent ? signal : max);
+  const tier = loadInfo?.paidTier?.name || loadInfo?.currentTier?.name || "";
+  return {
+    ...best,
+    label: `Gemini quota: ${best.label}${tier ? ` · ${tier}` : ""}`,
   };
 }
 
@@ -205,8 +394,34 @@ function normalizeDeepSeekBalance(payload) {
   };
 }
 
+export function calculateBalanceUsage(previousObservedMax, currentRemaining) {
+  const remaining = numberOrNull(currentRemaining);
+  const previousMax = numberOrNull(previousObservedMax);
+  const observedMax = remaining === null
+    ? previousMax
+    : previousMax === null ? remaining : Math.max(previousMax, remaining);
+  const spent = remaining !== null && observedMax !== null ? Math.max(0, observedMax - remaining) : null;
+  const usagePercent = spent !== null && observedMax !== null && observedMax > 0
+    ? clampPercent((spent / observedMax) * 100)
+    : null;
+  return { observedMax, remaining, spent, usagePercent };
+}
+
 async function fetchDeepSeekBalance() {
-  if (!runtime.deepseekApiKey) return null;
+  if (!runtime.deepseekApiKey) {
+    return {
+      mode: "unknown",
+      clearBalance: true,
+      balanceAvailable: null,
+      balanceLabel: "",
+      balanceCurrency: "",
+      balanceTotal: "",
+      balanceGranted: "",
+      balanceToppedUp: "",
+      balanceUpdatedAt: new Date().toISOString(),
+      balanceError: "DeepSeek API key not connected; skipping usage probe",
+    };
+  }
   const now = Date.now();
   if (deepSeekBalanceCache.result && now - deepSeekBalanceCache.at < DEEPSEEK_BALANCE_TTL_MS) {
     return deepSeekBalanceCache.result;
@@ -241,9 +456,9 @@ async function fetchDeepSeekBalance() {
   return deepSeekBalanceCache.promise;
 }
 
-function runCliProbe({ command, slashCommand, timeoutMs = 25_000, env = {} }) {
+function runShellProbe({ command, timeoutMs = 15_000, env = {} }) {
   return new Promise((resolve) => {
-    const child = spawn("script", ["-qfec", command, "/dev/null"], {
+    const child = spawn("bash", ["-lc", command], {
       cwd: paths.workspaceRoot,
       env: probeEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
@@ -258,9 +473,6 @@ function runCliProbe({ command, slashCommand, timeoutMs = 25_000, env = {} }) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      clearTimeout(sendSlash);
-      clearTimeout(sendQuit);
-      clearTimeout(closeInput);
       resolve({ ...parseUsageProbeOutput(output), error });
     };
     const timeout = setTimeout(() => {
@@ -268,22 +480,236 @@ function runCliProbe({ command, slashCommand, timeoutMs = 25_000, env = {} }) {
       setTimeout(() => child.kill("SIGKILL"), 1500).unref();
       finish("usage probe timed out");
     }, timeoutMs);
-    const sendSlash = setTimeout(() => {
-      if (child.stdin.writable) child.stdin.write(`${slashCommand}\n`);
-    }, 3000);
-    const sendQuit = setTimeout(() => {
-      if (child.stdin.writable) child.stdin.write("/quit\n");
-    }, 9000);
-    const closeInput = setTimeout(() => {
-      if (child.stdin.writable) child.stdin.end();
-    }, 12_000);
-
     child.stdout.on("data", append);
     child.stderr.on("data", append);
     child.stdin.on("error", () => {});
+    if (child.stdin.writable) child.stdin.end();
     child.on("error", (error) => finish(error.message || String(error)));
     child.on("close", (code) => finish(code ? `usage probe exited ${code}` : ""));
   });
+}
+
+async function readClaudeOauthCredentials() {
+  const file = path.join(paths.homeDir, ".claude", ".credentials.json");
+  const credentials = JSON.parse(await readFile(file, "utf8"));
+  const oauth = credentials.claudeAiOauth && typeof credentials.claudeAiOauth === "object"
+    ? credentials.claudeAiOauth
+    : {};
+  if (!oauth.accessToken) throw new Error("Claude OAuth token is missing; reconnect Claude CLI");
+  return oauth;
+}
+
+async function probeClaudeOauthUsage({ timeoutMs = 15_000 } = {}) {
+  const oauth = await readClaudeOauthCredentials();
+  const response = await fetch(CLAUDE_USAGE_ENDPOINT, {
+    headers: {
+      authorization: `Bearer ${oauth.accessToken}`,
+      "content-type": "application/json",
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error("Claude OAuth token cannot read usage; reconnect Claude CLI");
+  }
+  if (!response.ok) throw new Error(`Claude usage HTTP ${response.status}`);
+  return parseClaudeUsagePayload(await response.json());
+}
+
+function runCodexAppServerProbe({ timeoutMs = 20_000 }) {
+  return new Promise((resolve) => {
+    const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+      cwd: paths.workspaceRoot,
+      env: probeEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let output = "";
+    let stdoutBuffer = "";
+    let settled = false;
+    const append = (chunk) => {
+      output = `${output}${chunk.toString("utf8")}`;
+      if (output.length > PROBE_OUTPUT_LIMIT * 4) output = output.slice(-PROBE_OUTPUT_LIMIT * 4);
+    };
+    const finish = (signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({
+        ...signal,
+        output: signal.output || redactProbeText(output),
+        error: signal.error || "",
+      });
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 1500).unref();
+    };
+    const timeout = setTimeout(() => {
+      finish({
+        ...parseUsageProbeOutput(output),
+        error: "Codex app-server rate limit probe timed out",
+      });
+    }, timeoutMs);
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (message.id !== 2) return;
+      if (message.error) {
+        finish({
+          ...parseUsageProbeOutput(output),
+          error: message.error.message || "Codex app-server rate limit probe failed",
+        });
+        return;
+      }
+      finish(parseCodexRateLimitPayload(message.result || {}));
+    };
+
+    child.stdout.on("data", (chunk) => {
+      append(chunk);
+      stdoutBuffer += chunk.toString("utf8");
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || "";
+      for (const line of lines) handleLine(line);
+    });
+    child.stderr.on("data", append);
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => finish({ error: error.message || String(error) }));
+    child.on("close", (code) => {
+      if (settled) return;
+      if (stdoutBuffer) handleLine(stdoutBuffer);
+      finish({
+        ...parseUsageProbeOutput(output),
+        error: code ? `Codex app-server rate limit probe exited ${code}` : "Codex app-server closed before returning rate limits",
+      });
+    });
+    const messages = [
+      { id: 1, method: "initialize", params: { clientInfo: { name: "orch-ui", version: "0" }, capabilities: { experimentalApi: true } } },
+      { method: "initialized" },
+      { id: 2, method: "account/rateLimits/read" },
+    ];
+    for (const message of messages) child.stdin.write(`${JSON.stringify(message)}\n`);
+  });
+}
+
+async function readGeminiOauthCredentials() {
+  const file = path.join(paths.homeDir, ".gemini", "oauth_creds.json");
+  const credentials = JSON.parse(await readFile(file, "utf8"));
+  return { file, credentials };
+}
+
+async function geminiOauthClientConfig() {
+  if (geminiOAuthConfigCache) return geminiOAuthConfigCache;
+  if (process.env.GEMINI_OAUTH_CLIENT_ID && process.env.GEMINI_OAUTH_CLIENT_SECRET) {
+    geminiOAuthConfigCache = {
+      clientId: process.env.GEMINI_OAUTH_CLIENT_ID,
+      clientSecret: process.env.GEMINI_OAUTH_CLIENT_SECRET,
+    };
+    return geminiOAuthConfigCache;
+  }
+
+  const bundleDir = process.env.GEMINI_CLI_BUNDLE_DIR ||
+    "/usr/local/lib/node_modules/@google/gemini-cli/bundle";
+  const files = await readdir(bundleDir);
+  for (const file of files) {
+    if (!file.endsWith(".js")) continue;
+    const source = await readFile(path.join(bundleDir, file), "utf8");
+    const clientId = source.match(/\bOAUTH_CLIENT_ID\s*=\s*"([^"]+)"/)?.[1];
+    const clientSecret = source.match(/\bOAUTH_CLIENT_SECRET\s*=\s*"([^"]+)"/)?.[1];
+    if (clientId && clientSecret) {
+      geminiOAuthConfigCache = { clientId, clientSecret };
+      return geminiOAuthConfigCache;
+    }
+  }
+  throw new Error("Gemini OAuth client config not found; set GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET");
+}
+
+async function geminiAccessToken() {
+  const { file, credentials } = await readGeminiOauthCredentials();
+  const expiresAt = Number(credentials.expiry_date || 0);
+  if (credentials.access_token && expiresAt > Date.now() + 60_000) return credentials.access_token;
+  if (!credentials.refresh_token) throw new Error("Gemini OAuth refresh token is missing; reconnect Gemini CLI");
+  const oauthClient = await geminiOauthClientConfig();
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: oauthClient.clientId,
+      client_secret: oauthClient.clientSecret,
+      refresh_token: credentials.refresh_token,
+      grant_type: "refresh_token",
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Gemini OAuth refresh HTTP ${response.status}`);
+  const refreshed = await response.json();
+  if (!refreshed.access_token) throw new Error("Gemini OAuth refresh returned no access token");
+  const next = {
+    ...credentials,
+    access_token: refreshed.access_token,
+    token_type: refreshed.token_type || credentials.token_type || "Bearer",
+    expiry_date: Date.now() + Math.max(0, Number(refreshed.expires_in || 0)) * 1000,
+  };
+  await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return next.access_token;
+}
+
+async function postGeminiCodeAssist(method, body, accessToken) {
+  const response = await fetch(`${GEMINI_CODE_ASSIST_ENDPOINT}:${method}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Gemini Code Assist ${method} HTTP ${response.status}`);
+  return response.json();
+}
+
+async function probeGeminiCodeAssistQuota() {
+  const token = await geminiAccessToken();
+  const loadInfo = await postGeminiCodeAssist("loadCodeAssist", {
+    metadata: {
+      ideType: "IDE_UNSPECIFIED",
+      platform: "PLATFORM_UNSPECIFIED",
+      pluginType: "GEMINI",
+    },
+  }, token);
+  const project = loadInfo.cloudaicompanionProject || process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+  if (!project) throw new Error("Gemini Code Assist project is missing");
+  const quota = await postGeminiCodeAssist("retrieveUserQuota", { project }, token);
+  return parseGeminiQuotaPayload(quota, loadInfo);
+}
+
+async function usageAuthError(supervisor, config) {
+  try {
+    if (config.kind === "claude-oauth-usage") {
+      await readClaudeOauthCredentials();
+      return "";
+    }
+    if (config.kind === "gemini-code-assist-quota") {
+      const { credentials } = await readGeminiOauthCredentials();
+      return credentials.access_token || credentials.refresh_token
+        ? ""
+        : "Gemini auth not connected; skipping usage probe";
+    }
+    if (config.kind === "codex-app-server") {
+      if (process.env.OPENAI_API_KEY || process.env.CODEX_ACCESS_TOKEN) return "";
+      const connected = await hasAuthFile(path.join(paths.homeDir, ".codex"), [
+        "auth.json",
+        "credentials.json",
+        "session.json",
+      ]);
+      return connected ? "" : "Codex auth not connected; skipping usage probe";
+    }
+    return "";
+  } catch {
+    return `${supervisors[supervisor]?.label || supervisor} auth not connected; skipping usage probe`;
+  }
 }
 
 export async function recordRunStart(supervisor) {
@@ -320,8 +746,9 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     const percent = clampPercent(signal.percent);
     const currentPercent = clampPercent(signal.currentPercent);
     const weeklyPercent = clampPercent(signal.weeklyPercent);
-    const tokens = Number(signal.tokens);
-    const costUsd = Number(signal.costUsd);
+    const sonnetWeeklyPercent = clampPercent(signal.sonnetWeeklyPercent);
+    const tokens = numberOrNull(signal.tokens);
+    const costUsd = numberOrNull(signal.costUsd);
     if (percent !== null) {
       model.lastKnownPercent = percent;
       model.lastKnownLabel = String(signal.label || signal.type || "provider signal");
@@ -329,21 +756,24 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     }
     if (currentPercent !== null) model.currentPercent = currentPercent;
     if (weeklyPercent !== null) model.weeklyPercent = weeklyPercent;
-    if (Number.isFinite(tokens)) model.lastTokens = Math.max(0, Math.round(tokens));
-    if (Number.isFinite(costUsd)) model.lastCostUsd = costUsd;
+    if (sonnetWeeklyPercent !== null) model.sonnetWeeklyPercent = sonnetWeeklyPercent;
+    if (tokens !== null) model.lastTokens = Math.max(0, Math.round(tokens));
+    if (costUsd !== null) model.lastCostUsd = costUsd;
     await writeStore(store);
   });
 }
 
 async function recordProbeResult(supervisor, signal = {}) {
   if (!supervisors[supervisor]) return;
+  if (signal.probeVersion && signal.probeVersion !== usageProbeVersions.get(supervisor)) return;
   return withUsageLock(async () => {
     const store = await readStore();
     const model = store.models[supervisor];
     const percent = clampPercent(signal.percent);
     const currentPercent = clampPercent(signal.currentPercent);
     const weeklyPercent = clampPercent(signal.weeklyPercent);
-    const tokens = Number(signal.tokens);
+    const sonnetWeeklyPercent = clampPercent(signal.sonnetWeeklyPercent);
+    const tokens = numberOrNull(signal.tokens);
     const now = new Date().toISOString();
 
     model.lastProbeAt = now;
@@ -357,16 +787,23 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.lastKnownAt = now;
       model.currentPercent = currentPercent;
       model.weeklyPercent = weeklyPercent;
-    } else {
+      model.sonnetWeeklyPercent = sonnetWeeklyPercent;
+    } else if (!signal.error || signal.clearKnown) {
       model.lastKnownPercent = null;
       model.lastKnownLabel = "";
       model.lastKnownAt = "";
       model.currentPercent = null;
       model.weeklyPercent = null;
+      model.sonnetWeeklyPercent = null;
     }
-    if (Number.isFinite(tokens)) model.lastTokens = Math.max(0, Math.round(tokens));
+    if (tokens !== null) model.lastTokens = Math.max(0, Math.round(tokens));
 
     if (signal.mode === "balance") {
+      const { observedMax, remaining, spent, usagePercent } = calculateBalanceUsage(
+        model.balanceObservedMax,
+        signal.balanceTotal,
+      );
+
       model.balanceAvailable = Boolean(signal.balanceAvailable);
       model.balanceLabel = String(signal.balanceLabel || "");
       model.balanceCurrency = String(signal.balanceCurrency || "");
@@ -375,6 +812,23 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.balanceToppedUp = String(signal.balanceToppedUp || "");
       model.balanceUpdatedAt = signal.balanceUpdatedAt || now;
       model.balanceError = "";
+      model.balanceObservedMax = observedMax;
+      model.balanceRemaining = remaining;
+      model.balanceSpent = spent;
+      model.balanceUsagePercent = usagePercent;
+    } else if (supervisor === "deepseek" && signal.clearBalance) {
+      model.balanceAvailable = null;
+      model.balanceLabel = "";
+      model.balanceCurrency = "";
+      model.balanceTotal = "";
+      model.balanceGranted = "";
+      model.balanceToppedUp = "";
+      model.balanceUpdatedAt = "";
+      model.balanceObservedMax = null;
+      model.balanceRemaining = null;
+      model.balanceSpent = null;
+      model.balanceUsagePercent = null;
+      model.balanceError = String(signal.balanceError || "");
     } else if (supervisor === "deepseek" && signal.balanceError) {
       model.balanceError = String(signal.balanceError || "");
       model.balanceUpdatedAt = signal.balanceUpdatedAt || now;
@@ -388,20 +842,56 @@ async function modelActive(supervisor) {
   return Boolean(store.models[supervisor]?.active);
 }
 
-async function probeCliUsage(supervisor, config) {
+async function probeCliUsage(supervisor, config, { probeVersion } = {}) {
   if (await modelActive(supervisor)) return;
-  const result = await runCliProbe(config);
+  const command = config.displayCommand || config.command;
+  const authError = await usageAuthError(supervisor, config);
+  if (authError) {
+    await recordProbeResult(supervisor, {
+      probeVersion,
+      percent: null,
+      currentPercent: null,
+      weeklyPercent: null,
+      output: "",
+      label: "",
+      error: authError,
+      clearKnown: true,
+      command,
+    });
+    return;
+  }
+  let result;
+  try {
+    result = config.kind === "codex-app-server"
+      ? await runCodexAppServerProbe(config)
+      : config.kind === "claude-oauth-usage"
+        ? await probeClaudeOauthUsage(config)
+        : config.kind === "gemini-code-assist-quota"
+          ? await probeGeminiCodeAssistQuota(config)
+          : await runShellProbe(config);
+  } catch (error) {
+    result = {
+      percent: null,
+      currentPercent: null,
+      weeklyPercent: null,
+      output: "",
+      label: "",
+      error: error.message || String(error),
+    };
+  }
   await recordProbeResult(supervisor, {
     ...result,
-    command: config.slashCommand,
+    probeVersion,
+    command,
   });
 }
 
-async function probeDeepSeekUsage() {
+async function probeDeepSeekUsage({ probeVersion } = {}) {
   const balance = await fetchDeepSeekBalance();
   if (!balance) return;
   await recordProbeResult("deepseek", {
     ...balance,
+    probeVersion,
     command: "GET /user/balance",
     label: balance.balanceLabel ? `DeepSeek balance ${balance.balanceLabel}` : "DeepSeek balance",
     output: balance.balanceError || `${balance.balanceAvailable ? "available" : "unavailable"} ${balance.balanceLabel || ""}`.trim(),
@@ -412,10 +902,7 @@ async function probeDeepSeekUsage() {
 export async function refreshUsageSnapshots() {
   if (usagePollInFlight) return usagePollInFlight;
   usagePollInFlight = (async () => {
-    const tasks = [
-      ...Object.entries(cliProbeConfigs).map(([supervisor, config]) => probeCliUsage(supervisor, config)),
-      probeDeepSeekUsage(),
-    ];
+    const tasks = [...Object.keys(cliProbeConfigs), "deepseek"].map((supervisor) => refreshUsageSnapshot(supervisor));
     const results = await Promise.allSettled(tasks);
     for (const result of results) {
       if (result.status === "rejected") console.error("[usage] probe failed:", result.reason?.message || result.reason);
@@ -426,6 +913,25 @@ export async function refreshUsageSnapshots() {
   } finally {
     usagePollInFlight = null;
   }
+}
+
+export function refreshUsageSnapshot(supervisor, { force = false } = {}) {
+  if (!supervisors[supervisor]) return Promise.resolve();
+  if (!force && usageProbeInFlight.has(supervisor)) return usageProbeInFlight.get(supervisor);
+  const probeVersion = (usageProbeVersions.get(supervisor) || 0) + 1;
+  usageProbeVersions.set(supervisor, probeVersion);
+
+  const probe = async () => {
+    if (supervisor === "deepseek") {
+      await probeDeepSeekUsage({ probeVersion });
+      return;
+    }
+    const config = cliProbeConfigs[supervisor];
+    if (config) await probeCliUsage(supervisor, config, { probeVersion });
+  };
+  const run = probe().finally(() => usageProbeInFlight.delete(supervisor));
+  usageProbeInFlight.set(supervisor, run);
+  return run;
 }
 
 export function startUsagePolling() {
@@ -449,10 +955,11 @@ export async function listUsage() {
     const runsToday = model.days?.[today]?.runs || 0;
     const hasKnownPercent = Number.isFinite(model.lastKnownPercent);
     const hasBalance = model.balanceAvailable !== null && model.balanceUpdatedAt;
+    const balanceUsagePercent = Number.isFinite(model.balanceUsagePercent) ? model.balanceUsagePercent : null;
     return {
       id,
       label: supervisors[id].label,
-      percent: hasKnownPercent ? model.lastKnownPercent : null,
+      percent: hasKnownPercent ? model.lastKnownPercent : hasBalance ? balanceUsagePercent : null,
       mode: hasKnownPercent ? "provider" : hasBalance ? "balance" : "unknown",
       active: Boolean(model.active),
       runsToday,
@@ -464,7 +971,8 @@ export async function listUsage() {
       lastKnownAt: model.lastKnownAt || "",
       currentPercent: Number.isFinite(model.currentPercent) ? model.currentPercent : null,
       weeklyPercent: Number.isFinite(model.weeklyPercent) ? model.weeklyPercent : null,
-      lastTokens: Number.isFinite(model.lastTokens) ? model.lastTokens : null,
+      sonnetWeeklyPercent: Number.isFinite(model.sonnetWeeklyPercent) ? model.sonnetWeeklyPercent : null,
+      lastTokens: Number.isFinite(model.lastTokens) && model.lastTokens > 0 ? model.lastTokens : null,
       lastCostUsd: Number.isFinite(model.lastCostUsd) ? model.lastCostUsd : null,
       lastProbeAt: model.lastProbeAt || "",
       lastProbeError: model.lastProbeError || "",
@@ -478,6 +986,10 @@ export async function listUsage() {
       balanceToppedUp: model.balanceToppedUp || "",
       balanceUpdatedAt: model.balanceUpdatedAt || "",
       balanceError: model.balanceError || "",
+      balanceObservedMax: Number.isFinite(model.balanceObservedMax) ? model.balanceObservedMax : null,
+      balanceRemaining: Number.isFinite(model.balanceRemaining) ? model.balanceRemaining : null,
+      balanceSpent: Number.isFinite(model.balanceSpent) ? model.balanceSpent : null,
+      balanceUsagePercent,
     };
   });
 }

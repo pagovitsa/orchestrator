@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime, supervisors } from "../config/env.js";
+import { refreshUsageSnapshot } from "./usage.js";
 import { writeStartupPeerConfigs } from "../supervisors/mcp.js";
 
 const MAX_OUTPUT_CHARS = 80000;
@@ -185,6 +186,23 @@ function publicJob(job) {
   };
 }
 
+async function refreshConnectedUsage(id) {
+  try {
+    const connections = await connectionStatus();
+    if (!connections.find((connection) => connection.id === id)?.connected) return;
+    await refreshUsageSnapshot(id, { force: true });
+  } catch (error) {
+    console.error(`[usage] immediate ${id} probe failed:`, error.message || error);
+  }
+}
+
+function scheduleConnectedUsageRefresh(id) {
+  const timer = setTimeout(() => {
+    refreshConnectedUsage(id);
+  }, 750);
+  timer.unref();
+}
+
 function latestJobFor(connectionId) {
   let latest = null;
   for (const job of jobs.values()) {
@@ -234,6 +252,7 @@ async function saveDeepSeekKey(apiKey) {
   await writeFile(filePath, `${key}\n`, { encoding: "utf8", mode: 0o600 });
   process.env.DEEPSEEK_API_KEY = key;
   runtime.deepseekApiKey = key;
+  await refreshUsageSnapshot("deepseek", { force: true });
   return {
     id: "deepseek",
     label: "DeepSeek V4 Pro",
@@ -247,6 +266,7 @@ async function removeDeepSeekKey() {
   await rm(path.join(paths.secretsDir, "deepseek-api-key"), { force: true });
   process.env.DEEPSEEK_API_KEY = "";
   runtime.deepseekApiKey = "";
+  await refreshUsageSnapshot("deepseek", { force: true });
 }
 
 async function isGeminiConnected(geminiDir) {
@@ -369,6 +389,7 @@ export async function startConnection(id, body = {}) {
     if (job.status === "done" && job.exitCode === null) job.exitCode = 0;
     job.updatedAt = new Date().toISOString();
     job.child = null;
+    if (job.status === "done") scheduleConnectedUsageRefresh(job.connectionId);
   });
 
   return { job: publicJob(job) };
@@ -395,6 +416,7 @@ export async function disconnectConnection(id) {
   };
   await removeAuthFiles(authDirs[id], authFiles[id] || []);
   await writeStartupPeerConfigs();
+  await refreshUsageSnapshot(id, { force: true });
 
   return { disconnected: true, connections: await connectionStatus() };
 }

@@ -3,20 +3,66 @@ const state = {
   sessions: [],
   projects: [],
   currentSession: null,
+  clientId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
   selectedFiles: [],
   connections: [],
   connectionJobs: {},
   connectionPollers: {},
   connectionInputs: {},
+  connectionOutputScroll: {},
   focusedConnectionInput: null,
   usage: [],
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
+  activeModelId: null,
+  activeModelTab: "connection",
+  projectMenuProject: null,
+  projectAutopilot: readProjectAutopilot(),
+  soundMuted: readBooleanPreference("orch.soundMuted", false),
+  speechEnabled: readBooleanPreference("orch.speechEnabled", false),
+  audioContext: null,
+  typingSoundTimers: new Map(),
   activeTerminalMessage: null,
+  eventSource: null,
   runs: new Map(),
   statusText: "Ready",
 };
+
+function readProjectAutopilot() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("orch.projectAutopilot") || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProjectAutopilot() {
+  try {
+    localStorage.setItem("orch.projectAutopilot", JSON.stringify(state.projectAutopilot));
+  } catch {
+    // Storage can be unavailable in strict privacy modes; the toggle still works for this session.
+  }
+}
+
+function readBooleanPreference(key, fallback = false) {
+  try {
+    const value = localStorage.getItem(key);
+    if (value === null) return fallback;
+    return value === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeBooleanPreference(key, value) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // Preferences still work for this tab if persistent storage is unavailable.
+  }
+}
 
 // Active model runs, keyed by session id, so a run keeps streaming in the background while the user
 // navigates to other projects. Each run owns its own session object + assistant draft; the UI only
@@ -57,8 +103,6 @@ document.addEventListener("visibilitychange", () => {
 const el = {
   sidebar: document.querySelector(".sidebar"),
   sidebarToggle: document.getElementById("sidebarToggle"),
-  connectButton: document.getElementById("connectButton"),
-  promptButton: document.getElementById("promptButton"),
   connectDialog: document.getElementById("connectDialog"),
   closeConnect: document.getElementById("closeConnect"),
   refreshConnections: document.getElementById("refreshConnections"),
@@ -69,11 +113,23 @@ const el = {
   promptEditor: document.getElementById("promptEditor"),
   promptStatus: document.getElementById("promptStatus"),
   savePrompts: document.getElementById("savePrompts"),
+  modelDialog: document.getElementById("modelDialog"),
+  closeModelDialog: document.getElementById("closeModelDialog"),
+  modelDialogTitle: document.getElementById("modelDialogTitle"),
+  modelDialogTabs: document.getElementById("modelDialogTabs"),
+  modelConnectionPanel: document.getElementById("modelConnectionPanel"),
+  modelPromptPanel: document.getElementById("modelPromptPanel"),
+  modelPromptEditor: document.getElementById("modelPromptEditor"),
+  modelPromptStatus: document.getElementById("modelPromptStatus"),
+  saveModelPrompt: document.getElementById("saveModelPrompt"),
   terminalDialog: document.getElementById("terminalDialog"),
   closeTerminal: document.getElementById("closeTerminal"),
   terminalTitle: document.getElementById("terminalTitle"),
   terminalOutput: document.getElementById("terminalOutput"),
   newChat: document.getElementById("newChat"),
+  soundToggle: document.getElementById("soundToggle"),
+  speechToggle: document.getElementById("speechToggle"),
+  projectContextMenu: document.getElementById("projectContextMenu"),
   modalProjectName: document.getElementById("modalProjectName"),
   projectOptions: document.getElementById("projectOptions"),
   modalSupervisorSelect: document.getElementById("modalSupervisorSelect"),
@@ -106,13 +162,23 @@ async function api(path, options = {}) {
 
 function setStatus(text) {
   state.statusText = text;
-  el.status.title = text;
   el.status.setAttribute("aria-description", text);
 }
 
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
 function formatDate(value) {
   if (!value) return "";
-  return new Date(value).toLocaleString();
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : dateTimeFormatter.format(date);
 }
 
 function formatBytes(bytes) {
@@ -120,6 +186,16 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
+}
+
+function isNearBottom(element, threshold = 80) {
+  if (!element) return true;
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+function scrollElementToBottom(element) {
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
 }
 
 function workspaceText(cwd = ".") {
@@ -184,9 +260,18 @@ function activePrompt() {
   return state.prompts.find((prompt) => prompt.id === state.activePromptId) || state.prompts[0];
 }
 
+function promptForModel(id) {
+  return state.prompts.find((prompt) => prompt.id === id);
+}
+
 function storeActivePromptDraft() {
   if (!state.activePromptId) return;
   state.promptDrafts[state.activePromptId] = el.promptEditor.value;
+}
+
+function storeActiveModelPromptDraft() {
+  if (!state.activeModelId || state.activeModelTab !== "prompt") return;
+  state.promptDrafts[state.activeModelId] = el.modelPromptEditor.value;
 }
 
 function renderPromptTabs() {
@@ -274,6 +359,27 @@ async function savePromptSettings() {
   }
 }
 
+async function saveActiveModelPrompt() {
+  if (!state.activeModelId) return;
+  storeActiveModelPromptDraft();
+  const id = state.activeModelId;
+  el.saveModelPrompt.disabled = true;
+  el.modelPromptStatus.classList.remove("is-error");
+  el.modelPromptStatus.textContent = "Saving prompt...";
+  try {
+    await api("/api/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts: { [id]: state.promptDrafts[id] || "" } }),
+    });
+    el.modelPromptStatus.textContent = "Saved. Reloading...";
+    setTimeout(() => location.reload(), 350);
+  } catch (error) {
+    el.modelPromptStatus.classList.add("is-error");
+    el.modelPromptStatus.textContent = error.message;
+    el.saveModelPrompt.disabled = false;
+  }
+}
+
 function isAttachmentMenuOpen() {
   return !el.attachmentMenu.hidden;
 }
@@ -308,22 +414,22 @@ function collapseResponsiveSidebar() {
 
 function modelIcon(id) {
   const icons = {
-    claude: "M12 3l1.7 5.1L19 10l-5.3 1.9L12 17l-1.7-5.1L5 10l5.3-1.9L12 3Z",
-    codex: "M5 8l4 4-4 4M12 17h7",
-    gemini: "M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z",
-    deepseek: "M4 13c2.7-5.2 6.2 5.2 9 0 2.1-4 5-3.6 7 0M5 18h14",
+    claude: "/icons/claude.svg",
+    codex: "/icons/codex.svg",
+    gemini: "/icons/gemini.svg",
+    deepseek: "/icons/deepseek.svg",
   };
-  return icons[id] || "?";
+  return icons[id] || "";
 }
 
 function createModelIcon(id) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", modelIcon(id));
-  svg.appendChild(path);
-  return svg;
+  const src = modelIcon(id);
+  const icon = document.createElement("span");
+  icon.className = "model-icon-glyph";
+  icon.setAttribute("aria-hidden", "true");
+  if (src) icon.style.setProperty("--model-icon-url", `url("${src}")`);
+  else icon.textContent = "?";
+  return icon;
 }
 
 function iconSvg(paths) {
@@ -338,26 +444,207 @@ const icons = {
   send: ["M12 19V5M6 11l6-6 6 6"],
   stop: ["M8 8h8v8H8z"],
   terminal: ["M6 9a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9", "M10 21h4"],
-  trash: ["M3 6h18", "M8 6V4h8v2", "M6 6l1 15h10l1-15", "M10 11v6M14 11v6"],
+  soundOn: [
+    "M11 5 6 9H2v6h4l5 4V5z",
+    "M15.5 8.5a5 5 0 0 1 0 7",
+    "M18.5 5.5a9 9 0 0 1 0 13",
+  ],
+  soundOff: ["M11 5 6 9H2v6h4l5 4V5z", "M22 9l-6 6M16 9l6 6"],
+  speechOn: [
+    "M7 8h10",
+    "M7 12h7",
+    "M21 12c0 4.4-4 8-9 8a10 10 0 0 1-4-.8L3 21l1.6-4A7.3 7.3 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8z",
+  ],
+  speechOff: [
+    "M7 8h6",
+    "M7 12h3",
+    "M21 12c0 1.6-.5 3.1-1.5 4.3M16.8 19.1A10.4 10.4 0 0 1 12 20a10 10 0 0 1-4-.8L3 21l1.6-4A7.3 7.3 0 0 1 3 12c0-1.6.5-3.1 1.5-4.3M8.2 4.9A10.4 10.4 0 0 1 12 4c5 0 9 3.6 9 8",
+    "M3 3l18 18",
+  ],
+  autopilot: [
+    "M12 3v4",
+    "M12 17v4",
+    "M3 12h4",
+    "M17 12h4",
+    "M7.8 7.8l2.4 2.4",
+    "M13.8 13.8l2.4 2.4",
+    "M16.2 7.8l-2.4 2.4",
+    "M10.2 13.8l-2.4 2.4",
+  ],
 };
+
+function renderMediaToggles() {
+  el.soundToggle.innerHTML = iconSvg(state.soundMuted ? icons.soundOff : icons.soundOn);
+  el.soundToggle.classList.toggle("is-muted", state.soundMuted);
+  el.soundToggle.classList.toggle("is-on", !state.soundMuted);
+  el.soundToggle.title = state.soundMuted ? "Sounds muted" : "Sounds on";
+  el.soundToggle.setAttribute("aria-label", state.soundMuted ? "Unmute sounds" : "Mute sounds");
+  el.soundToggle.setAttribute("aria-pressed", String(!state.soundMuted));
+
+  el.speechToggle.innerHTML = iconSvg(state.speechEnabled ? icons.speechOn : icons.speechOff);
+  el.speechToggle.classList.toggle("is-muted", !state.speechEnabled);
+  el.speechToggle.classList.toggle("is-on", state.speechEnabled);
+  el.speechToggle.title = state.speechEnabled ? "Speech on" : "Speech off";
+  el.speechToggle.setAttribute("aria-label", state.speechEnabled ? "Mute speech" : "Read answers aloud");
+  el.speechToggle.setAttribute("aria-pressed", String(state.speechEnabled));
+}
+
+function ensureAudioContext() {
+  if (state.soundMuted) return null;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!state.audioContext) state.audioContext = new AudioContextClass();
+  if (state.audioContext.state === "suspended") state.audioContext.resume().catch(() => {});
+  return state.audioContext;
+}
+
+function playTone({ frequency, duration = 0.06, delay = 0, type = "sine", gain = 0.025 }) {
+  const audioContext = ensureAudioContext();
+  if (!audioContext) return;
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+  const start = audioContext.currentTime + delay;
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, start);
+  gainNode.gain.setValueAtTime(0.0001, start);
+  gainNode.gain.exponentialRampToValueAtTime(gain, start + 0.012);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.02);
+}
+
+function playTypingTick() {
+  playTone({ frequency: 640, duration: 0.035, type: "triangle", gain: 0.015 });
+  playTone({ frequency: 780, duration: 0.028, delay: 0.055, type: "triangle", gain: 0.011 });
+}
+
+function startTypingSound(sessionId) {
+  if (state.soundMuted || state.typingSoundTimers.has(sessionId)) return;
+  state.typingSoundTimers.set(sessionId, null);
+  playTypingTick();
+}
+
+function stopTypingSound(sessionId) {
+  state.typingSoundTimers.delete(sessionId);
+}
+
+function stopAllTypingSounds() {
+  for (const sessionId of state.typingSoundTimers.keys()) stopTypingSound(sessionId);
+}
+
+function playRunFinishedSound(kind = "done") {
+  if (kind === "error") {
+    playTone({ frequency: 240, duration: 0.12, type: "sawtooth", gain: 0.026 });
+    playTone({ frequency: 150, duration: 0.16, delay: 0.12, type: "sawtooth", gain: 0.02 });
+    return;
+  }
+  playTone({ frequency: 523.25, duration: 0.08, type: "sine", gain: 0.024 });
+  playTone({ frequency: 783.99, duration: 0.12, delay: 0.095, type: "sine", gain: 0.022 });
+}
+
+function toggleSoundMute() {
+  state.soundMuted = !state.soundMuted;
+  writeBooleanPreference("orch.soundMuted", state.soundMuted);
+  if (state.soundMuted) stopAllTypingSounds();
+  else {
+    for (const run of state.runs.values()) {
+      if (run.streaming) startTypingSound(run.sessionId);
+    }
+  }
+  renderMediaToggles();
+}
+
+function answerTextForSpeech(session) {
+  const messages = [...(session?.messages || [])].reverse();
+  const answer = messages.find((message) =>
+    message.role === "assistant" &&
+    !message.streaming &&
+    !message.error &&
+    !message.stopped &&
+    String(message.content || "").trim()
+  );
+  return String(answer?.content || "").replace(/\s+/g, " ").trim().slice(0, 4500);
+}
+
+function countMatches(text, pattern) {
+  return text.match(pattern)?.length || 0;
+}
+
+function detectSpeechLanguage(text) {
+  const value = String(text || "");
+  const scores = [
+    { lang: "el-GR", score: countMatches(value, /[\u0370-\u03ff\u1f00-\u1fff]/g) },
+    { lang: "ru-RU", score: countMatches(value, /[\u0400-\u04ff]/g) },
+    { lang: "ar-SA", score: countMatches(value, /[\u0600-\u06ff]/g) },
+    { lang: "he-IL", score: countMatches(value, /[\u0590-\u05ff]/g) },
+    { lang: "ko-KR", score: countMatches(value, /[\uac00-\ud7af]/g) },
+    { lang: "ja-JP", score: countMatches(value, /[\u3040-\u30ff]/g) },
+    { lang: "zh-CN", score: countMatches(value, /[\u3400-\u9fff]/g) },
+    { lang: "en-US", score: countMatches(value, /[A-Za-z]/g) },
+  ].sort((a, b) => b.score - a.score);
+  const best = scores[0];
+  if (best?.score > 0) return best.lang;
+  return navigator.language || "en-US";
+}
+
+function speechLanguagePrefix(lang) {
+  return String(lang || "").toLowerCase().split("-")[0];
+}
+
+function selectSpeechVoice(lang) {
+  if (!("speechSynthesis" in window)) return null;
+  const voices = window.speechSynthesis.getVoices?.() || [];
+  const target = String(lang || "").toLowerCase();
+  const prefix = speechLanguagePrefix(target);
+  return voices.find((voice) => voice.lang.toLowerCase() === target) ||
+    voices.find((voice) => speechLanguagePrefix(voice.lang) === prefix) ||
+    null;
+}
+
+function speakLatestAnswer(session) {
+  if (!state.speechEnabled) return;
+  if (!("speechSynthesis" in window)) {
+    setStatus("Speech is not supported by this browser");
+    return;
+  }
+  const text = answerTextForSpeech(session);
+  if (!text) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  const lang = detectSpeechLanguage(text);
+  const voice = selectSpeechVoice(lang);
+  utterance.rate = 1.0;
+  utterance.pitch = 1.0;
+  utterance.lang = lang;
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.speak(utterance);
+}
+
+function toggleSpeechMute() {
+  state.speechEnabled = !state.speechEnabled;
+  writeBooleanPreference("orch.speechEnabled", state.speechEnabled);
+  if (!state.speechEnabled && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  renderMediaToggles();
+}
 
 function renderModelStatus(connections = state.connections) {
   el.status.innerHTML = "";
-  el.status.title = state.statusText;
+  el.status.removeAttribute("title");
   for (const connection of connections) {
     const usage = usageForModel(connection.id);
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = `model-chip ${connection.connected ? "on" : "off"}`;
-    chip.title = usageTitle(connection, usage);
-    chip.setAttribute("aria-label", chip.title);
+    chip.setAttribute("aria-label", usageTitle(connection, usage));
 
     const dot = document.createElement("span");
     dot.className = "model-chip-dot";
     dot.setAttribute("aria-hidden", "true");
 
     chip.append(createUsageRing(connection, usage), createUsagePopover(usage), dot);
-    chip.addEventListener("click", openConnectModal);
+    chip.addEventListener("click", () => openModelModal(connection.id));
     el.status.appendChild(chip);
   }
 }
@@ -378,34 +665,38 @@ function usageTitle(connection, usage) {
   if (usage.active) parts.push("running now");
   if (usage.currentPercent !== null && usage.currentPercent !== undefined) parts.push(`current ${usage.currentPercent}%`);
   if (usage.weeklyPercent !== null && usage.weeklyPercent !== undefined) parts.push(`week ${usage.weeklyPercent}%`);
+  if (usage.sonnetWeeklyPercent !== null && usage.sonnetWeeklyPercent !== undefined) parts.push(`sonnet week ${usage.sonnetWeeklyPercent}%`);
   if (usage.lastTokens) parts.push(`${usage.lastTokens.toLocaleString()} tokens last seen`);
   if (usage.lastCostUsd !== null && usage.lastCostUsd !== undefined) parts.push(`last cost $${Number(usage.lastCostUsd).toFixed(4)}`);
   if (usage.lastKnownLabel) parts.push(usage.lastKnownLabel);
-  if (usage.lastProbeAt) parts.push(`checked ${new Date(usage.lastProbeAt).toLocaleString()}`);
+  if (usage.lastProbeAt) parts.push(`checked ${formatDate(usage.lastProbeAt)}`);
   if (usage.lastProbeError) parts.push(`probe error: ${usage.lastProbeError}`);
   if (usage.lastProbeOutput && !usage.lastProbeError) parts.push(usage.lastProbeOutput.split("\n").slice(0, 2).join(" / "));
   return parts.join(" - ");
 }
 
 function usageSourceText(usage) {
-  if (usage.mode === "provider") return `${usage.percent || 0}% real provider limit`;
+  if (usage.mode === "provider") {
+    const percent = finitePercent(usage.percent);
+    return percent === null ? "real provider limit" : `${Math.round(percent)}% spent from provider limit`;
+  }
   if (usage.mode === "balance") {
-    const balance = usage.balanceLabel ? ` (${usage.balanceLabel})` : "";
-    return `DeepSeek balance ${usage.balanceAvailable ? "available" : "unavailable"}${balance}`;
+    const spent = formatUsageMoney(usage.balanceSpent, usage.balanceCurrency);
+    const remaining = formatUsageMoney(usage.balanceRemaining, usage.balanceCurrency);
+    if (spent && remaining) return `DeepSeek spent ${spent} / remaining ${remaining}`;
+    return usage.balanceAvailable ? "DeepSeek balance checked, spent baseline pending" : "DeepSeek balance unavailable";
   }
   return usage.lastProbeAt ? "real status checked, no numeric limit returned" : "real limit unknown";
 }
 
 function usageDisplayPercent(connection, usage) {
-  const percent = Math.max(0, Math.min(100, Number(usage?.percent || 0)));
-  if (usage?.mode === "provider") return percent;
-  if (usage?.mode === "balance") return usage.balanceAvailable ? 100 : 0;
+  const percent = finitePercent(usage?.percent);
+  if (usage?.mode === "provider" || usage?.mode === "balance") return percent ?? 0;
   return usage?.active && connection.connected ? 100 : 0;
 }
 
 function usageColor(percent, usage) {
   if (usage?.active) return "#f4f5f2";
-  if (usage?.mode === "balance") return usage.balanceAvailable ? "#79d69e" : "var(--danger)";
   if (percent >= 90) return "var(--danger)";
   if (percent >= 70) return "#ff9f1c";
   if (percent >= 50) return "#3384ff";
@@ -431,16 +722,30 @@ function createUsagePopover(usage) {
   const popover = document.createElement("span");
   popover.className = "usage-popover";
   popover.setAttribute("aria-hidden", "true");
+  if (usage?.mode === "balance") {
+    const spentPercent = finitePercent(usage.percent);
+    const remainingPercent = spentPercent === null ? null : 100 - spentPercent;
+    popover.append(
+      createUsageBarRow("Left", remainingPercent, formatUsageMoney(usage.balanceRemaining, usage.balanceCurrency)),
+    );
+    return popover;
+  }
   const current = usage?.currentPercent ?? (usage?.mode === "provider" ? usage.percent : null);
-  popover.append(
+  const rows = [
     createUsageBarRow("Current", current),
-    createUsageBarRow("Week", usage?.weeklyPercent),
-  );
+  ];
+  if (usage?.weeklyPercent !== null && usage?.weeklyPercent !== undefined) {
+    rows.push(createUsageBarRow("Week", usage.weeklyPercent));
+  }
+  if (usage?.sonnetWeeklyPercent !== null && usage?.sonnetWeeklyPercent !== undefined) {
+    rows.push(createUsageBarRow("Sonnet", usage.sonnetWeeklyPercent));
+  }
+  popover.append(...rows);
   return popover;
 }
 
-function createUsageBarRow(label, value) {
-  const percent = value === null || value === undefined ? null : Math.max(0, Math.min(100, Number(value)));
+function createUsageBarRow(label, value, textOverride = "") {
+  const percent = finitePercent(value);
   const row = document.createElement("span");
   row.className = "usage-bar-row";
 
@@ -457,13 +762,28 @@ function createUsageBarRow(label, value) {
 
   const valueEl = document.createElement("span");
   valueEl.className = "usage-bar-value";
-  valueEl.textContent = percent === null || !Number.isFinite(percent) ? "--" : `${Math.round(percent)}%`;
+  valueEl.textContent = textOverride || (percent === null ? "--" : `${Math.round(percent)}%`);
 
   row.append(labelEl, track, valueEl);
   return row;
 }
 
-function markLocalUsageActive(supervisor) {
+function finitePercent(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, number));
+}
+
+function formatUsageMoney(value, currency = "") {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  const prefix = currency ? `${currency} ` : "";
+  return `${prefix}${number.toFixed(2)}`;
+}
+
+function markLocalUsageActive(supervisor, { countRun = true } = {}) {
   if (!supervisor) return;
   let usage = state.usage.find((item) => item.id === supervisor);
   if (!usage) {
@@ -471,7 +791,7 @@ function markLocalUsageActive(supervisor) {
     state.usage.push(usage);
   }
   usage.active = true;
-  usage.runsToday = (usage.runsToday || 0) + 1;
+  if (countRun) usage.runsToday = (usage.runsToday || 0) + 1;
   renderModelStatus();
 }
 
@@ -486,6 +806,9 @@ function closeConnectModal() {
 
 async function refreshConnections() {
   el.connectionList.textContent = "Checking...";
+  if (el.modelDialog.open && state.activeModelTab === "connection") {
+    el.modelConnectionPanel.textContent = "Checking...";
+  }
   try {
     const body = await api("/api/connections");
     state.connections = body.connections || [];
@@ -496,10 +819,13 @@ async function refreshConnections() {
     }
     renderModelStatus();
     renderSupervisors();
-    renderConnections();
+    renderConnectionViews();
     updateModalState();
   } catch (error) {
     el.connectionList.textContent = `Error: ${error.message}`;
+    if (el.modelDialog.open && state.activeModelTab === "connection") {
+      el.modelConnectionPanel.textContent = `Error: ${error.message}`;
+    }
   }
 }
 
@@ -530,7 +856,16 @@ async function refreshUsage() {
   }
 }
 
-function renderConnections() {
+function scheduleUsageRefreshBurst() {
+  for (const delay of [0, 2500, 9000, 22000]) {
+    setTimeout(() => {
+      refreshUsage();
+    }, delay);
+  }
+}
+
+function renderConnections({ captureScroll = true } = {}) {
+  if (captureScroll) captureConnectionOutputScrolls();
   const activeInput = document.activeElement?.dataset?.connectionInput;
   if (activeInput) {
     state.focusedConnectionInput = activeInput;
@@ -539,42 +874,56 @@ function renderConnections() {
 
   el.connectionList.innerHTML = "";
   for (const connection of state.connections) {
-    const item = document.createElement("section");
-    item.className = "connection-item";
-
-    const head = document.createElement("div");
-    head.className = "connection-head";
-
-    const name = document.createElement("div");
-    name.className = "connection-name";
-    name.textContent = connection.label;
-
-    const badge = document.createElement("div");
-    badge.className = `connection-state ${connection.connected ? "connected" : ""}`;
-    badge.textContent = connection.connected ? "connected" : "not connected";
-
-    const detail = document.createElement("div");
-    detail.className = "connection-detail";
-    detail.textContent = connection.detail || "";
-
-    head.append(name, badge);
-    item.append(head, detail);
-    if (connection.links?.length) item.append(createConnectionLinkRow(connection.links));
-    item.append(createConnectionActions(connection));
-
-    const job = state.connectionJobs[connection.id] || connection.job;
-    if (job) item.append(createConnectionJobPanel(job, connection.id));
-
-    el.connectionList.appendChild(item);
+    el.connectionList.appendChild(createConnectionItem(connection));
   }
 
-  if (state.focusedConnectionInput) {
-    const input = el.connectionList.querySelector(`[data-connection-input="${state.focusedConnectionInput}"]`);
-    if (input) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
-  }
+  restoreFocusedConnectionInput();
+}
+
+function createConnectionItem(connection) {
+  const item = document.createElement("section");
+  item.className = "connection-item";
+
+  const head = document.createElement("div");
+  head.className = "connection-head";
+
+  const name = document.createElement("div");
+  name.className = "connection-name";
+  name.textContent = connection.label;
+
+  const badge = document.createElement("div");
+  badge.className = `connection-state ${connection.connected ? "connected" : ""}`;
+  badge.textContent = connection.connected ? "connected" : "not connected";
+
+  const detail = document.createElement("div");
+  detail.className = "connection-detail";
+  detail.textContent = connection.detail || "";
+
+  head.append(name, badge);
+  item.append(head, detail);
+  if (connection.links?.length) item.append(createConnectionLinkRow(connection.links));
+  item.append(createConnectionActions(connection));
+
+  const job = state.connectionJobs[connection.id] || connection.job;
+  if (job) item.append(createConnectionJobPanel(job, connection.id));
+
+  return item;
+}
+
+function renderConnectionViews() {
+  captureConnectionOutputScrolls();
+  renderConnections({ captureScroll: false });
+  renderModelDialog({ captureScroll: false });
+  restoreFocusedConnectionInput();
+}
+
+function restoreFocusedConnectionInput() {
+  if (!state.focusedConnectionInput) return;
+  const input = el.connectionList.querySelector(`[data-connection-input="${state.focusedConnectionInput}"]`) ||
+    el.modelConnectionPanel.querySelector(`[data-connection-input="${state.focusedConnectionInput}"]`);
+  if (!input) return;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 }
 
 function createConnectionActions(connection) {
@@ -640,6 +989,94 @@ function createConnectionLinkRow(links) {
   return row;
 }
 
+function modelDialogConnection() {
+  return state.connections.find((connection) => connection.id === state.activeModelId);
+}
+
+function setModelDialogTab(tab) {
+  storeActiveModelPromptDraft();
+  state.activeModelTab = tab;
+  renderModelDialog();
+}
+
+function renderModelDialogTabs() {
+  el.modelDialogTabs.innerHTML = "";
+  const tabs = [
+    { id: "connection", label: "Connection" },
+    { id: "prompt", label: "Prompt" },
+  ];
+  for (const tab of tabs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `prompt-tab ${state.activeModelTab === tab.id ? "active" : ""}`;
+    button.role = "tab";
+    button.setAttribute("aria-selected", String(state.activeModelTab === tab.id));
+    button.textContent = tab.label;
+    button.addEventListener("click", () => setModelDialogTab(tab.id));
+    el.modelDialogTabs.appendChild(button);
+  }
+}
+
+function renderModelConnectionPanel({ captureScroll = true } = {}) {
+  if (captureScroll) captureConnectionOutputScrolls();
+  el.modelConnectionPanel.innerHTML = "";
+  const connection = modelDialogConnection();
+  if (!connection) {
+    el.modelConnectionPanel.textContent = "Connection status unavailable.";
+    return;
+  }
+  el.modelConnectionPanel.appendChild(createConnectionItem(connection));
+}
+
+function renderModelPromptPanel() {
+  const prompt = promptForModel(state.activeModelId);
+  el.modelPromptStatus.classList.remove("is-error");
+  if (!prompt) {
+    el.modelPromptEditor.value = "";
+    el.modelPromptEditor.disabled = true;
+    el.saveModelPrompt.disabled = true;
+    el.modelPromptStatus.textContent = "Loading prompt...";
+    return;
+  }
+  el.modelPromptEditor.disabled = false;
+  el.saveModelPrompt.disabled = false;
+  el.modelPromptEditor.value = state.promptDrafts[prompt.id] ?? prompt.content ?? "";
+  el.modelPromptStatus.textContent = prompt.path ? `Saved in ${prompt.path}` : "";
+}
+
+function renderModelDialog({ captureScroll = true } = {}) {
+  if (!el.modelDialog.open || !state.activeModelId) return;
+  const connection = modelDialogConnection();
+  const prompt = promptForModel(state.activeModelId);
+  el.modelDialogTitle.textContent = connection?.label || prompt?.label || state.activeModelId;
+  renderModelDialogTabs();
+  const showPrompt = state.activeModelTab === "prompt";
+  el.modelConnectionPanel.hidden = showPrompt;
+  el.modelPromptPanel.hidden = !showPrompt;
+  if (showPrompt) renderModelPromptPanel();
+  else renderModelConnectionPanel({ captureScroll });
+}
+
+async function openModelModal(id) {
+  state.activeModelId = id;
+  state.activeModelTab = "connection";
+  el.modelPromptStatus.textContent = "";
+  if (!el.modelDialog.open) el.modelDialog.showModal();
+  renderModelDialog();
+  await Promise.allSettled([
+    refreshConnections(),
+    state.prompts.length ? Promise.resolve() : loadPromptSettings(),
+  ]);
+  renderModelDialog();
+}
+
+function closeModelModal() {
+  storeActiveModelPromptDraft();
+  state.activeModelId = null;
+  state.activeModelTab = "connection";
+  el.modelDialog.close();
+}
+
 function cleanUrl(raw) {
   return String(raw || "").replace(/[)\].,;:]+$/g, "");
 }
@@ -681,6 +1118,33 @@ function appendTextWithLinks(container, text) {
   if (index < value.length) container.appendChild(document.createTextNode(value.slice(index)));
 }
 
+function rememberConnectionOutputScroll(output, connectionId) {
+  if (!connectionId || !output) return;
+  state.connectionOutputScroll[connectionId] = {
+    top: output.scrollTop,
+    stick: isNearBottom(output),
+  };
+}
+
+function captureConnectionOutputScrolls() {
+  for (const output of document.querySelectorAll("[data-connection-output]")) {
+    rememberConnectionOutputScroll(output, output.dataset.connectionOutput);
+  }
+}
+
+function restoreConnectionOutputScroll(output, connectionId) {
+  const saved = state.connectionOutputScroll[connectionId];
+  const stick = saved?.stick !== false;
+  requestAnimationFrame(() => {
+    if (!document.contains(output)) return;
+    if (stick) {
+      scrollElementToBottom(output);
+      return;
+    }
+    output.scrollTop = Math.min(saved?.top || 0, output.scrollHeight);
+  });
+}
+
 function createConnectionJobPanel(job, connectionId) {
   const panel = document.createElement("div");
   panel.className = "connection-job";
@@ -701,7 +1165,12 @@ function createConnectionJobPanel(job, connectionId) {
 
     const output = document.createElement("div");
     output.className = "connection-output";
+    output.dataset.connectionOutput = connectionId;
     appendTextWithLinks(output, job.output.trim() || job.output);
+    restoreConnectionOutputScroll(output, connectionId);
+    output.addEventListener("scroll", () => {
+      rememberConnectionOutputScroll(output, connectionId);
+    });
     panel.appendChild(output);
   }
 
@@ -755,7 +1224,11 @@ function createConnectionJobPanel(job, connectionId) {
 async function startConnection(id) {
   const payload = {};
   if (id === "deepseek") {
-    const input = el.connectionList.querySelector(`[data-connection-key="${id}"]`);
+    const modelInput = el.modelDialog.open && state.activeModelId === id
+      ? el.modelConnectionPanel.querySelector(`[data-connection-key="${id}"]`)
+      : null;
+    const input = modelInput ||
+      el.connectionList.querySelector(`[data-connection-key="${id}"]`);
     payload.apiKey = input?.value || "";
   }
   const connection = state.connections.find((item) => item.id === id);
@@ -768,14 +1241,15 @@ async function startConnection(id) {
     if (body.job) {
       state.connectionJobs[id] = body.job;
       renderModelStatus();
-      renderConnections();
+      renderConnectionViews();
       pollConnectionJob(body.job.id, id);
     } else {
       await refreshConnections();
+      scheduleUsageRefreshBurst();
     }
   } catch (error) {
     if (connection) connection.detail = `Error: ${error.message}`;
-    renderConnections();
+    renderConnectionViews();
     if (connection) connection.detail = previousDetail;
   }
 }
@@ -791,11 +1265,12 @@ async function disconnectConnection(id) {
     state.connections = body.connections || state.connections;
     renderModelStatus();
     renderSupervisors();
-    renderConnections();
+    renderConnectionViews();
     updateModalState();
+    await refreshUsage();
   } catch (error) {
     if (previous) previous.detail = `Error: ${error.message}`;
-    renderConnections();
+    renderConnectionViews();
     if (previous) previous.detail = previousDetail;
   }
 }
@@ -810,11 +1285,11 @@ async function sendConnectionInput(jobId, input, connectionId) {
     state.connectionJobs[connectionId] = body.job;
     state.connectionInputs[connectionId] = "";
     if (state.focusedConnectionInput === connectionId) state.focusedConnectionInput = null;
-    renderConnections();
+    renderConnectionViews();
   } catch (error) {
     const job = state.connectionJobs[connectionId];
     if (job) job.output = `${job.output || ""}\nError: ${error.message}\n`;
-    renderConnections();
+    renderConnectionViews();
   }
 }
 
@@ -824,18 +1299,19 @@ function pollConnectionJob(jobId, connectionId) {
     try {
       const body = await api(`/api/connections/jobs/${jobId}`);
       state.connectionJobs[connectionId] = body.job;
-      renderConnections();
+      renderConnectionViews();
       if (body.job.status === "running") {
         state.connectionPollers[jobId] = setTimeout(tick, 1500);
         return;
       }
       delete state.connectionPollers[jobId];
       await refreshConnections();
+      scheduleUsageRefreshBurst();
     } catch (error) {
       delete state.connectionPollers[jobId];
       const job = state.connectionJobs[connectionId];
       if (job) job.output = `${job.output || ""}\nError: ${error.message}\n`;
-      renderConnections();
+      renderConnectionViews();
     }
   };
   state.connectionPollers[jobId] = setTimeout(tick, 900);
@@ -877,6 +1353,135 @@ function isCurrentProject(project) {
     || Boolean(project.project && project.project === state.currentSession.project);
 }
 
+function projectMenuKey(project) {
+  return project?.cwd || project?.project || project?.title || "";
+}
+
+function projectIsRunning(project) {
+  return Boolean(project?.id && state.runs.get(project.id)?.streaming);
+}
+
+function projectAutopilotEnabled(project) {
+  const key = projectMenuKey(project);
+  return Boolean(key && state.projectAutopilot[key]);
+}
+
+function setProjectAutopilot(project, enabled) {
+  const key = projectMenuKey(project);
+  if (!key) return;
+  if (enabled) state.projectAutopilot[key] = true;
+  else delete state.projectAutopilot[key];
+  writeProjectAutopilot();
+  renderSessions();
+  setStatus(`${key} autopilot ${enabled ? "on" : "off"}`);
+}
+
+function autopilotContent(decision) {
+  const content = String(decision?.content || "").trim();
+  if (!content) return "";
+  return /^autopilot\s*:/i.test(content) ? content : `Autopilot:\n${content}`;
+}
+
+async function maybeRunAutopilot(session) {
+  if (!session?.id || !projectAutopilotEnabled(session)) return;
+  if (state.runs.has(session.id)) return;
+  const projectName = projectMenuKey(session);
+  try {
+    setStatus(`${projectName} autopilot thinking...`);
+    const body = await api(`/api/sessions/${session.id}/autopilot`, { method: "POST" });
+    const decision = body.decision || {};
+    if (!projectAutopilotEnabled(session)) {
+      setStatus(`${projectName} autopilot off`);
+      return;
+    }
+    if (decision.action !== "message") {
+      setStatus(`Autopilot stopped: ${decision.reason || "no next action"}`);
+      return;
+    }
+    const content = autopilotContent(decision);
+    if (!content) {
+      setStatus("Autopilot stopped: empty next message");
+      return;
+    }
+    setStatus(`${projectName} autopilot sending...`);
+    await sendMessageForSession(session, content);
+  } catch (error) {
+    setStatus(`Autopilot error: ${error.message}`);
+  }
+}
+
+function scheduleAutopilot(session) {
+  if (!session?.id || !projectAutopilotEnabled(session)) return;
+  setTimeout(() => {
+    maybeRunAutopilot(session);
+  }, 450);
+}
+
+function closeProjectContextMenu() {
+  if (!el.projectContextMenu) return;
+  el.projectContextMenu.hidden = true;
+  state.projectMenuProject = null;
+}
+
+function positionProjectContextMenu(clientX, clientY) {
+  const menu = el.projectContextMenu;
+  if (!menu) return;
+  menu.style.left = `${clientX}px`;
+  menu.style.top = `${clientY}px`;
+  requestAnimationFrame(() => {
+    const rect = menu.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.min(Math.max(margin, clientX), window.innerWidth - rect.width - margin);
+    const top = Math.min(Math.max(margin, clientY), window.innerHeight - rect.height - margin);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  });
+}
+
+function openProjectContextMenu(event, project) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!el.projectContextMenu) return;
+  closeAttachmentMenu();
+  const key = projectMenuKey(project);
+  if (!key) return;
+
+  state.projectMenuProject = project;
+  const autopilotOn = projectAutopilotEnabled(project);
+  const running = projectIsRunning(project);
+  el.projectContextMenu.innerHTML = "";
+
+  const autopilot = document.createElement("button");
+  autopilot.type = "button";
+  autopilot.role = "menuitemcheckbox";
+  autopilot.setAttribute("aria-checked", String(autopilotOn));
+  autopilot.className = "project-context-item";
+  autopilot.innerHTML = `<span>Autopilot</span><strong>${autopilotOn ? "On" : "Off"}</strong>`;
+  autopilot.addEventListener("click", () => {
+    setProjectAutopilot(project, !autopilotOn);
+    closeProjectContextMenu();
+  });
+
+  const separator = document.createElement("div");
+  separator.className = "project-context-separator";
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.role = "menuitem";
+  remove.className = "project-context-item danger";
+  remove.disabled = running;
+  remove.innerHTML = `<span>Delete</span>${running ? "<strong>Running</strong>" : ""}`;
+  remove.addEventListener("click", async () => {
+    closeProjectContextMenu();
+    await deleteProjectFromUi(project);
+  });
+
+  el.projectContextMenu.append(autopilot, separator, remove);
+  el.projectContextMenu.hidden = false;
+  positionProjectContextMenu(event.clientX, event.clientY);
+  autopilot.focus();
+}
+
 function renderSessions() {
   el.sessionList.innerHTML = "";
   const rows = projectRows();
@@ -888,13 +1493,25 @@ function renderSessions() {
     return;
   }
   for (const session of rows) {
-    const row = document.createElement("div");
-    row.className = "session-row";
-
-    const running = Boolean(session.id && state.runs.get(session.id)?.streaming);
+    const running = projectIsRunning(session);
+    const autopilotOn = projectAutopilotEnabled(session);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `session ${isCurrentProject(session) ? "active" : ""} ${running ? "running" : ""}`.trim();
+    button.className = [
+      "session",
+      isCurrentProject(session) ? "active" : "",
+      running ? "running" : "",
+      autopilotOn ? "autopilot-on" : "",
+    ].filter(Boolean).join(" ");
+
+    if (autopilotOn) {
+      const autopilotIcon = document.createElement("span");
+      autopilotIcon.className = "session-autopilot-icon";
+      autopilotIcon.title = "Autopilot on";
+      autopilotIcon.setAttribute("aria-label", "Autopilot on");
+      autopilotIcon.innerHTML = iconSvg(icons.autopilot);
+      button.appendChild(autopilotIcon);
+    }
 
     const title = document.createElement("div");
     title.className = "session-title";
@@ -908,32 +1525,35 @@ function renderSessions() {
 
     const meta = document.createElement("div");
     meta.className = "session-meta";
-    meta.textContent = `${session.supervisor || "unknown"} - ${session.cwd || "."} - ${session.messageCount || 0} msgs`;
+    meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs`;
 
     button.append(title, meta);
     button.addEventListener("click", () => openProjectSession(session));
+    button.addEventListener("contextmenu", (event) => openProjectContextMenu(event, session));
+    button.addEventListener("keydown", (event) => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      const rect = button.getBoundingClientRect();
+      openProjectContextMenu({
+        preventDefault: () => event.preventDefault(),
+        stopPropagation: () => event.stopPropagation(),
+        clientX: rect.left + Math.min(rect.width - 12, 24),
+        clientY: rect.top + Math.min(rect.height - 8, 28),
+      }, session);
+    });
 
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "project-delete-button";
-    remove.title = `Delete ${session.cwd || session.project}`;
-    remove.setAttribute("aria-label", `Delete ${session.cwd || session.project}`);
-    remove.disabled = running;
-    remove.innerHTML = iconSvg(icons.trash);
-    remove.addEventListener("click", () => deleteProjectFromUi(session));
-
-    row.append(button, remove);
-    el.sessionList.appendChild(row);
+    el.sessionList.appendChild(button);
   }
 }
 
-function renderMessages() {
+function renderMessages({ forceScroll = false } = {}) {
+  const shouldStick = forceScroll || isNearBottom(el.messages) || el.messages.childElementCount === 0;
   el.messages.innerHTML = "";
   if (!state.currentSession) {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "Start a new chat.";
     el.messages.appendChild(empty);
+    if (shouldStick) scrollMessagesToBottom();
     return;
   }
   if (!state.currentSession.messages?.length) {
@@ -941,12 +1561,13 @@ function renderMessages() {
     empty.className = "empty";
     empty.textContent = `${state.currentSession.supervisor} in ${workspaceText(state.currentSession.cwd)}`;
     el.messages.appendChild(empty);
+    if (shouldStick) scrollMessagesToBottom();
     return;
   }
   for (const message of state.currentSession.messages) {
     el.messages.appendChild(createMessageElement(message));
   }
-  scrollMessagesToBottom();
+  if (shouldStick) scrollMessagesToBottom();
 }
 
 function createMessageElement(message) {
@@ -1038,20 +1659,23 @@ function terminalText(trace = []) {
 
 function renderTerminalModal() {
   const message = state.activeTerminalMessage;
+  const shouldStick = isNearBottom(el.terminalOutput);
   if (!message) {
     el.terminalTitle.textContent = "Terminal";
     el.terminalOutput.textContent = "Waiting for terminal output...";
+    if (shouldStick) scrollElementToBottom(el.terminalOutput);
     return;
   }
   el.terminalTitle.textContent = terminalTitleFor(message);
   el.terminalOutput.textContent = terminalText(message.trace);
-  el.terminalOutput.scrollTop = el.terminalOutput.scrollHeight;
+  if (shouldStick) scrollElementToBottom(el.terminalOutput);
 }
 
 function openTerminalModal(message) {
   state.activeTerminalMessage = message;
   renderTerminalModal();
   if (!el.terminalDialog.open) el.terminalDialog.showModal();
+  requestAnimationFrame(() => scrollElementToBottom(el.terminalOutput));
 }
 
 function closeTerminalModal() {
@@ -1066,6 +1690,7 @@ function syncOpenTerminal(message) {
 }
 
 function updateLastMessage(message) {
+  const shouldStick = isNearBottom(el.messages);
   const last = el.messages.lastElementChild;
   if (!last?.classList?.contains("message")) {
     renderMessages();
@@ -1079,11 +1704,11 @@ function updateLastMessage(message) {
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
   if (body) renderMessageBody(body, message);
   syncOpenTerminal(message);
-  scrollMessagesToBottom();
+  if (shouldStick) scrollMessagesToBottom();
 }
 
 function scrollMessagesToBottom() {
-  el.messages.scrollTop = el.messages.scrollHeight;
+  scrollElementToBottom(el.messages);
 }
 
 function createAttachmentList(attachments, removable) {
@@ -1301,6 +1926,8 @@ async function deleteProjectFromUi(project) {
     const body = await api(`/api/projects/${encodeURIComponent(projectName)}`, { method: "DELETE" });
     state.projects = body.projects || [];
     state.sessions = body.sessions || [];
+    delete state.projectAutopilot[projectName];
+    writeProjectAutopilot();
     if (isCurrentProject(project)) {
       state.currentSession = null;
       renderMessages();
@@ -1346,10 +1973,15 @@ async function sendMessage(content, files = []) {
     await openNewChatModal();
     return;
   }
+  return sendMessageForSession(state.currentSession, content, files);
+}
 
-  const session = state.currentSession;
+async function sendMessageForSession(targetSession, content, files = []) {
+  const session = targetSession;
+  if (!session?.id) return;
   if (state.runs.has(session.id)) return; // a run is already streaming for this project
   const supervisor = session.supervisor;
+  let autopilotCandidate = null;
   const userMessage = {
     role: "user",
     content: content || (files.length ? "Attached files" : ""),
@@ -1373,6 +2005,7 @@ async function sendMessage(content, files = []) {
   state.runs.set(session.id, run);
   markLocalUsageActive(supervisor);
   updateWakeLock();
+  startTypingSound(run.sessionId);
   const viewing = () => isViewing(run.sessionId);
   if (viewing()) renderMessages();
   renderSessions();
@@ -1397,6 +2030,7 @@ async function sendMessage(content, files = []) {
     const attachments = await readAttachments(files);
     if (viewing()) setStatus(`Running ${supervisor}...`);
     await streamApi(`/api/sessions/${run.sessionId}/messages/stream`, {
+      clientId: state.clientId,
       content,
       attachments,
     }, {
@@ -1426,11 +2060,15 @@ async function sendMessage(content, files = []) {
         }
       },
       done(event) {
+        stopTypingSound(run.sessionId);
         draft.streaming = false;
         run.streaming = false;
         run.session = event.session;
         const last = run.session.messages.at(-1);
         if (last) last.trace = draft.trace;
+        autopilotCandidate = run.session;
+        playRunFinishedSound("done");
+        speakLatestAnswer(run.session);
         if (viewing()) {
           state.currentSession = run.session;
           renderMessages();
@@ -1440,11 +2078,13 @@ async function sendMessage(content, files = []) {
         }
       },
       error(event) {
+        stopTypingSound(run.sessionId);
         draft.streaming = false;
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) last.trace = draft.trace;
+        playRunFinishedSound("error");
         if (viewing()) {
           state.currentSession = run.session;
           setStatus(`Error: ${event.error}`);
@@ -1453,11 +2093,13 @@ async function sendMessage(content, files = []) {
         }
       },
       stopped(event) {
+        stopTypingSound(run.sessionId);
         draft.streaming = false;
         run.streaming = false;
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) last.trace = draft.trace;
+        playRunFinishedSound("done");
         if (viewing()) {
           state.currentSession = run.session;
           setStatus(event.error || "Stopped by user");
@@ -1469,6 +2111,8 @@ async function sendMessage(content, files = []) {
     await refreshSessions();
     await refreshUsage();
   } catch (error) {
+    stopTypingSound(run.sessionId);
+    playRunFinishedSound("error");
     draft.error = true;
     draft.streaming = false;
     run.streaming = false;
@@ -1480,11 +2124,13 @@ async function sendMessage(content, files = []) {
     }
   } finally {
     clearInterval(run.heartbeat);
+    stopTypingSound(run.sessionId);
     state.runs.delete(run.sessionId);
     updateWakeLock();
     renderSessions();
     if (viewing()) syncComposerState();
     await refreshUsage();
+    if (autopilotCandidate) scheduleAutopilot(autopilotCandidate);
   }
 }
 
@@ -1533,7 +2179,179 @@ async function streamApi(path, body, handlers = {}) {
   }
 }
 
+function sessionSummaryFromSession(session) {
+  const messages = session?.messages || [];
+  return {
+    id: session.id,
+    title: session.project || session.title || session.cwd || "New chat",
+    project: session.project || session.title || session.cwd || ".",
+    supervisor: session.supervisor,
+    cwd: session.cwd || ".",
+    createdAt: session.createdAt || messages[0]?.at || "",
+    updatedAt: session.updatedAt || messages.at(-1)?.at || new Date().toISOString(),
+    messageCount: messages.length,
+  };
+}
+
+function upsertSessionSummary(session) {
+  if (!session?.id) return;
+  const summary = sessionSummaryFromSession(session);
+  const index = state.sessions.findIndex((item) => item.id === session.id);
+  if (index >= 0) state.sessions[index] = { ...state.sessions[index], ...summary };
+  else state.sessions.unshift(summary);
+}
+
+function cloneLiveSession(session) {
+  return {
+    ...session,
+    messages: Array.isArray(session?.messages) ? [...session.messages] : [],
+  };
+}
+
+function cloneLiveDraft(draft, session) {
+  return {
+    role: "assistant",
+    supervisor: draft?.supervisor || session?.supervisor || "assistant",
+    content: draft?.content || "",
+    status: draft?.status || "Starting...",
+    trace: Array.isArray(draft?.trace) ? [...draft.trace] : [],
+    at: draft?.at || new Date().toISOString(),
+    streaming: true,
+  };
+}
+
+function attachDraftToSession(session, draft) {
+  session.messages ||= [];
+  const last = session.messages.at(-1);
+  if (last?.streaming) session.messages[session.messages.length - 1] = draft;
+  else session.messages.push(draft);
+}
+
+function appendTraceToDraft(draft, content) {
+  draft.trace ||= [];
+  draft.trace.push(String(content || ""));
+  let totalChars = draft.trace.reduce((total, item) => total + item.length, 0);
+  while (draft.trace.length > 1 && totalChars > 60000) {
+    totalChars -= draft.trace.shift().length;
+  }
+}
+
+function syncLiveSessionView(run, { forceRender = false } = {}) {
+  upsertSessionSummary(run.session);
+  if (isViewing(run.sessionId)) {
+    state.currentSession = run.session;
+    if (forceRender) renderMessages();
+    syncComposerState();
+  }
+  renderSessions();
+}
+
+function handleLiveSession(event) {
+  if (!event.session?.id) return;
+  const session = cloneLiveSession(event.session);
+  const draft = cloneLiveDraft(event.draft, session);
+  attachDraftToSession(session, draft);
+  const existing = state.runs.get(event.sessionId);
+  if (existing?.heartbeat) clearInterval(existing.heartbeat);
+  const run = {
+    sessionId: event.sessionId,
+    session,
+    draft,
+    supervisor: session.supervisor,
+    streaming: true,
+    stopInFlight: false,
+    heartbeat: null,
+    remote: true,
+  };
+  state.runs.set(event.sessionId, run);
+  markLocalUsageActive(session.supervisor, { countRun: false });
+  updateWakeLock();
+  startTypingSound(run.sessionId);
+  syncLiveSessionView(run, { forceRender: true });
+}
+
+function handleLiveChunk(event) {
+  const run = state.runs.get(event.sessionId);
+  if (!run?.draft) return;
+  run.draft.status = "";
+  run.draft.content += event.content || "";
+  if (isViewing(run.sessionId)) updateLastMessage(run.draft);
+}
+
+function handleLiveTrace(event) {
+  const run = state.runs.get(event.sessionId);
+  if (!run?.draft) return;
+  appendTraceToDraft(run.draft, event.content);
+  if (isViewing(run.sessionId)) {
+    updateLastMessage(run.draft);
+    syncOpenTerminal(run.draft);
+  }
+}
+
+function finishLiveRun(event) {
+  const run = state.runs.get(event.sessionId);
+  const session = event.session ? cloneLiveSession(event.session) : run?.session;
+  if (!session?.id) return;
+  const draft = run?.draft;
+  if (draft) {
+    draft.streaming = false;
+    if (event.type === "error") draft.error = true;
+    if (event.type === "stopped") draft.stopped = true;
+  }
+  const last = session.messages?.at(-1);
+  if (last && draft?.trace?.length) last.trace = [...draft.trace];
+  if (run?.heartbeat) clearInterval(run.heartbeat);
+  stopTypingSound(event.sessionId);
+  state.runs.delete(event.sessionId);
+  upsertSessionSummary(session);
+  if (event.type === "error") playRunFinishedSound("error");
+  else {
+    playRunFinishedSound("done");
+    if (event.type === "done") speakLatestAnswer(session);
+  }
+  updateWakeLock();
+  renderSessions();
+  if (isViewing(event.sessionId)) {
+    state.currentSession = session;
+    if (event.type === "error") setStatus(`Error: ${event.error}`);
+    else if (event.type === "stopped") setStatus(event.error || "Stopped by user");
+    else setWorkspaceStatus();
+    renderMessages();
+    if (draft) syncOpenTerminal(draft);
+    syncComposerState();
+  }
+  refreshSessions().catch((error) => setStatus(`Session refresh error: ${error.message}`));
+  refreshUsage().catch((error) => setStatus(`Usage refresh error: ${error.message}`));
+}
+
+function applyLiveEvent(event) {
+  if (!event?.type || !event.sessionId) return;
+  if (event.clientId === state.clientId && state.runs.has(event.sessionId)) return;
+  if (event.type === "session") handleLiveSession(event);
+  else if (event.type === "chunk") handleLiveChunk(event);
+  else if (event.type === "trace") handleLiveTrace(event);
+  else if (event.type === "done" || event.type === "error" || event.type === "stopped") finishLiveRun(event);
+}
+
+function connectLiveEvents() {
+  if (!("EventSource" in window)) return;
+  if (state.eventSource) state.eventSource.close();
+  const source = new EventSource("/api/events");
+  state.eventSource = source;
+  source.onmessage = (message) => {
+    try {
+      applyLiveEvent(JSON.parse(message.data));
+    } catch {
+      // Ignore malformed live events; the next valid event or reconnect replay will repair the view.
+    }
+  };
+  source.onerror = () => {
+    setStatus("Live feed reconnecting...");
+  };
+}
+
 async function init() {
+  renderMediaToggles();
   state.config = await api("/api/config");
   await refreshModelStatus();
   renderSupervisors();
@@ -1545,12 +2363,13 @@ async function init() {
     syncComposerState();
     setWorkspaceStatus();
   }
+  connectLiveEvents();
 }
 
 el.newChat.addEventListener("click", openNewChatModal);
 el.sidebarToggle.addEventListener("click", toggleSidebar);
-el.connectButton.addEventListener("click", openConnectModal);
-el.promptButton.addEventListener("click", openPromptModal);
+el.soundToggle.addEventListener("click", toggleSoundMute);
+el.speechToggle.addEventListener("click", toggleSpeechMute);
 el.attachmentMenuButton.addEventListener("click", (event) => {
   event.preventDefault();
   toggleAttachmentMenu();
@@ -1563,13 +2382,20 @@ el.attachmentMenu.addEventListener("click", (event) => {
   if (action === "files") el.fileInput.click();
 });
 document.addEventListener("click", (event) => {
-  if (el.attachmentMenu.hidden) return;
-  if (event.target.closest(".attachment-menu-wrap")) return;
-  closeAttachmentMenu();
+  if (!el.projectContextMenu.hidden && !event.target.closest(".project-context-menu")) closeProjectContextMenu();
+  if (!el.attachmentMenu.hidden && !event.target.closest(".attachment-menu-wrap")) closeAttachmentMenu();
+});
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest(".session") || event.target.closest(".project-context-menu")) return;
+  closeProjectContextMenu();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !el.attachmentMenu.hidden) closeAttachmentMenu();
+  if (event.key === "Escape" && !el.projectContextMenu.hidden) closeProjectContextMenu();
 });
+window.addEventListener("resize", closeProjectContextMenu);
+window.addEventListener("beforeunload", () => state.eventSource?.close());
+el.sessionList.addEventListener("scroll", closeProjectContextMenu);
 el.closeConnect.addEventListener("click", closeConnectModal);
 el.refreshConnections.addEventListener("click", refreshConnections);
 el.connectDialog.addEventListener("click", (event) => {
@@ -1583,6 +2409,17 @@ el.promptDialog.addEventListener("click", (event) => {
 el.promptDialog.querySelector("[data-close-prompts]").addEventListener("click", closePromptModal);
 el.promptEditor.addEventListener("input", storeActivePromptDraft);
 el.savePrompts.addEventListener("click", savePromptSettings);
+el.closeModelDialog.addEventListener("click", closeModelModal);
+el.modelDialog.addEventListener("click", (event) => {
+  if (event.target === el.modelDialog) closeModelModal();
+});
+el.modelDialog.addEventListener("close", () => {
+  storeActiveModelPromptDraft();
+  state.activeModelId = null;
+  state.activeModelTab = "connection";
+});
+el.modelPromptEditor.addEventListener("input", storeActiveModelPromptDraft);
+el.saveModelPrompt.addEventListener("click", saveActiveModelPrompt);
 el.closeTerminal.addEventListener("click", closeTerminalModal);
 el.terminalDialog.addEventListener("click", (event) => {
   if (event.target === el.terminalDialog) closeTerminalModal();

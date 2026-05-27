@@ -16,20 +16,23 @@
               <path d="M4 7h16M4 12h16M4 17h16"></path>
             </svg>
           </button>
-          <button id="connectButton" class="icon-button sidebar-action connect-button" type="button" title="Connect models" aria-label="Connect models">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 7V3M15 7V3M8 11h8M12 21v-4M7 7h10v4a5 5 0 0 1-10 0V7Z"></path>
-            </svg>
-          </button>
           <button id="newChat" class="icon-button sidebar-action new-chat-button" type="button" title="New chat" aria-label="New chat">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 5v14M5 12h14"></path>
             </svg>
           </button>
-          <button id="promptButton" class="icon-button sidebar-action prompt-button" type="button" title="Model prompts" aria-label="Model prompts">
+          <button id="soundToggle" class="icon-button sidebar-action preference-toggle" type="button" title="Sounds on" aria-label="Mute sounds" aria-pressed="false">
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 3h9l4 4v14H6V3Z"></path>
-              <path d="M15 3v5h5M9 12h6M9 16h6"></path>
+              <path d="M11 5 6 9H2v6h4l5 4V5z"></path>
+              <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+              <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+            </svg>
+          </button>
+          <button id="speechToggle" class="icon-button sidebar-action preference-toggle" type="button" title="Speech off" aria-label="Read answers aloud" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 8h10"></path>
+              <path d="M7 12h7"></path>
+              <path d="M21 12c0 4.4-4 8-9 8a10 10 0 0 1-4-.8L3 21l1.6-4A7.3 7.3 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8z"></path>
             </svg>
           </button>
         </div>
@@ -38,6 +41,8 @@
       <div id="sessionList" class="sessions" aria-label="Sessions"></div>
       <div id="status" class="model-status sidebar-status" aria-label="Model connection status"></div>
     </aside>
+
+    <div id="projectContextMenu" class="project-context-menu" role="menu" hidden></div>
 
     <main class="main">
       <section id="messages" class="messages" aria-live="polite"></section>
@@ -60,7 +65,7 @@
             </div>
           </div>
           <div class="composer-main">
-            <textarea id="messageInput" rows="3" placeholder="Ask the current supervisor..."></textarea>
+            <textarea id="messageInput" rows="1" placeholder="Ask the current supervisor..."></textarea>
             <div id="attachmentList" class="attachment-list"></div>
           </div>
           <button id="sendButton" type="submit" title="Send" aria-label="Send message">
@@ -130,6 +135,25 @@
         <div class="modal-actions">
           <button class="secondary" type="button" data-close-prompts>Cancel</button>
           <button id="savePrompts" class="primary" type="button">Save</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="modelDialog" class="modal model-modal">
+      <div class="modal-panel model-panel">
+        <div class="modal-head">
+          <h2 id="modelDialogTitle">Model</h2>
+          <button id="closeModelDialog" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+
+        <div id="modelDialogTabs" class="prompt-tabs" role="tablist" aria-label="Model detail tabs"></div>
+        <div id="modelConnectionPanel" class="model-tab-panel connection-list"></div>
+        <div id="modelPromptPanel" class="model-tab-panel model-prompt-panel" hidden>
+          <textarea id="modelPromptEditor" class="prompt-editor" spellcheck="false" placeholder="Prompt"></textarea>
+          <div id="modelPromptStatus" class="modal-error" role="alert"></div>
+          <div class="modal-actions">
+            <button id="saveModelPrompt" class="primary" type="button">Save</button>
+          </div>
         </div>
       </div>
     </dialog>

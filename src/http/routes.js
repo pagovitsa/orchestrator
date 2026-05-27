@@ -13,6 +13,7 @@ import {
 } from "../domain/sessions.js";
 import { listPrompts, savePrompts } from "../domain/prompts.js";
 import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
+import { decideAutopilotNext } from "../domain/autopilot.js";
 import {
   connectionStatus,
   disconnectConnection,
@@ -26,6 +27,66 @@ import { runSupervisor } from "../supervisors/runner.js";
 import { readBody, sendJson, writeStreamEvent } from "./response.js";
 
 const activeRuns = new Map();
+const eventClients = new Set();
+
+function sendEventClient(client, event) {
+  if (client.res.destroyed || client.res.writableEnded) {
+    eventClients.delete(client);
+    return;
+  }
+  try {
+    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+  } catch {
+    eventClients.delete(client);
+  }
+}
+
+function broadcastRunEvent(sessionId, clientId, event) {
+  const payload = { ...event, sessionId, clientId };
+  for (const client of eventClients) sendEventClient(client, payload);
+}
+
+function emitRunEvent(res, sessionId, clientId, event) {
+  writeStreamEvent(res, event);
+  broadcastRunEvent(sessionId, clientId, event);
+}
+
+function subscribeEvents(req, res) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+  res.write(": connected\n\n");
+
+  const client = { res };
+  eventClients.add(client);
+  const heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      clearInterval(heartbeat);
+      eventClients.delete(client);
+      return;
+    }
+    res.write(": ping\n\n");
+  }, 25000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    eventClients.delete(client);
+  });
+
+  for (const run of activeRuns.values()) {
+    if (!run.session || !run.draft) continue;
+    sendEventClient(client, {
+      type: "session",
+      sessionId: run.id,
+      clientId: run.clientId || "",
+      session: run.session,
+      draft: run.draft,
+      replay: true,
+    });
+  }
+}
 
 function runStopReason(signal) {
   const reason = signal?.reason;
@@ -45,14 +106,19 @@ function registerActiveRun(id, session, abortController, mode) {
   if (activeRuns.has(id)) {
     throw Object.assign(new Error("This project already has a running model. Stop it before sending another message."), { status: 409 });
   }
-  activeRuns.set(id, {
+  const run = {
     id,
     mode,
     supervisor: session.supervisor,
     cwd: session.cwd || ".",
     startedAt: new Date().toISOString(),
     abortController,
-  });
+    clientId: "",
+    session: null,
+    draft: null,
+  };
+  activeRuns.set(id, run);
+  return run;
 }
 
 function clearActiveRun(id, abortController) {
@@ -108,18 +174,30 @@ async function appendUserMessage(session, body) {
 async function handleStreamMessage(req, res, id) {
   const session = await loadSession(id);
   const abortController = new AbortController();
+  const activeRun = registerActiveRun(id, session, abortController, "stream");
   let completed = false;
   let clientClosed = false;
-  registerActiveRun(id, session, abortController, "stream");
 
   const body = await readBody(req).catch((error) => {
     clearActiveRun(id, abortController);
     throw error;
   });
+  const clientId = String(body.clientId || "");
+  activeRun.clientId = clientId;
   const modelContent = await appendUserMessage(session, body).catch((error) => {
     clearActiveRun(id, abortController);
     throw error;
   });
+  activeRun.session = session;
+  activeRun.draft = {
+    role: "assistant",
+    supervisor: session.supervisor,
+    content: "",
+    status: "Starting...",
+    trace: [],
+    at: new Date().toISOString(),
+    streaming: true,
+  };
 
   res.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
@@ -127,22 +205,33 @@ async function handleStreamMessage(req, res, id) {
     connection: "keep-alive",
     "x-accel-buffering": "no",
   });
-  writeStreamEvent(res, { type: "session", session });
+  emitRunEvent(res, id, clientId, { type: "session", session, draft: activeRun.draft });
 
   res.on("close", () => {
     if (completed) return;
     clientClosed = true;
-    abortController.abort();
   });
 
   let transcript = "";
   let usageStarted = false;
   const onOutput = ({ stream, content }) => {
     transcript += content;
-    writeStreamEvent(res, { type: "chunk", stream, content });
+    if (activeRun.draft) {
+      activeRun.draft.status = "";
+      activeRun.draft.content += content;
+    }
+    emitRunEvent(res, id, clientId, { type: "chunk", stream, content });
   };
   const onTrace = ({ stream = "trace", content }) => {
-    writeStreamEvent(res, { type: "trace", stream, content, at: new Date().toISOString() });
+    if (activeRun.draft) {
+      activeRun.draft.trace ||= [];
+      activeRun.draft.trace.push(String(content || ""));
+      let totalChars = activeRun.draft.trace.reduce((total, item) => total + item.length, 0);
+      while (activeRun.draft.trace.length > 1 && totalChars > 60000) {
+        totalChars -= activeRun.draft.trace.shift().length;
+      }
+    }
+    emitRunEvent(res, id, clientId, { type: "trace", stream, content, at: new Date().toISOString() });
   };
 
   try {
@@ -161,7 +250,9 @@ async function handleStreamMessage(req, res, id) {
       at: new Date().toISOString(),
     });
     await saveSession(session);
-    writeStreamEvent(res, { type: "done", session, message: session.messages.at(-1) });
+    activeRun.session = session;
+    activeRun.draft = null;
+    emitRunEvent(res, id, clientId, { type: "done", session, message: session.messages.at(-1) });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
   } catch (error) {
     if (clientClosed && abortController.signal.aborted) {
@@ -181,7 +272,9 @@ async function handleStreamMessage(req, res, id) {
       stopped,
     });
     await saveSession(session);
-    writeStreamEvent(res, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
+    activeRun.session = session;
+    activeRun.draft = null;
+    emitRunEvent(res, id, clientId, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
     if (usageStarted) {
       await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: details, stopped }));
     }
@@ -243,6 +336,9 @@ async function handleJsonMessage(req, res, id) {
 }
 
 export async function handleApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/events") {
+    return subscribeEvents(req, res);
+  }
   if (req.method === "GET" && url.pathname === "/api/config") {
     return sendJson(res, 200, {
       supervisors,
@@ -329,6 +425,16 @@ export async function handleApi(req, res, url) {
     if (!activeRun) return sendJson(res, 200, { stopped: false });
     activeRun.abortController.abort(new Error("Stopped by user"));
     return sendJson(res, 202, { stopped: true, run: { id: activeRun.id, supervisor: activeRun.supervisor, cwd: activeRun.cwd } });
+  }
+
+  const autopilotMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/autopilot$/);
+  if (autopilotMatch && req.method === "POST") {
+    if (activeRuns.has(autopilotMatch[1])) {
+      throw Object.assign(new Error("Autopilot waits for the current model run to finish"), { status: 409 });
+    }
+    const session = await loadSession(autopilotMatch[1]);
+    const decision = await decideAutopilotNext(session);
+    return sendJson(res, 200, { decision });
   }
 
   const streamMessageMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/messages\/stream$/);
