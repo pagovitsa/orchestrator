@@ -22,6 +22,16 @@ Conversation history is project-centric: each project stores its own remember fi
 
 The selected CLI runs in that project folder, and its PAL MCP servers expose only the other models as peers.
 
+## Recent Reliability Features
+
+Recent work focuses on making long supervisor sessions easier to trust and debug:
+
+- Cost visibility: usage probes and run signals update per-supervisor token/cost totals, with optional lifetime budget warnings.
+- Safety scanning: credential-shaped text is refused or redacted before memory, session, attachment, and timeline persistence.
+- Verification artifacts: `npm run smoke` performs lightweight HTTP checks and writes a redacted JSON report under ignored `verification/`.
+- Timeline telemetry: terminal timeline cards show grouped supervisor/tool/peer/memory/autopilot events with status, timestamps, durations, and redacted metadata.
+- Autopilot workflow: persisted state, retry/backoff, idle warning/auto-stop, restart cleanup, and a bounded sidebar activity feed make automatic follow-up runs more observable and recoverable.
+
 ## Start
 
 ```bash
@@ -217,3 +227,5 @@ ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ npm run smoke
 ```
 
 The smoke command checks core HTML/API/static asset endpoints, writes a JSON report under `verification/`, and exits non-zero if any check fails. Use `ORCH_SMOKE_AUTH=user:password` for Basic auth, `ORCH_SMOKE_CHECKS=/,/api/config` to override checked paths, and `ORCH_SMOKE_RETRIES`, `ORCH_SMOKE_RETRY_DELAY_MS`, `ORCH_SMOKE_TIMEOUT_MS`, or `ORCH_SMOKE_MAX_BODY_BYTES` for slow-start or large-response servers.
+
+For an authenticated UI, set `ORCH_SMOKE_AUTH` instead of embedding credentials in the URL; reports redact auth material and URL credentials, but keeping credentials out of command URLs avoids accidental shell history leaks.
