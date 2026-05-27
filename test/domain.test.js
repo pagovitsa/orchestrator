@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
@@ -11,6 +11,7 @@ import {
   parseAutopilotDecision,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
+import { paths } from "../src/config/env.js";
 import {
   extractUserMemoriesFromText,
   normalizeMemoryNamespace,
@@ -18,7 +19,7 @@ import {
   rememberMemory,
 } from "../src/domain/memory.js";
 import { mergeTimelineEvent } from "../src/domain/run-timeline.js";
-import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
+import { applySessionPatch, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
 import { mcpToolCatalog } from "../src/supervisors/mcp.js";
 import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
@@ -70,6 +71,81 @@ test("applySessionPatch keeps supervisor and workspace fixed when locked", () =>
 test("projectLabel returns project-oriented history labels", () => {
   assert.equal(projectLabel("test"), "test");
   assert.equal(projectLabel("."), "workspace");
+});
+
+test("saveSession treats incoming messages as authoritative", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const session = {
+      id: "11111111-1111-4111-8111-111111111111",
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "user", content: "keep", at: "2026-01-01T00:00:00.000Z" },
+        { role: "assistant", content: "delete me", at: "2026-01-01T00:00:01.000Z" },
+      ],
+    };
+
+    await saveSession(session);
+    session.messages = [session.messages[0]];
+    await saveSession(session);
+
+    const loaded = await loadSession(session.id);
+    assert.deepEqual(loaded.messages.map((message) => message.content), ["keep"]);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveSession refuses partial session objects without messages", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    await assert.rejects(
+      () => saveSession({
+        id: "33333333-3333-4333-8333-333333333333",
+        supervisor: "codex",
+        cwd: "project-a",
+      }),
+      /session\.messages must be an array/,
+    );
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveSession writes remember files atomically", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const session = {
+      id: "22222222-2222-4222-8222-222222222222",
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [{ role: "user", content: "atomic", at: "2026-01-01T00:00:00.000Z" }],
+    };
+
+    await saveSession(session);
+
+    const filePath = rememberPathForCwd(session.cwd);
+    const files = await readdir(path.dirname(filePath));
+    assert.ok(files.includes(path.basename(filePath)));
+    assert.equal(files.some((file) => file.startsWith(`${path.basename(filePath)}.`) && file.endsWith(".tmp")), false);
+    const loaded = await loadSession(session.id);
+    assert.deepEqual(loaded.messages.map((message) => message.content), ["atomic"]);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("memory keeps user facts global across project files", async () => {

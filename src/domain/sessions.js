@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runtime, supervisors } from "../config/env.js";
 import { requireScopedCwd, resolveCwd, listProjects } from "./workspace.js";
@@ -57,29 +57,6 @@ function normalizeProjectSession(session, cwd) {
   };
 }
 
-function messageKey(message) {
-  return JSON.stringify({
-    role: message.role,
-    supervisor: message.supervisor || "",
-    at: message.at || "",
-    content: message.content || "",
-    modelContent: message.modelContent || "",
-    error: Boolean(message.error),
-  });
-}
-
-function mergeMessages(existing = [], incoming = []) {
-  const merged = [];
-  const seen = new Set();
-  for (const message of [...existing, ...incoming]) {
-    const key = messageKey(message);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(message);
-  }
-  return merged.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
-}
-
 export async function loadSession(id) {
   if (!/^[a-f0-9-]{36}$/.test(id)) {
     throw Object.assign(new Error("Invalid conversation id"), { status: 400 });
@@ -96,13 +73,16 @@ export async function loadSession(id) {
 export async function saveSession(session) {
   return withSessionLock(session.cwd, async () => {
     const cwd = session.cwd || ".";
+    if (!Array.isArray(session.messages)) {
+      throw Object.assign(new Error("session.messages must be an array"), { status: 400 });
+    }
     const existing = await readRememberFile(cwd);
     const normalized = normalizeProjectSession(session, cwd);
     const saved = {
       ...normalized,
       id: existing?.id || normalized.id,
       createdAt: existing?.createdAt || normalized.createdAt,
-      messages: mergeMessages(existing?.messages, normalized.messages),
+      messages: normalized.messages,
       updatedAt: new Date().toISOString(),
     };
     saved.project = projectLabel(cwd);
@@ -110,7 +90,14 @@ export async function saveSession(session) {
 
     const filePath = rememberPathForCwd(cwd);
     await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, JSON.stringify(saved, null, 2), "utf8");
+    const tempPath = path.join(path.dirname(filePath), `${path.basename(filePath)}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(tempPath, JSON.stringify(saved, null, 2), "utf8");
+      await rename(tempPath, filePath);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => {});
+      throw error;
+    }
     Object.assign(session, saved);
     return session;
   });
