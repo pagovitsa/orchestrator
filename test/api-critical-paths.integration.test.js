@@ -287,3 +287,151 @@ test("message API persists uploaded files and sends attachment context to provid
   });
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
+
+test("message API returns bounded provider rate-limit errors and recovers next request", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdir, mkdtemp, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-rate-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-rate-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-rate-home-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+    const originalFetch = globalThis.fetch;
+    let deepseekCalls = 0;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.DEEPSEEK_API_KEY = "test-deepseek-key";
+
+    globalThis.fetch = async (url) => {
+      const target = String(url || "");
+      if (target.includes("api.deepseek.com")) {
+        deepseekCalls += 1;
+        if (deepseekCalls === 1) {
+          return new Response(JSON.stringify({
+            error: {
+              message: "rate limited sk-super-secret-token " + "x".repeat(2000),
+            },
+          }), {
+            status: 429,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "Recovered after rate limit." } }],
+          usage: { total_tokens: 9 },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-rate"), { recursive: true });
+      const created = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "deepseek",
+        cwd: "project-rate",
+      });
+      assert.equal(created.status, 201);
+      const sessionId = created.body.session.id;
+
+      const limited = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+        content: "First request should hit a provider limit.",
+      });
+      assert.equal(limited.status, 429);
+      assert.match(limited.body.error, /DeepSeek API 429/);
+      assert.doesNotMatch(limited.body.error, /sk-super-secret-token/);
+      assert.ok(limited.body.error.length < 1100);
+
+      const afterLimit = await loadSession(sessionId);
+      assert.equal(afterLimit.messages.length, 1);
+      assert.equal(afterLimit.messages[0].role, "user");
+      assert.equal(afterLimit.messages[0].content, "First request should hit a provider limit.");
+
+      const recovered = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+        content: "Second request should recover.",
+      });
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.message.content, "Recovered after rate limit.");
+      const loaded = await loadSession(sessionId);
+      assert.equal(loaded.messages.length, 3);
+      assert.equal(loaded.messages[1].role, "user");
+      assert.equal(loaded.messages[2].role, "assistant");
+      assert.equal(loaded.messages[2].content, "Recovered after rate limit.");
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 15000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});

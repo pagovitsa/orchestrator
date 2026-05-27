@@ -10,10 +10,13 @@ import {
 } from "../domain/memory.js";
 import { loadPrompt } from "../domain/prompts.js";
 import { createTimelineEvent } from "../domain/run-timeline.js";
+import { redactSensitiveText } from "../domain/safety.js";
 import { resolveCwd, requireScopedCwd } from "../domain/workspace.js";
 import { peerRoutingText, writeScopedPeerConfigs } from "./mcp.js";
 
 let timelineSequence = 0;
+const MAX_PROVIDER_ERROR_CHARS = 1000;
+const PROVIDER_ERROR_REDACTION_OVERLAP = 200;
 
 function compactHistory(messages, limit = 18) {
   return messages
@@ -719,7 +722,10 @@ async function callDeepSeekPlain(messages, options = {}) {
     }),
     signal: options.signal,
   });
-  if (!response.ok) throw new Error(`DeepSeek API ${response.status}: ${await response.text()}`);
+  if (!response.ok) {
+    const error = await providerHttpError("DeepSeek", response);
+    throw error;
+  }
   if (shouldStream) return readDeepSeekStream(response.body, options);
   const parsed = JSON.parse(await response.text());
   if (parsed.usage) {
@@ -887,7 +893,7 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
         });
         return callDeepSeekPlain(messages, options);
       }
-      throw new Error(`DeepSeek API ${response.status}: ${body}`);
+      throw providerHttpErrorFromBody("DeepSeek", response, body);
     }
     const parsed = JSON.parse(body);
     if (parsed.usage) {
@@ -970,6 +976,17 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
     }
   }
   throw new Error("DeepSeek peer tool loop reached its step limit");
+}
+
+function providerHttpErrorFromBody(provider, response, body) {
+  const status = Number(response.status || 500);
+  const rawBody = String(body || "").slice(0, MAX_PROVIDER_ERROR_CHARS + PROVIDER_ERROR_REDACTION_OVERLAP);
+  const safeBody = redactSensitiveText(rawBody).slice(0, MAX_PROVIDER_ERROR_CHARS);
+  return Object.assign(new Error(`${provider} API ${status}: ${safeBody}`), { status });
+}
+
+async function providerHttpError(provider, response) {
+  return providerHttpErrorFromBody(provider, response, await response.text());
 }
 
 async function runDeepSeekMemoryTool(session, toolName, args) {
