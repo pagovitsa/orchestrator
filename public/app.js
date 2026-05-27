@@ -462,6 +462,11 @@ const icons = {
     "M21 12c0 1.6-.5 3.1-1.5 4.3M16.8 19.1A10.4 10.4 0 0 1 12 20a10 10 0 0 1-4-.8L3 21l1.6-4A7.3 7.3 0 0 1 3 12c0-1.6.5-3.1 1.5-4.3M8.2 4.9A10.4 10.4 0 0 1 12 4c5 0 9 3.6 9 8",
     "M3 3l18 18",
   ],
+  copy: [
+    "M8 8h11v12H8z",
+    "M5 16H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1",
+  ],
+  reload: ["M21 12a9 9 0 1 1-2.6-6.4", "M21 3v6h-6"],
   autopilot: [
     "M12 3v4",
     "M12 17v4",
@@ -1642,16 +1647,115 @@ function createMessageElement(message) {
   who.textContent = message.role === "assistant" ? (message.supervisor || "assistant") : "You";
 
   const when = document.createElement("span");
+  when.className = "message-time";
   when.textContent = message.streaming ? "live" : formatDate(message.at);
 
   const body = document.createElement("div");
   body.className = "message-body";
   renderMessageBody(body, message);
 
-  head.append(who, when);
+  const headRight = document.createElement("div");
+  headRight.className = "message-head-right";
+  headRight.append(createMessageActions(message), when);
+
+  head.append(who, headRight);
   article.append(head, body);
   if (message.attachments?.length) article.append(createAttachmentList(message.attachments, false));
   return article;
+}
+
+function messageTextForCopy(message) {
+  return String(message.content || message.status || "").trim();
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard unavailable");
+}
+
+function showCopiedFeedback(button) {
+  const previousLabel = button.dataset.idleLabel || button.getAttribute("aria-label") || "Copy message";
+  button.dataset.idleLabel = previousLabel;
+  button.classList.add("is-copied");
+  button.setAttribute("aria-label", "Copied");
+  window.clearTimeout(button._copiedTimer);
+  button._copiedTimer = window.setTimeout(() => {
+    button.classList.remove("is-copied");
+    button.setAttribute("aria-label", previousLabel);
+  }, 1200);
+}
+
+async function resendUserMessage(message) {
+  if (!state.currentSession) return;
+  if (state.runs.has(state.currentSession.id)) {
+    setStatus("Wait for the current supervisor to finish");
+    return;
+  }
+  const content = messageTextForCopy(message);
+  if (!content || (message.attachments?.length && content === "Attached files")) {
+    setStatus("Cannot resend an attachment-only message");
+    return;
+  }
+  await sendMessageForSession(state.currentSession, content);
+}
+
+function createMessageActionButton({ icon, label, onClick }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-action-button";
+  button.setAttribute("aria-label", label);
+  button.innerHTML = iconSvg(icon);
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await onClick(button);
+    } catch (error) {
+      setStatus(`Action error: ${error.message}`);
+    }
+  });
+  return button;
+}
+
+function createMessageActions(message) {
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+
+  const text = messageTextForCopy(message);
+  if (text) {
+    actions.appendChild(createMessageActionButton({
+      icon: icons.copy,
+      label: "Copy message",
+      onClick: async (button) => {
+        await copyTextToClipboard(messageTextForCopy(message));
+        showCopiedFeedback(button);
+      },
+    }));
+  }
+
+  if (message.role === "user") {
+    actions.appendChild(createMessageActionButton({
+      icon: icons.reload,
+      label: "Resend message",
+      onClick: () => resendUserMessage(message),
+    }));
+  }
+
+  return actions;
 }
 
 const URL_PATTERN = /(https?:\/\/[^\s<>()]+)/g;
@@ -1804,7 +1908,7 @@ function updateLastMessage(message) {
   last.className = ["message", message.role, message.streaming ? "streaming" : "", message.error ? "error" : ""]
     .filter(Boolean)
     .join(" ");
-  const when = last.querySelector(".message-head span:last-child");
+  const when = last.querySelector(".message-time");
   const body = last.querySelector(".message-body");
   if (when) when.textContent = message.streaming ? "live" : formatDate(message.at);
   if (body) renderMessageBody(body, message);

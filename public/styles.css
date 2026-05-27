@@ -569,6 +569,7 @@ input {
 .message-head {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 10px;
   margin-bottom: 6px;
   color: var(--muted);
@@ -578,6 +579,75 @@ input {
 
 .message.user .message-head {
   color: rgba(255, 255, 255, 0.76);
+}
+
+.message-head-right {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
+.message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.message-time {
+  white-space: nowrap;
+}
+
+.message-action-button {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: currentColor;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.message-action-button:hover,
+.message-action-button:focus-visible {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+}
+
+.message-action-button.is-copied::after {
+  content: "Copied";
+  position: absolute;
+  right: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(50%);
+  z-index: 2;
+  border: 1px solid #3b454a;
+  border-radius: 6px;
+  background: #101113;
+  color: var(--text);
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+
+.message-action-button svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .message-body {

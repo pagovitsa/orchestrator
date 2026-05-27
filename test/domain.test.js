@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
-import { parseAutopilotDecision } from "../src/domain/autopilot.js";
+import { normalizeAutopilotDecision, parseAutopilotDecision } from "../src/domain/autopilot.js";
 import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../src/domain/memory.js";
 import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
 import {
@@ -233,4 +233,45 @@ test("parseAutopilotDecision stops on explicit stop decisions", () => {
 
   assert.equal(parsed.action, "stop");
   assert.equal(parsed.reason, "auth failed");
+});
+
+test("normalizeAutopilotDecision forces continue after non-blocking completion summary", () => {
+  const lastAssistant = {
+    role: "assistant",
+    content: [
+      "Changed:       ολοκληρώθηκαν και έγιναν commit:",
+      "- `3f9c78e Add client UI safety plumbing` για iter18-27.",
+      "",
+      "Verification:  passed:",
+      "- `NODE_ENV=development corepack pnpm@9.12.0 -r typecheck`",
+      "- `NODE_ENV=development corepack pnpm@9.12.0 -r test`",
+      "",
+      "Risks / notes: Electron runtime smoke παραμένει blocked από το container Electron binary issue.",
+    ].join("\n"),
+  };
+
+  const normalized = normalizeAutopilotDecision(
+    { action: "stop", kind: "stop", reason: "task appears complete" },
+    lastAssistant,
+  );
+
+  assert.equal(normalized.action, "message");
+  assert.equal(normalized.kind, "continue");
+  assert.match(normalized.content, /Συνέχισε/);
+  assert.match(normalized.reason, /Forced continue/);
+});
+
+test("normalizeAutopilotDecision keeps stop when assistant asks for approval", () => {
+  const lastAssistant = {
+    role: "assistant",
+    content: "I need human approval before deleting these files. Please confirm.",
+  };
+
+  const normalized = normalizeAutopilotDecision(
+    { action: "stop", kind: "stop", reason: "approval required" },
+    lastAssistant,
+  );
+
+  assert.equal(normalized.action, "stop");
+  assert.equal(normalized.reason, "approval required");
 });

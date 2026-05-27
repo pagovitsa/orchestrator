@@ -8,6 +8,9 @@ const FALLBACK_CONTINUE_MESSAGE = [
   "Προχώρησε στο επόμενο λογικό βήμα, επαλήθευσε ό,τι αλλάζεις, και ρώτα μόνο αν υπάρχει πραγματικό blocker ή χρειάζεται ανθρώπινη έγκριση.",
 ].join("\n");
 
+const BLOCKING_APPROVAL_PATTERN = /\b(confirm|approve|approval|permission|human approval|destructive|delete|remove|drop|wipe|force[- ]?push|rewrite history|deploy|production|billing|payment|secret|credential)\b/i;
+const QUESTION_PATTERN = /[?？]\s*$|(?:\b(should i|do you want|would you like|shall i|can i|may i|please confirm|which option|what would you like)\b)/i;
+
 function latestAssistantMessage(session) {
   return [...(session.messages || [])].reverse().find((message) => message.role === "assistant") || null;
 }
@@ -28,6 +31,28 @@ function hasRunError(message) {
   if (!message) return true;
   if (message.error || message.stopped) return true;
   return /^\s*(error|command failed|uncaught|traceback)\b/i.test(String(message.content || ""));
+}
+
+function assistantContent(message) {
+  return String(message?.modelContent || message?.content || "").trim();
+}
+
+function shouldForceContinue(lastAssistant) {
+  if (hasRunError(lastAssistant)) return false;
+  const content = assistantContent(lastAssistant);
+  if (!content) return false;
+  if (BLOCKING_APPROVAL_PATTERN.test(content)) return false;
+  if (QUESTION_PATTERN.test(content)) return false;
+  return true;
+}
+
+function fallbackContinueDecision(reason = "") {
+  return {
+    action: "message",
+    kind: "continue",
+    content: FALLBACK_CONTINUE_MESSAGE,
+    reason: reason || "Assistant finished without a blocker; autopilot continues the project.",
+  };
 }
 
 function extractJsonObject(text) {
@@ -67,6 +92,14 @@ export function parseAutopilotDecision(text) {
   }
 
   return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
+}
+
+export function normalizeAutopilotDecision(decision, lastAssistant) {
+  if (decision?.action === "message") return decision;
+  if (shouldForceContinue(lastAssistant)) {
+    return fallbackContinueDecision(decision?.reason ? `Forced continue after non-blocking stop: ${decision.reason}` : "");
+  }
+  return decision;
 }
 
 function autopilotPrompt(session, lastAssistant) {
@@ -127,5 +160,14 @@ export async function decideAutopilotNext(session, { signal } = {}) {
   if (!response.ok) throw new Error(`DeepSeek autopilot HTTP ${response.status}: ${body}`);
   const parsed = JSON.parse(body);
   const content = parsed.choices?.[0]?.message?.content || "";
-  return parseAutopilotDecision(content);
+  let decision;
+  try {
+    decision = parseAutopilotDecision(content);
+  } catch (error) {
+    if (shouldForceContinue(lastAssistant)) {
+      return fallbackContinueDecision(`Forced continue after invalid DeepSeek decision: ${error.message}`);
+    }
+    throw error;
+  }
+  return normalizeAutopilotDecision(decision, lastAssistant);
 }
