@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeUploadName, isTextAttachment, saveAttachments } from "../src/domain/attachments.js";
@@ -25,12 +25,14 @@ import {
   rememberMemory,
 } from "../src/domain/memory.js";
 import { createTimelineEvent, mergeTimelineEvent } from "../src/domain/run-timeline.js";
-import { applySessionPatch, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
+import { applySessionPatch, clearStaleAutopilotRuns, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
 import { containsSensitiveText, redactSensitiveStrings, redactSensitiveText } from "../src/domain/safety.js";
+import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../src/domain/idle-timeout.js";
 import { mcpToolCatalog } from "../src/supervisors/mcp.js";
 import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
   calculateBalanceUsage,
+  clearStaleActiveRuns,
   listUsage,
   parseClaudeUsagePayload,
   parseCodexRateLimitPayload,
@@ -446,6 +448,19 @@ test("autopilot workflow state enforces allowed transitions", () => {
   );
 });
 
+test("autopilot idle timeout warns then stops only autopilot-sourced runs", () => {
+  const config = normalizeIdleTimeoutConfig({ timeoutMs: 1000, warningMs: 300 });
+  const base = { source: "autopilot", lastActivityMs: 1000 };
+
+  assert.deepEqual(idleTimeoutDecision({ source: "manual", lastActivityMs: 1000 }, 5000, config), { action: "none" });
+  assert.equal(idleTimeoutDecision(base, 1600, config).action, "none");
+  const warning = idleTimeoutDecision(base, 1700, config);
+  assert.equal(warning.action, "warn");
+  assert.equal(warning.remainingMs, 300);
+  assert.equal(idleTimeoutDecision({ ...base, idleWarningSent: true }, 1800, config).action, "none");
+  assert.equal(idleTimeoutDecision(base, 2000, config).action, "stop");
+});
+
 test("applySessionPatch updates persisted autopilot workflow state", () => {
   const session = {
     id: "77777777-7777-4777-8777-777777777777",
@@ -466,7 +481,42 @@ test("applySessionPatch updates persisted autopilot workflow state", () => {
   assert.equal(session.autopilotState.state, "paused");
 });
 
-test("saveSession clears stale autopilot running state on load", async () => {
+test("clearStaleAutopilotRuns persists restart cleanup for running workflow state", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const session = {
+      id: "99999999-9999-4999-8999-999999999999",
+      schemaVersion: 1,
+      title: "project-a",
+      project: "project-a",
+      supervisor: "codex",
+      cwd: "project-a",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      messages: [],
+      autopilotEnabled: true,
+      autopilotState: { state: "running", reason: "deciding" },
+    };
+    await mkdir(path.dirname(rememberPathForCwd("project-a")), { recursive: true });
+    await writeFile(rememberPathForCwd("project-a"), JSON.stringify(session), "utf8");
+
+    const cleared = await clearStaleAutopilotRuns("restart cleanup");
+    const loaded = await loadSession(session.id);
+
+    assert.deepEqual(cleared, ["project-a"]);
+    assert.equal(loaded.autopilotEnabled, true);
+    assert.equal(loaded.autopilotState.state, "created");
+    assert.equal(loaded.autopilotState.reason, "restart cleanup");
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveSession preserves running state for startup cleanup", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
   const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
   try {
@@ -484,7 +534,7 @@ test("saveSession clears stale autopilot running state on load", async () => {
     await saveSession(session);
     const loaded = await loadSession(session.id);
     assert.equal(loaded.autopilotEnabled, true);
-    assert.equal(loaded.autopilotState.state, "created");
+    assert.equal(loaded.autopilotState.state, "running");
   } finally {
     paths.workspaceRoot = originalWorkspaceRoot;
     await rm(dir, { recursive: true, force: true });
@@ -619,6 +669,23 @@ test("usageSnapshot reports aggregate budget warnings", async () => {
     assert.equal(snapshot.budget.warning, true);
     assert.equal(Math.round(snapshot.budget.totalCostUsd * 100), 11);
     assert.equal(snapshot.usage.find((item) => item.id === "claude").budgetWarning, true);
+  });
+});
+
+test("clearStaleActiveRuns resets persisted active usage after restart", async () => {
+  await withUsageDataDir(async () => {
+    await recordRunStart("codex");
+
+    let usage = await listUsage();
+    assert.equal(usage.find((item) => item.id === "codex").active, true);
+
+    const changed = await clearStaleActiveRuns("restart cleanup");
+    usage = await listUsage();
+    const codex = usage.find((item) => item.id === "codex");
+
+    assert.equal(changed, true);
+    assert.equal(codex.active, false);
+    assert.equal(codex.lastError, "restart cleanup");
   });
 });
 

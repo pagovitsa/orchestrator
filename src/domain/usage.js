@@ -804,6 +804,25 @@ export async function recordRunEnd(supervisor, { error = "", stopped = false } =
   });
 }
 
+export async function clearStaleActiveRuns(reason = "Cleared after server restart") {
+  return withUsageLock(async () => {
+    const store = await readStore();
+    let changed = false;
+    const now = new Date().toISOString();
+    for (const model of Object.values(store.models)) {
+      if (!model.active) continue;
+      model.active = false;
+      model.activeRunTokens = 0;
+      model.activeRunCostUsd = 0;
+      model.lastFinishedAt = now;
+      model.lastError = reason;
+      changed = true;
+    }
+    if (changed) await writeStore(store);
+    return changed;
+  });
+}
+
 export async function recordUsageSignal(supervisor, signal = {}) {
   if (!supervisors[supervisor]) return;
   return withUsageLock(async () => {

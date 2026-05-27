@@ -136,6 +136,8 @@ The terminal modal includes a chronological run timeline for supervisor, command
 
 Autopilot enablement is stored with each project chat instead of only in browser storage. The workflow state uses `created`, `running`, `stopped`, `completed`, `failed`, and `paused`: `running` is used while Autopilot is deciding, `completed` means the last decision produced the next message and can continue, and `paused`/`stopped`/`failed` block further automatic turns until Autopilot is enabled again. The sidebar shows the current Autopilot indicator for enabled projects.
 
+Autopilot follow-up runs have an idle guard separate from manual messages. Set `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` to stop an automatically sent follow-up after silence, and `ORCH_AUTOPILOT_IDLE_WARNING_MS` to warn shortly before the stop; defaults are 15 minutes and 1 minute. Set the timeout to `0` to disable the idle guard. On server startup, stale Autopilot `running` state and persisted usage `active` flags from a previous process are cleared.
+
 ## Credentials
 
 The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, and the DeepSeek model registry. It does not bake account tokens or API keys.

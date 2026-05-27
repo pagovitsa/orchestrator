@@ -65,12 +65,6 @@ function normalizeProjectSession(session, cwd) {
     session.autopilotState,
     autopilotEnabled ? "created" : "paused",
   );
-  if (autopilotState.state === "running") {
-    autopilotState = normalizeWorkflowStatus({
-      state: autopilotEnabled ? "created" : "paused",
-      reason: "Cleared stale running state",
-    });
-  }
   return {
     id: /^[a-f0-9-]{36}$/.test(session.id || "") ? session.id : randomUUID(),
     schemaVersion: 1,
@@ -170,6 +164,31 @@ export async function listSessions() {
     }
   }
   return sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+export async function clearStaleAutopilotRuns(reason = "Cleared after server restart") {
+  const cleared = [];
+  for (const cwd of await listRememberedProjectCwds()) {
+    await withSessionLock(cwd, async () => {
+      let raw;
+      try {
+        raw = JSON.parse(await readFile(rememberPathForCwd(cwd), "utf8"));
+      } catch (error) {
+        if (error.code === "ENOENT") return;
+        throw error;
+      }
+      if (String(raw.autopilotState?.state || "").toLowerCase() !== "running") return;
+      raw.autopilotState = {
+        state: raw.autopilotEnabled === true ? "created" : "paused",
+        updatedAt: new Date().toISOString(),
+        reason,
+      };
+      const saved = normalizeProjectSession(raw, cwd);
+      await writeRememberSession(cwd, { ...saved, updatedAt: new Date().toISOString() });
+      cleared.push(cwd);
+    });
+  }
+  return cleared;
 }
 
 async function listRememberedProjectCwds() {

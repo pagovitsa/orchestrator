@@ -21,6 +21,7 @@ import { redactSensitiveText } from "../domain/safety.js";
 import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
 import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
+import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../domain/idle-timeout.js";
 import {
   connectionStatus,
   disconnectConnection,
@@ -37,6 +38,12 @@ import { readBody, sendJson, writeStreamEvent } from "./response.js";
 const activeRuns = new Map();
 const activeAutopilotRuns = new Map();
 const eventClients = new Set();
+const idleConfig = normalizeIdleTimeoutConfig({
+  timeoutMs: runtime.autopilotIdleTimeoutMs,
+  warningMs: runtime.autopilotIdleWarningMs,
+});
+const idleCheckIntervalMs = idleConfig.timeoutMs > 0 ? Math.max(250, Math.min(5000, Math.floor(idleConfig.timeoutMs / 4))) : 0;
+let idleCheckTimer = null;
 
 function sendEventClient(client, event) {
   if (client.res.destroyed || client.res.writableEnded) {
@@ -58,6 +65,12 @@ function broadcastRunEvent(sessionId, clientId, event) {
 function emitRunEvent(res, sessionId, clientId, event) {
   writeStreamEvent(res, event);
   broadcastRunEvent(sessionId, clientId, event);
+}
+
+function ensureIdleChecker() {
+  if (!idleCheckIntervalMs || idleCheckTimer) return;
+  idleCheckTimer = setInterval(checkIdleRuns, idleCheckIntervalMs);
+  idleCheckTimer.unref();
 }
 
 function subscribeEvents(req, res) {
@@ -126,18 +139,73 @@ function registerActiveRun(id, session, abortController, mode) {
     supervisor: session.supervisor,
     cwd: session.cwd || ".",
     startedAt: new Date().toISOString(),
+    source: "manual",
+    lastActivityMs: Date.now(),
+    idleWarningSent: false,
+    idleStopped: false,
     abortController,
     clientId: "",
     session: null,
     draft: null,
   };
   activeRuns.set(id, run);
+  ensureIdleChecker();
   return run;
 }
 
 function clearActiveRun(id, abortController) {
   const active = activeRuns.get(id);
   if (active?.abortController === abortController) activeRuns.delete(id);
+}
+
+function updateRunActivity(run) {
+  if (!run) return;
+  run.lastActivityMs = Date.now();
+  run.idleWarningSent = false;
+}
+
+function checkIdleRuns() {
+  const now = Date.now();
+  for (const run of activeRuns.values()) {
+    const decision = idleTimeoutDecision(run, now, idleConfig);
+    if (decision.action === "warn") {
+      run.idleWarningSent = true;
+      run.warnIdle?.(decision.remainingMs);
+    } else if (decision.action === "stop") {
+      run.idleStopped = true;
+      run.abortController.abort(new Error("Autopilot idle timeout"));
+    }
+  }
+}
+
+function createAutopilotDecisionTimeout(session) {
+  if (!idleConfig.timeoutMs) return { signal: undefined, clear() {} };
+  const abortController = new AbortController();
+  const warningDelay = idleConfig.warningMs > 0 ? Math.max(0, idleConfig.timeoutMs - idleConfig.warningMs) : 0;
+  const warningTimer = warningDelay > 0
+    ? setTimeout(() => {
+        broadcastRunEvent(session.id, "", {
+          type: "autopilot",
+          phase: "idle-warning",
+          project: session.cwd,
+          supervisor: session.supervisor,
+          warning: `Autopilot decision has been idle and will stop in ${Math.ceil(idleConfig.warningMs / 1000)}s`,
+          at: new Date().toISOString(),
+        });
+      }, warningDelay)
+    : null;
+  const timeoutTimer = setTimeout(() => {
+    abortController.abort(new Error("Autopilot idle timeout"));
+  }, idleConfig.timeoutMs);
+  warningTimer?.unref();
+  timeoutTimer.unref();
+  return {
+    signal: abortController.signal,
+    clear() {
+      if (warningTimer) clearTimeout(warningTimer);
+      clearTimeout(timeoutTimer);
+    },
+  };
 }
 
 function captureUsage(supervisor) {
@@ -250,6 +318,43 @@ async function saveAutopilotFailure(session, error) {
   });
 }
 
+async function saveAutopilotRunStarted(session, reason = "Autopilot running") {
+  return updateSessionForCwd(session.cwd, (fresh) => {
+    if (!fresh.autopilotEnabled) return fresh;
+    fresh.autopilotState = transitionWorkflowStatus(
+      fresh.autopilotState,
+      "running",
+      reason,
+    );
+    return fresh;
+  });
+}
+
+async function saveAutopilotRunCompleted(session, reason = "Autopilot run completed") {
+  return updateSessionForCwd(session.cwd, (fresh) => {
+    if (!fresh.autopilotEnabled) return fresh;
+    fresh.autopilotState = transitionWorkflowStatus(
+      fresh.autopilotState,
+      "completed",
+      reason,
+    );
+    return fresh;
+  });
+}
+
+async function saveAutopilotRunTerminal(session, state, reason) {
+  return updateSessionForCwd(session.cwd, (fresh) => {
+    if (!fresh.autopilotEnabled) return fresh;
+    fresh.autopilotEnabled = false;
+    fresh.autopilotState = transitionWorkflowStatus(
+      fresh.autopilotState,
+      state,
+      reason,
+    );
+    return fresh;
+  });
+}
+
 function memoryFilesForCwd(cwd) {
   return {
     globalFile: path.join(paths.dataDir, "orch-memory", "user.json"),
@@ -290,8 +395,6 @@ async function handleStreamMessage(req, res, id) {
   const session = await loadSession(id);
   const abortController = new AbortController();
   const activeRun = registerActiveRun(id, session, abortController, "stream");
-  let completed = false;
-  let clientClosed = false;
 
   const body = await readBody(req).catch((error) => {
     clearActiveRun(id, abortController);
@@ -300,10 +403,16 @@ async function handleStreamMessage(req, res, id) {
   const clientId = String(body.clientId || "");
   const browserContext = browserContextFromRequest(req, body);
   activeRun.clientId = clientId;
+  activeRun.source = body.source === "autopilot" ? "autopilot" : "manual";
+  activeRun.lastActivityMs = Date.now();
   const modelContent = await appendUserMessage(session, body).catch((error) => {
     clearActiveRun(id, abortController);
     throw error;
   });
+  if (activeRun.source === "autopilot") {
+    const saved = await saveAutopilotRunStarted(session, "Autopilot follow-up running");
+    Object.assign(session, saved);
+  }
   activeRun.session = session;
   activeRun.draft = {
     role: "assistant",
@@ -314,6 +423,14 @@ async function handleStreamMessage(req, res, id) {
     timeline: [],
     at: new Date().toISOString(),
     streaming: true,
+  };
+  activeRun.warnIdle = (remainingMs) => {
+    emitRunEvent(res, id, clientId, {
+      type: "idle-warning",
+      warning: `Autopilot has been idle and will stop in ${Math.ceil(remainingMs / 1000)}s`,
+      remainingMs,
+      at: new Date().toISOString(),
+    });
   };
 
   res.writeHead(200, {
@@ -331,14 +448,10 @@ async function handleStreamMessage(req, res, id) {
     status: "running",
   });
 
-  res.on("close", () => {
-    if (completed) return;
-    clientClosed = true;
-  });
-
   let transcript = "";
   let usageStarted = false;
   const onOutput = ({ stream, content }) => {
+    updateRunActivity(activeRun);
     const safeContent = redactSensitiveText(content);
     transcript += safeContent;
     if (activeRun.draft) {
@@ -348,6 +461,7 @@ async function handleStreamMessage(req, res, id) {
     emitRunEvent(res, id, clientId, { type: "chunk", stream, content: safeContent });
   };
   const onTrace = ({ stream = "trace", content }) => {
+    updateRunActivity(activeRun);
     const safeContent = redactSensitiveText(content);
     if (activeRun.draft) {
       activeRun.draft.trace ||= [];
@@ -360,6 +474,7 @@ async function handleStreamMessage(req, res, id) {
     emitRunEvent(res, id, clientId, { type: "trace", stream, content: safeContent, at: new Date().toISOString() });
   };
   const onTask = (event) => {
+    updateRunActivity(activeRun);
     if (activeRun.draft) {
       activeRun.draft.timeline = mergeTimelineEvent(activeRun.draft.timeline || [], event);
     }
@@ -387,6 +502,10 @@ async function handleStreamMessage(req, res, id) {
       timeline: activeRun.draft?.timeline || [],
     });
     await saveSession(session);
+    if (activeRun.source === "autopilot") {
+      const saved = await saveAutopilotRunCompleted(session, "Autopilot follow-up completed");
+      Object.assign(session, saved);
+    }
     activeRun.session = session;
     activeRun.draft = null;
     emitRunEvent(res, id, clientId, { type: "done", session, message: session.messages.at(-1) });
@@ -400,10 +519,6 @@ async function handleStreamMessage(req, res, id) {
     });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
   } catch (error) {
-    if (clientClosed && abortController.signal.aborted) {
-      if (usageStarted) await safelyRecordUsage(`stop for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { stopped: true }));
-      return;
-    }
     const stopped = abortController.signal.aborted;
     const details = stopped ? runStopReason(abortController.signal) : (error.message || String(error));
     session.messages.push({
@@ -419,6 +534,10 @@ async function handleStreamMessage(req, res, id) {
       stopped,
     });
     await saveSession(session);
+    if (activeRun.source === "autopilot") {
+      const saved = await saveAutopilotRunTerminal(session, stopped ? "stopped" : "failed", details);
+      Object.assign(session, saved);
+    }
     activeRun.session = session;
     activeRun.draft = null;
     emitRunEvent(res, id, clientId, { type: stopped ? "stopped" : "error", error: details, session, message: session.messages.at(-1) });
@@ -434,7 +553,6 @@ async function handleStreamMessage(req, res, id) {
       await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: details, stopped }));
     }
   } finally {
-    completed = true;
     clearActiveRun(id, abortController);
     if (!res.writableEnded && !res.destroyed) res.end();
   }
@@ -447,12 +565,18 @@ async function handleJsonMessage(req, res, id) {
     if (!completed) abortController.abort();
   });
   const session = await loadSession(id);
-  registerActiveRun(id, session, abortController, "json");
+  const activeRun = registerActiveRun(id, session, abortController, "json");
   let usageStarted = false;
   try {
     const body = await readBody(req);
+    activeRun.source = body.source === "autopilot" ? "autopilot" : "manual";
+    activeRun.lastActivityMs = Date.now();
     const browserContext = browserContextFromRequest(req, body);
     const modelContent = await appendUserMessage(session, body);
+    if (activeRun.source === "autopilot") {
+      const saved = await saveAutopilotRunStarted(session, "Autopilot follow-up running");
+      Object.assign(session, saved);
+    }
     usageStarted = true;
     await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
     emitHookEvent({
@@ -475,6 +599,10 @@ async function handleJsonMessage(req, res, id) {
       at: new Date().toISOString(),
     });
     await saveSession(session);
+    if (activeRun.source === "autopilot") {
+      const saved = await saveAutopilotRunCompleted(session, "Autopilot follow-up completed");
+      Object.assign(session, saved);
+    }
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
     emitHookEvent({
       type: "run.end",
@@ -488,6 +616,10 @@ async function handleJsonMessage(req, res, id) {
     return sendJson(res, 200, { session, message: session.messages.at(-1) });
   } catch (error) {
     if (!abortController.signal.aborted) {
+      if (activeRun.source === "autopilot") {
+        const saved = await saveAutopilotFailure(session, error);
+        Object.assign(session, saved);
+      }
       if (usageStarted) {
         await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: error.message || String(error) }));
       }
@@ -509,6 +641,10 @@ async function handleJsonMessage(req, res, id) {
       stopped: true,
     });
     await saveSession(session);
+    if (activeRun.source === "autopilot") {
+      const saved = await saveAutopilotRunTerminal(session, "stopped", runStopReason(abortController.signal));
+      Object.assign(session, saved);
+    }
     if (usageStarted) await safelyRecordUsage(`stop for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { stopped: true }));
     emitHookEvent({
       type: "run.end",
@@ -637,11 +773,13 @@ export async function handleApi(req, res, url) {
     if (activeAutopilotRuns.has(autopilotMatch[1])) {
       throw Object.assign(new Error("Autopilot decision is already running"), { status: 409 });
     }
-    const session = await loadSession(autopilotMatch[1]);
+    let session = await loadSession(autopilotMatch[1]);
     if (!workflowCanRun(session.autopilotState, session.autopilotEnabled)) {
       throw Object.assign(new Error(`Autopilot is ${session.autopilotState?.state || "paused"}`), { status: 409 });
     }
-    activeAutopilotRuns.set(session.id, true);
+    session = await saveAutopilotRunStarted(session, "Autopilot decision running");
+    const decisionTimeout = createAutopilotDecisionTimeout(session);
+    activeAutopilotRuns.set(session.id, { signal: decisionTimeout.signal });
     broadcastRunEvent(session.id, "", {
       type: "autopilot",
       phase: "thinking",
@@ -651,7 +789,7 @@ export async function handleApi(req, res, url) {
       at: new Date().toISOString(),
     });
     try {
-      const decision = await decideAutopilotNext(session);
+      const decision = await decideAutopilotNext(session, { signal: decisionTimeout.signal });
       const saved = await saveAutopilotDecision(session, decision);
       void rememberAutopilotDecision(session, decision);
       emitHookEvent({
@@ -673,7 +811,11 @@ export async function handleApi(req, res, url) {
       });
       return sendJson(res, 200, { decision, session: saved });
     } catch (error) {
-      const saved = await saveAutopilotFailure(session, error).catch((saveError) => {
+      const stopped = decisionTimeout.signal?.aborted;
+      const saved = await (stopped
+        ? saveAutopilotRunTerminal(session, "stopped", runStopReason(decisionTimeout.signal))
+        : saveAutopilotFailure(session, error)
+      ).catch((saveError) => {
         console.error("autopilot state save failed:", saveError.message || saveError);
         return session;
       });
@@ -688,6 +830,7 @@ export async function handleApi(req, res, url) {
       });
       throw error;
     } finally {
+      decisionTimeout.clear();
       activeAutopilotRuns.delete(session.id);
     }
   }

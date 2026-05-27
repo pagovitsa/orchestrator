@@ -1541,7 +1541,7 @@ async function maybeRunAutopilot(session) {
       return;
     }
     setStatus(`${projectName} autopilot sending...`);
-    await sendMessageForSession(session, content);
+    await sendMessageForSession(session, content, [], { source: "autopilot" });
   } catch (error) {
     setStatus(`Autopilot error: ${error.message}`);
   }
@@ -2436,6 +2436,7 @@ async function sendMessageForSession(targetSession, content, files = [], options
     await streamApi(`/api/sessions/${run.sessionId}/messages/stream`, {
       clientId: state.clientId,
       browser: browserContext(),
+      source: options.source === "autopilot" ? "autopilot" : "manual",
       content,
       attachments,
     }, {
@@ -2469,6 +2470,13 @@ async function sendMessageForSession(targetSession, content, files = [], options
         if (viewing()) {
           updateLastMessage(draft);
           syncOpenTerminal(draft);
+        }
+      },
+      "idle-warning"(event) {
+        draft.status = event.warning || "Autopilot idle timeout soon";
+        if (viewing()) {
+          updateLastMessage(draft);
+          setStatus(draft.status);
         }
       },
       done(event) {
@@ -2765,6 +2773,12 @@ function handleLiveAutopilot(event) {
     setStatus(`Autopilot error: ${event.error || "failed"}`);
     return;
   }
+  if (event.phase === "idle-warning") {
+    state.autopilotPhases.set(event.sessionId, "running");
+    renderSessions();
+    setStatus(event.warning || "Autopilot idle timeout soon");
+    return;
+  }
   if (event.phase === "state") {
     state.autopilotPhases.delete(event.sessionId);
     renderSessions();
@@ -2787,6 +2801,7 @@ function applyLiveEvent(event) {
   else if (event.type === "chunk") handleLiveChunk(event);
   else if (event.type === "trace") handleLiveTrace(event);
   else if (event.type === "task") handleLiveTask(event);
+  else if (event.type === "idle-warning") setStatus(event.warning || "Autopilot idle timeout soon");
   else if (event.type === "autopilot") handleLiveAutopilot(event);
   else if (event.type === "done" || event.type === "error" || event.type === "stopped") finishLiveRun(event);
 }

@@ -70,6 +70,8 @@ export const runtime = {
   allowWrite: envFlag("ORCH_ALLOW_WRITE", false),
   allowWorkspaceRoot: envFlag("ORCH_ALLOW_WORKSPACE_ROOT", false),
   timeoutMs: envNumber("ORCH_TIMEOUT_MS", 10800000), // 3h; 0 = no auto-timeout (stop manually)
+  autopilotIdleTimeoutMs: envNumber("ORCH_AUTOPILOT_IDLE_TIMEOUT_MS", 900000), // 15m; 0 = disabled
+  autopilotIdleWarningMs: envNumber("ORCH_AUTOPILOT_IDLE_WARNING_MS", 60000), // warn 1m before stop
   usagePollIntervalMs: envNumber("ORCH_USAGE_POLL_INTERVAL_MS", 300000), // 5m; 0 = disabled
   budgetWarningUsd: envNumber("ORCH_BUDGET_WARNING_USD", envNumber("ORCH_BUDGET_USD", 0)),
   maxUploadBytes: envNumber("ORCH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),

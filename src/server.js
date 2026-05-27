@@ -3,8 +3,8 @@ import { mkdir } from "node:fs/promises";
 import { paths, runtime } from "./config/env.js";
 import { authorizeRequest, startupAuthError } from "./http/auth.js";
 import { ensurePromptStore } from "./domain/prompts.js";
-import { ensureSessionStore } from "./domain/sessions.js";
-import { startUsagePolling } from "./domain/usage.js";
+import { clearStaleAutopilotRuns, ensureSessionStore } from "./domain/sessions.js";
+import { clearStaleActiveRuns, startUsagePolling } from "./domain/usage.js";
 import { handleApi } from "./http/routes.js";
 import { sendJson } from "./http/response.js";
 import { serveStatic } from "./http/static.js";
@@ -12,6 +12,8 @@ import { serveStatic } from "./http/static.js";
 async function ensureRuntimeDirs() {
   await ensureSessionStore();
   await ensurePromptStore();
+  await clearStaleAutopilotRuns();
+  await clearStaleActiveRuns();
   await mkdir(paths.mcpConfigDir, { recursive: true });
 }
 
