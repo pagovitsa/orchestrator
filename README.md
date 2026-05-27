@@ -2,45 +2,36 @@
 
 [![CI](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml)
 
-Local ChatGPT-style supervisor UI for Claude CLI, Codex CLI, Gemini CLI, and DeepSeek V4 Pro. This refactor keeps the original behavior from `orch-ui`, but splits the server into focused modules for config, workspace scoping, sessions, attachments, PAL MCP wiring, supervisor runners, routes, and static serving.
+Orchestrator is a local supervisor cockpit for running Claude Code, OpenAI Codex CLI, Gemini CLI, and DeepSeek V4 Pro against real project folders from one browser UI.
 
-The shared supervisor prompt lives at:
+It is designed for hands-on local development: each chat is tied to a project directory, every supervisor runs inside the selected project, and the Docker setup keeps account state, runtime data, project previews, and optional Tailscale HTTPS inside the stack instead of borrowing host machine state.
 
-```text
-prompts/main-orchestrator.md
-```
+## Highlights
 
-The default mounted host workspace is:
+- Multi-agent supervisor UI for Claude, Codex, Gemini, and DeepSeek V4 Pro.
+- Project-scoped conversations, uploads, memory, preview servers, and run history.
+- PAL MCP peer wiring so each CLI supervisor can ask the other models for help.
+- Shared MCP tools for semantic code search, live docs, local memory, and browser checks.
+- Docker-owned CLI auth volumes for Claude, Codex, and Gemini.
+- Optional Docker Tailscale sidecar with HTTPS Serve for the UI and preview ports.
+- Persistent Autopilot workflow state with retry, idle guard, activity feed, and restart cleanup.
+- Usage and budget telemetry with redaction before persistence.
+- Built-in safety scanning for obvious credentials in memory, attachments, sessions, and reports.
 
-```text
-$HOME/orch-projects -> /workspace
-```
+## Quick Start
 
-Override it with `ORCH_HOST_PROJECTS=/absolute/path` if you want a different host folder.
+Requirements:
 
-Use `New chat` to enter a new project name and choose the supervisor for that chat run. The UI creates the project folder automatically. Existing projects that already have chat history are opened from the left sidebar, not re-selected from the new-chat modal.
-
-Conversation history is project-centric: each project stores its own remember file at `.remember/orchestrator-chat.json`, and the sidebar history is keyed by project rather than by disposable chat sessions.
-
-The selected CLI runs in that project folder, and its PAL MCP servers expose only the other models as peers.
-
-## Recent Reliability Features
-
-Recent work focuses on making long supervisor sessions easier to trust and debug:
-
-- Cost visibility: usage probes and run signals update per-supervisor token/cost totals, with optional lifetime budget warnings.
-- Safety scanning: credential-shaped text is refused or redacted before memory, session, attachment, and timeline persistence.
-- Verification artifacts: `npm run smoke` performs lightweight HTTP checks and writes a redacted JSON report under ignored `verification/`.
-- Timeline telemetry: terminal timeline cards show grouped supervisor/tool/peer/memory/autopilot events with status, timestamps, durations, and redacted metadata.
-- Autopilot workflow: persisted state, retry/backoff, idle warning/auto-stop, restart cleanup, and a bounded sidebar activity feed make automatic follow-up runs more observable and recoverable.
-
-## Start
+- Docker with Compose v2
+- Node.js 22 only if you want to run tests locally outside Docker
+- CLI accounts or API keys for the supervisors you plan to use
 
 ```bash
-cd /path/to/Orchestrator
+git clone git@github.com:pagovitsa/orchestrator.git
+cd orchestrator
 cp .env.example .env
-# edit .env and set DEEPSEEK_API_KEY if you want the DeepSeek route
-docker compose up --build
+$EDITOR .env
+docker compose up -d --build
 ```
 
 Open:
@@ -49,160 +40,193 @@ Open:
 http://127.0.0.1:8787
 ```
 
-From another PC on the same LAN, open the UI with the host machine IP:
+By default the host workspace is:
 
 ```text
-http://<host-lan-ip>:8787
+$HOME/orch-projects -> /workspace
 ```
 
-## Security and LAN Access
+Set `ORCH_HOST_PROJECTS=/absolute/path` in `.env` if you want a different host folder.
 
-Set `ORCH_AUTH_PASSWORD` before exposing the UI beyond loopback. The server refuses non-loopback or host-network startup without a password. Preview ports are not auth-protected, so keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` for local-only previews or Docker Tailscale sidecar HTTPS; set it to `0.0.0.0` only when the selected preview ports are acceptable directly on your LAN or host-level Tailscale network.
+## How It Works
 
-The app also scans obvious credential-shaped text before persistence. Memory writes refuse secrets, text attachments with API keys/tokens are rejected before upload storage, and chat/session strings are redacted before they are saved.
+```text
+browser
+  |
+  v
+orch-ui container
+  |-- Node HTTP UI/API on 8787
+  |-- Claude/Codex/Gemini CLI supervisors
+  |-- DeepSeek direct API supervisor
+  |-- PAL MCP peer servers
+  |-- orch-preview helper for project web servers
+  |
+  +-- /workspace  -> host project folders
+  +-- /data       -> sessions, memory, usage, generated MCP config, Tailscale setup
 
-## Tailscale Sidecar HTTPS
-
-The default compose setup runs a separate Tailscale node inside Docker. This does not use the host machine's Tailscale login or state; the sidecar stores its node state in the `orch_tailscale_state` Docker volume and reads UI-saved setup from `/data/tailscale/`.
-
-Open the Tailscale button in the sidebar before creating your first project, or preseed `.env`:
-
-```bash
-ORCH_TAILSCALE_AUTHKEY=<your-auth-key>
-ORCH_TAILSCALE_HOSTNAME=orch-ui
-ORCH_TAILSCALE_HTTPS_HOST=https://orch-ui.<your-tailnet>.ts.net
+orch-tailscale container
+  |-- shares orch-ui network namespace
+  |-- stores node state in orch_tailscale_state
+  |-- can expose UI/previews through Tailscale Serve HTTPS
 ```
 
-Then recreate the stack if you changed `.env`:
+The app root is this repository. Runtime state is deliberately outside git:
+
+- `/data/sessions` for project chat metadata
+- `/data/orch-memory` for global memory
+- `/data/usage.json` for usage telemetry
+- `/data/tailscale` for UI-saved Tailscale setup and status
+- `<project>/.remember/` for project memory
+- `<project>/.orch-ui/uploads/` for uploaded files
+- `<project>/.orchestration/previews/` for detached preview process state
+
+## Security Model
+
+The default configuration is local-first and conservative:
+
+- The UI binds to loopback with `ORCH_BIND_HOST=127.0.0.1`.
+- If you bind beyond loopback or use host network mode, `ORCH_AUTH_PASSWORD` is required or the server refuses to start.
+- Preview ports are not auth-protected. Keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` unless those ports are meant to be reachable.
+- `.env` and `.env.*` are ignored by git. Commit `.env.example`, never real credentials.
+- The app refuses or redacts obvious credential-shaped text before saving memory, sessions, uploads, timeline metadata, and smoke reports.
+- Public tunnels such as ngrok, localtunnel, cloudflared, serveo, bore, and `ssh -R` are not part of the normal workflow. Use Docker port binding, LAN/firewall checks, or the Tailscale sidecar.
+
+For LAN access without Tailscale:
+
+```env
+ORCH_AUTH_PASSWORD=choose-a-real-password
+ORCH_BIND_HOST=0.0.0.0
+```
+
+Then recreate the container:
 
 ```bash
 docker compose up -d --build
 ```
 
-The sidecar shares the `orch-ui` container network namespace and runs Tailscale Serve when setup is available:
+## Tailscale HTTPS
+
+The compose stack includes a separate `tailscale/tailscale` sidecar. It does not use the host machine's Tailscale login or state.
+
+You can configure it from the UI with the Tailscale button in the sidebar, or preseed `.env`:
+
+```env
+ORCH_TAILSCALE_AUTHKEY=tskey-auth-...
+ORCH_TAILSCALE_HOSTNAME=orch-ui
+ORCH_TAILSCALE_HTTPS_HOST=https://orch-ui.your-tailnet.ts.net
+ORCH_TAILSCALE_SERVE=1
+ORCH_TAILSCALE_SERVE_RESET=1
+ORCH_TAILSCALE_UI_HTTPS_PORT=443
+```
+
+Your tailnet must have MagicDNS and HTTPS certificates enabled for Tailscale Serve HTTPS.
+
+Use the HTTPS host without the raw UI port:
 
 ```text
-https://orch-ui.<your-tailnet>.ts.net/       -> UI on 8787
-https://orch-ui.<your-tailnet>.ts.net:5173/  -> preview on 5173
+https://orch-ui.your-tailnet.ts.net/
 ```
 
-Preview HTTPS ports follow `ORCH_PREVIEW_PORTS`. The UI HTTPS listener defaults to 443 and can be changed with `ORCH_TAILSCALE_UI_HTTPS_PORT`. Keep `ORCH_TAILSCALE_SERVE_RESET=1` unless you intentionally manage extra Serve routes on the same sidecar node. Your tailnet must have MagicDNS and HTTPS certificates enabled for Tailscale Serve HTTPS.
+Preview HTTPS URLs include the preview port:
 
-## Host Network Mode
+```text
+https://orch-ui.your-tailnet.ts.net:5173/
+```
 
-On Linux you can run `orch-ui` on the host network instead of Docker bridge/port publishing:
+If you change `.env`, recreate the stack:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+docker compose up -d --build
 ```
-
-In this mode Docker does not use the `ports:` mappings. The UI and project previews bind directly on the host network, so `0.0.0.0:<port>` is immediately visible on the host and LAN if the host firewall allows it. This is often simpler for local LAN previews, but it is less isolated and can conflict with host services already using the same ports.
-
-Use the default bridge mode if you want explicit Docker port mappings or better portability across Docker Desktop / non-Linux environments.
 
 ## Project Web Previews
 
-Project dev servers run inside the `orch-ui` container, so they must bind to `0.0.0.0` and use a Docker-published preview port. The default published ranges are:
+Project dev servers run inside the `orch-ui` container, so they must bind to `0.0.0.0` and use a published preview port.
+
+Default preview ranges:
 
 ```text
 3000-3020, 5173-5190, 8000-8020, 8080-8090
 ```
 
-Ask the supervisor to start servers with explicit host/port flags, for example:
+Start a Vite-style dev server:
 
 ```bash
 orch-preview start 5173 -- npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-For a plain static folder:
+Serve a static folder:
 
 ```bash
 orch-preview static 8000 .
 ```
 
-Then open:
+Stop or inspect previews:
 
-```text
-http://127.0.0.1:5173
-http://<host-lan-ip>:5173
+```bash
+orch-preview stop 5173
+orch-preview status
 ```
 
-If another machine still cannot connect, check the host firewall for the selected preview port and confirm Docker published the preview range on a non-loopback interface. The UI and preview published ports default to loopback for safety. Use `ORCH_BIND_HOST=0.0.0.0` for LAN UI access with `ORCH_AUTH_PASSWORD` set, and use `ORCH_PREVIEW_BIND_HOST=0.0.0.0` only when the unauthenticated preview ports are acceptable on your LAN/Tailscale network.
-
-Because these are Docker port-publish settings, recreate the compose container after changing them.
-
-The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. `.orchestration/` is runtime-only and ignored by git. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews. When a chat is opened through Tailscale/LAN, the UI passes the current browser host into the supervisor so `orch-preview` can print that reachable host instead of only `localhost`.
-
-Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. In bridge mode it treats shell `127.0.0.1` as container-local and uses Docker-published ports for browser/LAN previews; in host network mode it knows the container shares the host network namespace.
-
-Supervisors are instructed not to use public tunnels such as localtunnel, ngrok, cloudflared, serveo, bore, or `ssh -R` unless the latest user message explicitly asks for a tunnel. If a LAN browser cannot connect, the expected fix is port mapping, host IP, or firewall diagnosis.
+The helper records PID and log files under `.orchestration/previews/`, which is ignored by git.
 
 ## Supervisors
 
-- `Claude CLI` runs `claude --print` with the shared prompt.
-- `Codex CLI` runs `codex exec` with the shared prompt.
-- `Gemini CLI` runs `gemini --prompt` with the shared prompt.
-- `DeepSeek V4 Pro` calls `https://api.deepseek.com/v1/chat/completions` directly.
+| Supervisor | Runtime | Notes |
+| --- | --- | --- |
+| Claude CLI | `claude --print` | Uses the shared orchestrator prompt and PAL peer MCP servers. |
+| Codex CLI | `codex exec` | Runs in the selected project with container-owned `CODEX_HOME`. |
+| Gemini CLI | `gemini --prompt` | Uses the shared prompt and peer MCP wiring. |
+| DeepSeek V4 Pro | Direct API call | Uses `DEEPSEEK_API_KEY` or `/data/secrets/deepseek-api-key`. |
 
-Each CLI supervisor gets PAL MCP peer servers for the other models:
+Each CLI supervisor receives peer tools for the other models:
 
 - Claude gets `pal-codex`, `pal-gemini`, and `pal-deepseek`.
 - Codex gets `pal-claude`, `pal-gemini`, and `pal-deepseek`.
 - Gemini gets `pal-claude`, `pal-codex`, and `pal-deepseek`.
+- DeepSeek receives equivalent peer tools from the UI server.
 
-DeepSeek is exposed through the PAL `chat` tool with `deepseek-v4-pro` as the default model. When DeepSeek is the active supervisor, the UI server provides equivalent peer tools for Claude, Codex, and Gemini.
+The shared supervisor prompt is:
 
-### Shared MCP Tools
+```text
+prompts/main-orchestrator.md
+```
 
-`ORCH_ENABLED_TOOLS` defaults to `serena,context7,memory,playwright`. Claude, Codex, and Gemini receive these shared MCP servers directly in their scoped session config. DeepSeek receives memory as native function tools and gets browser automation through `browser_check`, which delegates a one-shot task to a CLI peer with the shared Playwright tool attached and peer-to-peer recursion disabled.
+Generated provider-specific prompts live in `prompts/`.
 
-Playwright browser automation is installed in the image with Chromium so supervisors can verify rendered UI when the browser tool is enabled. Because browser automation can reach network URLs, keep the UI behind loopback or `ORCH_AUTH_PASSWORD`.
+## Shared MCP Tools
 
-### Memory MCP
+`ORCH_ENABLED_TOOLS` defaults to:
 
-Supervisors receive the local `memory` tools when `ORCH_ENABLED_TOOLS` includes `memory` (enabled by default). It stores durable facts locally:
+```env
+ORCH_ENABLED_TOOLS=serena,context7,memory,playwright
+```
 
-- user/global memory: `/data/orch-memory/user.json`
-- project memory: `<project>/.remember/orchestrator-memory.json`
+These tools provide semantic code help, current library documentation, local durable memory, and browser automation. Playwright runs with Debian Chromium inside the image:
 
-Examples: if the user says "my name is Kostas", the active supervisor should store that with `memory_remember` using `scope: "user"`, so future projects can recall it. Project-specific decisions and constraints use `scope: "project"`. The memory layer refuses obvious secrets such as passwords, API keys, and tokens.
+```env
+ORCH_PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium
+ORCH_PLAYWRIGHT_HEADLESS=1
+ORCH_PLAYWRIGHT_NO_SANDBOX=1
+```
 
-### Usage and Budget Warnings
-
-Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage probes, last-seen tokens/cost, daily totals, and lifetime totals per supervisor. Token/cost signals are treated as cumulative within a run and accumulated by delta so repeated final signals do not double-count.
-
-Hidden provider usage probes run every 5 minutes by default. Set `ORCH_USAGE_POLL_INTERVAL_MS` to tune the interval, or `0` to disable polling.
-
-Set `ORCH_BUDGET_WARNING_USD` to show a budget warning once lifetime reported dollar cost reaches that amount. `ORCH_BUDGET_USD` is accepted as a legacy alias. This is a warning only; it does not stop runs. Models that do not report dollar cost still show runs/tokens/provider quota but do not contribute dollar spend unless a provider balance probe exposes spend.
-
-### Run Timeline
-
-The terminal modal includes a chronological run timeline for supervisor, command, tool, peer, memory, hook, and autopilot events. Timeline cards show status, timestamp, duration when known, redacted metadata, and compact details so failed or slow steps can be inspected without digging through raw terminal output.
-
-### Autopilot Workflow State
-
-Autopilot enablement is stored with each project chat instead of only in browser storage. The workflow state uses `created`, `running`, `stopped`, `completed`, `failed`, and `paused`: `running` is used while Autopilot is deciding, `completed` means the last decision produced the next message and can continue, and `paused`/`stopped`/`failed` block further automatic turns until Autopilot is enabled again. The sidebar shows the current Autopilot indicator for enabled projects.
-
-The sidebar also shows a compact Autopilot activity feed when available. Set `ORCH_AUTOPILOT_FEED_LIMIT` to control how many recent decisions appear, or `0` to hide the feed. Feed entries include only the bounded outcome, timestamp age, and a redacted short reason in the hover title; generated message content is redacted before persistence and is not exposed in project summaries. Use the project context menu to clear a project's activity history.
-
-Autopilot follow-up runs have an idle guard separate from manual messages. Set `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` to stop an automatically sent follow-up after silence, and `ORCH_AUTOPILOT_IDLE_WARNING_MS` to warn shortly before the stop; defaults are 15 minutes and 1 minute. Set the timeout to `0` to disable the idle guard. On server startup, stale Autopilot `running` state and persisted usage `active` flags from a previous process are cleared.
-
-Autopilot decision calls have their own timeout before retry/failure handling. `ORCH_AUTOPILOT_DECISION_TIMEOUT_MS` defaults to the idle timeout for compatibility; set it lower for faster failed decisions, or `0` to disable only this decision timeout. Warning timing uses `ORCH_AUTOPILOT_IDLE_WARNING_MS`.
-
-Autopilot decision calls retry transient DeepSeek/network failures before marking the workflow failed. Set `ORCH_AUTOPILOT_RETRY_ATTEMPTS` and `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` to tune attempts and exponential backoff; attempts includes the first call. HTTP 429 and 5xx responses are retried, while auth/configuration errors fail immediately. The retry is only for the decision step, not the follow-up supervisor run, so persisted user messages are not duplicated.
+Because browser automation can reach network URLs, keep the UI behind loopback, Tailscale, or Basic auth.
 
 ## Credentials
 
-The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, Playwright browser MCP, Chromium, and the DeepSeek model registry. It does not bake account tokens or API keys.
+The image includes the app, CLIs, PAL MCP server, Playwright browser MCP, Chromium, and DeepSeek model registry. It does not bake account tokens.
 
-CLI logins are stored in Docker named volumes:
+Docker volumes hold CLI login state:
 
-- `orch_claude_auth` -> `/home/node/.claude`
-- `orch_codex_auth` -> `/home/node/.codex`
-- `orch_gemini_auth` -> `/home/node/.gemini`
-- `orch_data` -> `/data` for generated MCP configs
+| Volume | Container path |
+| --- | --- |
+| `orch_claude_auth` | `/home/node/.claude` |
+| `orch_codex_auth` | `/home/node/.codex` |
+| `orch_gemini_auth` | `/home/node/.gemini` |
+| `orch_data` | `/data` |
+| `orch_tailscale_state` | `/var/lib/tailscale` in the sidecar |
 
-Log in once inside the container:
+Log in inside the running container:
 
 ```bash
 docker compose exec --user node orch-ui claude login
@@ -210,45 +234,88 @@ docker compose exec --user node orch-ui codex login
 docker compose exec --user node orch-ui gemini
 ```
 
-For Gemini, run `/auth` in the interactive prompt if it asks. Put `DEEPSEEK_API_KEY=...` in `.env` for the DeepSeek route.
+For Gemini, run `/auth` if the interactive prompt asks.
 
-## CLI Auto Updates
-
-On every container boot, `orch-entrypoint` checks npm for newer Claude/Codex/Gemini CLI packages and installs the configured latest specs before starting the UI server:
+You can also set API keys in `.env`:
 
 ```env
-ORCH_AUTO_UPDATE_CLIS=1
-ORCH_CLI_PACKAGE_SPECS=@anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest
-ORCH_CLI_UPDATE_TIMEOUT_SECONDS=120
+DEEPSEEK_API_KEY=
+OPENAI_API_KEY=
+CODEX_ACCESS_TOKEN=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+GOOGLE_API_KEY=
 ```
 
-If npm is unavailable or the check times out, startup continues with the versions baked into the image. Set `ORCH_AUTO_UPDATE_CLIS=0` to keep the baked-in versions only, or replace `ORCH_CLI_PACKAGE_SPECS` with pinned versions if needed.
+OAuth/browser sessions and API-key billing are separate. Use keys only when you intentionally want API-based auth.
 
-## Write Mode
+## Important Environment Variables
 
-`ORCH_ALLOW_WRITE=1` launches the CLI supervisors in YOLO mode: Claude bypasses permissions, Codex bypasses approvals and sandbox prompts, and Gemini uses `approval-mode yolo`. The selected workspace folder is still passed as the session working directory and the prompt scope.
+The full current reference is `.env.example`. The compose file passes the app-facing keys through to `orch-ui`; `UID`, `GID`, and host path substitutions are compose/build-time controls.
 
-With the default `ORCH_ALLOW_WORKSPACE_ROOT=0`, new chats must pick a project folder instead of `/workspace` itself.
+| Variable | Purpose |
+| --- | --- |
+| `ORCH_HOST_PROJECTS` | Host folder mounted to `/workspace`. |
+| `ORCH_AUTH_USER`, `ORCH_AUTH_PASSWORD` | HTTP Basic auth for the UI. |
+| `ORCH_BIND_HOST`, `ORCH_BIND_HOST_IPV6` | Host interfaces for the published UI port. |
+| `ORCH_PREVIEW_BIND_HOST` | Host interface for unauthenticated preview ports. |
+| `ORCH_UI_PORT` | Host UI port, default `8787`. |
+| `ORCH_PREVIEW_PORTS` | Published preview ranges and allowed `orch-preview` ports. |
+| `ORCH_ALLOW_WRITE` | Enables write/yolo modes for CLI supervisors. |
+| `ORCH_ALLOW_WORKSPACE_ROOT` | Allows creating chats directly at `/workspace` when set to `1`. |
+| `ORCH_TIMEOUT_MS` | Per-run timeout. `0` disables automatic timeout. |
+| `ORCH_AUTO_UPDATE_CLIS` | Refreshes CLI packages on boot when `1`. |
+| `ORCH_CLI_PACKAGE_SPECS` | CLI package specs, useful for pinning versions. |
+| `ORCH_ENABLED_TOOLS` | Shared MCP tool set. |
+| `ORCH_UPLOAD_MAX_BYTES` | Total upload size per message. |
+| `ORCH_UPLOAD_INLINE_CHARS` | Text attachment preview budget injected into prompts. |
+| `ORCH_USAGE_POLL_INTERVAL_MS` | Hidden provider usage probe interval. |
+| `ORCH_BUDGET_WARNING_USD` | Lifetime spend warning threshold. |
+| `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` | Stops silent automatic follow-up runs after this delay. |
+| `ORCH_AUTOPILOT_IDLE_WARNING_MS` | Sends a warning before the idle stop. |
+| `ORCH_AUTOPILOT_DECISION_TIMEOUT_MS` | Timeout for the DeepSeek Autopilot decision call. |
+| `ORCH_AUTOPILOT_RETRY_ATTEMPTS` | Decision retry attempts for transient failures. |
+| `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` | Base retry backoff for Autopilot decisions. |
+| `ORCH_AUTOPILOT_FEED_LIMIT` | Recent Autopilot activity entries shown per project. |
+| `ORCH_TAILSCALE_*` | Docker sidecar auth, hostname, Serve, and HTTPS settings. |
+| `CLAUDE_MODEL`, `CODEX_MODEL`, `GEMINI_MODEL` | Optional CLI model overrides. |
 
-Use:
+## Autopilot, Usage, and Timeline
 
-```env
-ORCH_ALLOW_WRITE=0
+Autopilot state is stored with each project chat. It tracks `created`, `running`, `stopped`, `completed`, `failed`, and `paused` states so automatic follow-up runs survive browser refreshes and recover cleanly after server restarts.
+
+Autopilot has:
+
+- idle warning and auto-stop for silent follow-up runs
+- separate decision timeout
+- retry/backoff for transient DeepSeek or network failures
+- bounded, redacted sidebar activity feed
+
+Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage probes, token/cost deltas, daily totals, and lifetime totals. Budget warnings are informational and do not stop runs.
+
+The terminal modal includes a chronological run timeline for supervisor, command, tool, peer, memory, hook, and autopilot events. Metadata is redacted before storage.
+
+## Host Network Mode
+
+On Linux you can run the UI in host network mode:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build
 ```
 
-for read-only/plan mode.
+This removes Docker port publishing and binds directly on the host network. It is convenient for LAN previews, but less isolated and more likely to conflict with host services. Keep `ORCH_AUTH_PASSWORD` set when using it.
 
 ## File Attachments
 
-Use `Attach` in the composer to add one or more files to a message. Files are written under the selected workspace folder at:
+Use the composer attachment control to send files to a supervisor. Files are saved under:
 
 ```text
-/workspace/<selected-folder>/.orch-ui/uploads/<session-id>/
+/workspace/<project>/.orch-ui/uploads/<session-id>/
 ```
 
-The default total upload limit per message is 25 MB. Override it with `ORCH_UPLOAD_MAX_BYTES`. Text attachments are also inlined into the supervisor prompt up to `ORCH_UPLOAD_INLINE_CHARS` characters across one message; the saved files remain available by path when inline previews are truncated.
+Text attachments are inlined into the prompt up to `ORCH_UPLOAD_INLINE_CHARS`; saved files remain available by path when inline content is truncated.
 
-## Checks
+## Development Checks
 
 ```bash
 npm run lint
@@ -258,16 +325,29 @@ npm test
 
 `npm run lint` is the CI-facing alias for `npm run check`, which syntax-checks server, test, and browser JavaScript files.
 
-GitHub Actions runs lint, tests, and an authenticated smoke check on push and pull requests using Node 22. The smoke job starts the server on loopback with temporary data/workspace directories and ephemeral in-workflow auth values, then runs `npm run smoke`; no GitHub repository secrets are injected for this CI smoke path.
-
-### Smoke Reports
-
-Run a small HTTP smoke check against a running UI or preview:
+Run a smoke check against a running UI:
 
 ```bash
 ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ npm run smoke
 ```
 
-The smoke command checks core HTML/API/static asset endpoints, writes a JSON report under `verification/`, and exits non-zero if any check fails. Use `ORCH_SMOKE_AUTH=user:password` for Basic auth, `ORCH_SMOKE_CHECKS=/,/api/config` to override checked paths, and `ORCH_SMOKE_RETRIES`, `ORCH_SMOKE_RETRY_DELAY_MS`, `ORCH_SMOKE_TIMEOUT_MS`, or `ORCH_SMOKE_MAX_BODY_BYTES` for slow-start or large-response servers.
+For an authenticated UI:
 
-For an authenticated UI, set `ORCH_SMOKE_AUTH` instead of embedding credentials in the URL; reports redact auth material and URL credentials, but keeping credentials out of command URLs avoids accidental shell history leaks.
+```bash
+ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ \
+ORCH_SMOKE_AUTH=orchestrator:<password> \
+npm run smoke
+```
+
+Smoke reports are written under ignored `verification/` and redact credentials.
+
+## CI
+
+GitHub Actions runs on push and pull requests:
+
+- install dependencies
+- syntax check
+- full Node test suite
+- authenticated loopback smoke check with temporary data and workspace directories
+
+No repository secrets are required for CI smoke checks.
