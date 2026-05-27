@@ -193,3 +193,13 @@ npm test
 ```
 
 `npm run check` syntax-checks server, test, and browser JavaScript files.
+
+### Smoke Reports
+
+Run a small HTTP smoke check against a running UI or preview:
+
+```bash
+ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ npm run smoke
+```
+
+The smoke command checks core HTML/API/static asset endpoints, writes a JSON report under `verification/`, and exits non-zero if any check fails. Use `ORCH_SMOKE_AUTH=user:password` for Basic auth, `ORCH_SMOKE_CHECKS=/,/api/config` to override checked paths, and `ORCH_SMOKE_RETRIES`, `ORCH_SMOKE_RETRY_DELAY_MS`, `ORCH_SMOKE_TIMEOUT_MS`, or `ORCH_SMOKE_MAX_BODY_BYTES` for slow-start or large-response servers.

@@ -7,21 +7,21 @@ const hardSensitivePatterns = [
     replacement: "[redacted private key]",
   },
   {
-    label: "bearer token",
-    pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-    replacement: "Bearer [redacted]",
+    label: "auth token",
+    pattern: /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+    replacement: "$1 [redacted]",
   },
   {
     label: "api token",
     pattern: /\b(?:sk|pk|rk|ak)-[A-Za-z0-9_-]{6,}\b/g,
-    replacement: "[redacted token]",
+    replacement: "[redacted]",
   },
 ];
 
 const softSensitivePatterns = [
   {
     label: "credential assignment",
-    pattern: /\b((?:api|access|refresh|auth|id|client)?[_ -]?(?:key|token|secret|password|passwd))\b(\s*(?:=|:)\s*)(["']?)([^\s"',;`]{6,})(\3)/gi,
+    pattern: /\b((?:api|access|refresh|auth|id|client)?[_ -]?(?:key|token|secret|password|passwd)|authorization)\b(\s*(?:=|:)\s*)(["']?)([^\s"',;`]{6,})(\3)/gi,
     replacement: "$1$2$3[redacted]$5",
   },
 ];
@@ -58,7 +58,7 @@ export function containsHighConfidenceSensitiveText(text) {
 
 export function redactSensitiveText(text) {
   let redacted = String(text || "");
-  for (const { pattern, replacement } of [...softSensitivePatterns, ...hardSensitivePatterns]) {
+  for (const { pattern, replacement } of [...hardSensitivePatterns, ...softSensitivePatterns]) {
     pattern.lastIndex = 0;
     redacted = redacted.replace(pattern, replacement);
   }

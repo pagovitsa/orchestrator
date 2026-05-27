@@ -5,6 +5,7 @@
 .orchestration/
 .serena/
 .playwright-mcp/
+verification/
 data/
 orch-connect-modal.png
 node_modules/

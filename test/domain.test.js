@@ -237,7 +237,8 @@ test("safety scanner detects and redacts credential-shaped text", () => {
   assert.equal(containsSensitiveText(input), true);
   assert.equal(containsSensitiveText("The key is simply to wait"), false);
   const redacted = redactSensitiveText(input);
-  assert.match(redacted, /Bearer \[redacted\]/);
+  assert.match(redacted, /Authorization: \[redacted\]/);
+  assert.match(redactSensitiveText("Authorization: Basic dXNlcjpwYXNzMTIz"), /Authorization: (Basic )?\[redacted\]/);
   assert.match(redacted, /api_key = \[redacted\]/);
   assert.doesNotMatch(redacted, /abcdefghijklmnop/);
   assert.doesNotMatch(redacted, /sk-secret123456/);
