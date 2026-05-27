@@ -746,6 +746,170 @@ test("message API redacts CLI provider failures and recovers next request", asyn
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
+test("message API redacts Claude and Gemini CLI failures and recovers", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-cli-peers-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-peers-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-peers-home-"));
+    const binDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-peers-bin-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.ORCH_TIMEOUT_MS = "5000";
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+    process.env.GEMINI_API_KEY = "test-gemini-key";
+    process.env.PATH = binDir + path.delimiter + process.env.PATH;
+
+    async function writeFakeCli(name, successBody) {
+      const stateFile = path.join(dataDir, "fake-" + name + "-state");
+      const scriptPath = path.join(binDir, name);
+      await writeFile(scriptPath, [
+        "#!/usr/bin/env node",
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "let input = '';",
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (chunk) => { input += chunk; });",
+        "process.stdin.on('end', () => {",
+        "  const stateFile = " + JSON.stringify(stateFile) + ";",
+        "  const count = existsSync(stateFile) ? Number(readFileSync(stateFile, 'utf8')) : 0;",
+        "  writeFileSync(stateFile, String(count + 1));",
+        "  if (count === 0) {",
+        "    console.error('simulated " + name + " failure sk-super-secret-token ' + 'x'.repeat(2000));",
+        "    process.exit(1);",
+        "  }",
+        ...successBody,
+        "});",
+      ].join("\n") + "\n", "utf8");
+      await chmod(scriptPath, 0o755);
+    }
+
+    await writeFakeCli("claude", [
+      "  console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Recovered from fake claude.' }] } }));",
+      "  console.log(JSON.stringify({ type: 'result', result: 'Recovered from fake claude.' }));",
+    ]);
+    await writeFakeCli("gemini", [
+      "  console.log('Recovered from fake gemini.');",
+    ]);
+
+    const { sendErrorJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+    const { usageSnapshot } = await import(new URL("src/domain/usage.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendErrorJson(res, error);
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      for (const supervisor of ["claude", "gemini"]) {
+        const cwd = "project-" + supervisor + "-cli-error";
+        await mkdir(path.join(workspaceRoot, cwd), { recursive: true });
+        const created = await jsonRequest("POST", baseUrl + "/api/sessions", { supervisor, cwd });
+        assert.equal(created.status, 201, supervisor + " session should be created");
+        const sessionId = created.body.session.id;
+
+        const failed = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+          content: "This request should hit a " + supervisor + " CLI failure.",
+        });
+        assert.equal(failed.status, 500, supervisor + " failure should surface as HTTP 500");
+        assert.match(failed.body.error, new RegExp("simulated " + supervisor + " failure"));
+        assert.doesNotMatch(failed.body.error, /sk-super-secret-token/);
+        assert.ok(failed.body.error.length <= 1000);
+
+        const usageAfterFailure = await usageSnapshot();
+        const providerUsage = usageAfterFailure.usage.find((item) => item.id === supervisor);
+        assert.equal(providerUsage.active, false);
+        assert.match(providerUsage.lastError, new RegExp("simulated " + supervisor + " failure"));
+        assert.doesNotMatch(providerUsage.lastError, /sk-super-secret-token/);
+
+        const afterFailure = await loadSession(sessionId);
+        assert.equal(afterFailure.messages.length, 1);
+        assert.equal(afterFailure.messages[0].role, "user");
+        assert.equal(afterFailure.messages[0].content, "This request should hit a " + supervisor + " CLI failure.");
+
+        const recovered = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+          content: "This request should recover.",
+        });
+        assert.equal(recovered.status, 200, supervisor + " should recover after failure");
+        assert.equal(recovered.body.message.content, "Recovered from fake " + supervisor + ".");
+
+        const loaded = await loadSession(sessionId);
+        assert.equal(loaded.messages.length, 3);
+        assert.equal(loaded.messages[0].role, "user");
+        assert.equal(loaded.messages[1].role, "user");
+        assert.equal(loaded.messages[2].role, "assistant");
+        assert.equal(loaded.messages[2].content, "Recovered from fake " + supervisor + ".");
+      }
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 20000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
 test("message API rejects concurrent runs, stops a hung provider call, and recovers", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";

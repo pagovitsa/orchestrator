@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --ignore-scripts
+          fi
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Smoke
+        shell: bash
+        env:
+          ORCH_UI_PORT: "8787"
+          ORCH_LISTEN_HOST: "127.0.0.1"
+          ORCH_BIND_HOST: "127.0.0.1"
+          ORCH_AUTH_PASSWORD: "ci-smoke-password"
+          ORCH_SMOKE_AUTH: "orchestrator:ci-smoke-password"
+          ORCH_DATA_DIR: ${{ runner.temp }}/orch-data
+          ORCH_MCP_CONFIG_DIR: ${{ runner.temp }}/orch-data/orch-mcp
+          ORCH_WORKSPACE_ROOT: ${{ runner.temp }}/orch-workspace
+          ORCH_USAGE_POLL_INTERVAL_MS: "0"
+          ORCH_GIT_INIT_PROJECTS: "0"
+          ORCH_SMOKE_BASE_URL: "http://127.0.0.1:8787/"
+        run: |
+          mkdir -p "$ORCH_DATA_DIR" "$ORCH_WORKSPACE_ROOT"
+          node src/server.js > "$RUNNER_TEMP/orch-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in {1..30}; do
+            if curl -fsS -u "$ORCH_SMOKE_AUTH" "$ORCH_SMOKE_BASE_URL" >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/orch-server.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$RUNNER_TEMP/orch-server.log"
+            exit 1
+          fi
+
+          npm run smoke

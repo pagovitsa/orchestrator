@@ -216,11 +216,14 @@ The default total upload limit per message is 25 MB. Override it with `ORCH_UPLO
 ## Checks
 
 ```bash
+npm run lint
 npm run check
 npm test
 ```
 
-`npm run check` syntax-checks server, test, and browser JavaScript files.
+`npm run lint` is the CI-facing alias for `npm run check`, which syntax-checks server, test, and browser JavaScript files.
+
+GitHub Actions runs lint, tests, and an authenticated smoke check on push and pull requests. The smoke job starts the server on loopback with temporary data/workspace directories, then runs `npm run smoke`.
 
 ### Smoke Reports
 
