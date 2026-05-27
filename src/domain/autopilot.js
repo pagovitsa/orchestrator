@@ -1,8 +1,10 @@
 import { runtime } from "../config/env.js";
+import { redactSensitiveText } from "./safety.js";
 
 const AUTOPILOT_MODEL = "deepseek-v4-pro";
 const MAX_DECISION_CHARS = 6000;
 const MAX_ERROR_BODY_CHARS = 1000;
+const MAX_FEED_REASON_CHARS = 80;
 const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 const FALLBACK_CONTINUE_MESSAGE = [
   "Autopilot:",
@@ -134,12 +136,25 @@ export function appendAutopilotHistory(session, decision) {
     at: new Date().toISOString(),
     action: decision?.action || "stop",
     kind: decision?.kind || "",
-    reason: String(decision?.reason || "").slice(0, 800),
+    reason: redactSensitiveText(String(decision?.reason || "")).slice(0, 800),
     content: String(decision?.content || "").slice(0, 1200),
   };
   session.autopilotHistory.push(entry);
   session.autopilotHistory = session.autopilotHistory.slice(-50);
   return entry;
+}
+
+export function summarizeAutopilotFeed(history, { limit = 2 } = {}) {
+  if (!Array.isArray(history) || limit <= 0) return [];
+  return history
+    .slice(-Math.max(1, Math.round(Number(limit) || 1)))
+    .reverse()
+    .map((entry) => ({
+      at: String(entry?.at || ""),
+      action: String(entry?.action || "stop").slice(0, 32),
+      kind: String(entry?.kind || entry?.action || "stop").slice(0, 32),
+      reason: redactSensitiveText(String(entry?.reason || "")).slice(0, MAX_FEED_REASON_CHARS),
+    }));
 }
 
 export function autopilotMemoryArgs(decision) {

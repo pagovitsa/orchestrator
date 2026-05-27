@@ -12,6 +12,7 @@ import {
   normalizeAutopilotDecision,
   normalizeAutopilotRetryConfig,
   parseAutopilotDecision,
+  summarizeAutopilotFeed,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
 import {
@@ -424,9 +425,26 @@ test("autopilot history and memory args are bounded", () => {
 
   assert.equal(session.autopilotHistory.length, 50);
   assert.equal(session.autopilotHistory.at(-1).reason, "next 54");
+  appendAutopilotHistory(session, { action: "stop", kind: "stop", reason: "token=secret-value" });
+  assert.match(session.autopilotHistory.at(-1).reason, /\[redacted\]/i);
   const memory = autopilotMemoryArgs({ action: "message", kind: "continue", reason: "phase done" });
   assert.equal(memory.namespace, "autopilot");
   assert.deepEqual(memory.tags, ["autopilot", "continue"]);
+});
+
+test("autopilot feed summaries are bounded and redacted", () => {
+  const feed = summarizeAutopilotFeed([
+    { at: "2026-05-27T10:00:00.000Z", action: "message", kind: "continue", reason: "first", content: "hidden" },
+    { at: "2026-05-27T10:01:00.000Z", action: "stop", kind: "stop", reason: "password=secret value should not leak" },
+    { at: "2026-05-27T10:02:00.000Z", action: "message", kind: "answer", reason: "x".repeat(120) },
+  ]);
+
+  assert.equal(feed.length, 2);
+  assert.equal(feed[0].kind, "answer");
+  assert.equal(feed[0].reason.length, 80);
+  assert.equal(feed[0].content, undefined);
+  assert.match(feed[1].reason, /\[redacted\]/i);
+  assert.deepEqual(summarizeAutopilotFeed(null), []);
 });
 
 test("autopilot workflow state normalizes and gates runnable states", () => {

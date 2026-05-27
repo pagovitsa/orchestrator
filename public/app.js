@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -1667,6 +1667,16 @@ function renderSessions() {
     meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs${autopilotLabel}`;
 
     button.append(title, meta);
+    const feed = normalizeAutopilotFeed(session.autopilotFeed);
+    if (feed.length) {
+      const activity = document.createElement("div");
+      activity.className = "session-autopilot-feed";
+      activity.textContent = feed.map((entry) => autopilotFeedEntryLabel(entry)).join(" | ");
+      activity.title = feed
+        .map((entry) => [autopilotFeedEntryLabel(entry), entry.reason].filter(Boolean).join(": "))
+        .join("\n");
+      button.appendChild(activity);
+    }
     button.addEventListener("click", () => openProjectSession(session));
     button.addEventListener("contextmenu", (event) => openProjectContextMenu(event, session));
     button.addEventListener("keydown", (event) => {
@@ -2573,6 +2583,7 @@ async function sendMessageForSession(targetSession, content, files = [], options
 
 function sessionSummaryFromSession(session) {
   const messages = session?.messages || [];
+  const autopilotFeed = normalizeAutopilotFeed(session.autopilotFeed || []);
   return {
     id: session.id,
     title: session.project || session.title || session.cwd || "New chat",
@@ -2584,6 +2595,7 @@ function sessionSummaryFromSession(session) {
     messageCount: messages.length,
     autopilotEnabled: session.autopilotEnabled === true,
     autopilotState: session.autopilotState,
+    autopilotFeed,
   };
 }
 

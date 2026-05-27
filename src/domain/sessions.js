@@ -4,6 +4,7 @@ import path from "node:path";
 import { runtime, supervisors } from "../config/env.js";
 import { redactSensitiveStrings } from "./safety.js";
 import { requireScopedCwd, resolveCwd, listProjects } from "./workspace.js";
+import { summarizeAutopilotFeed } from "./autopilot.js";
 import { normalizeWorkflowStatus, transitionWorkflowStatus } from "./workflow-state.js";
 
 const rememberDirName = ".remember";
@@ -65,6 +66,7 @@ function normalizeProjectSession(session, cwd) {
     session.autopilotState,
     autopilotEnabled ? "created" : "paused",
   );
+  const autopilotHistory = Array.isArray(session.autopilotHistory) ? redactSensitiveStrings(session.autopilotHistory).slice(-50) : [];
   return {
     id: /^[a-f0-9-]{36}$/.test(session.id || "") ? session.id : randomUUID(),
     schemaVersion: 1,
@@ -75,7 +77,8 @@ function normalizeProjectSession(session, cwd) {
     createdAt: session.createdAt || new Date().toISOString(),
     updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
     messages: Array.isArray(session.messages) ? session.messages.map((message) => redactSensitiveStrings(message)) : [],
-    autopilotHistory: Array.isArray(session.autopilotHistory) ? session.autopilotHistory.slice(-50) : [],
+    autopilotHistory,
+    autopilotFeed: summarizeAutopilotFeed(autopilotHistory),
     autopilotEnabled,
     autopilotState,
   };
@@ -136,7 +139,7 @@ export async function updateSessionForCwd(cwd, updater) {
     saved.project = projectLabel(cwd);
     saved.title = saved.project;
     await writeRememberSession(cwd, saved, updated);
-    return updated;
+    return saved;
   });
 }
 
@@ -158,6 +161,7 @@ export async function listSessions() {
         rememberPath: rememberPathForCwd(session.cwd),
         autopilotEnabled: session.autopilotEnabled === true,
         autopilotState: session.autopilotState,
+        autopilotFeed: summarizeAutopilotFeed(session.autopilotHistory),
       });
     } catch {
       // Ignore malformed remember files so one project cannot break the UI.

@@ -74,6 +74,29 @@ export function autopilotStateLabel(autopilotState = {}, enabled = false) {
   return enabled ? "ready" : "paused";
 }
 
+export function normalizeAutopilotFeed(feed = [], { limit = 2 } = {}) {
+  if (!Array.isArray(feed) || limit <= 0) return [];
+  return feed.slice(0, Math.max(1, Math.round(Number(limit) || 1))).map((entry) => ({
+    at: String(entry?.at || ""),
+    action: String(entry?.action || "stop").slice(0, 32),
+    kind: String(entry?.kind || entry?.action || "stop").slice(0, 32),
+    reason: String(entry?.reason || "").slice(0, 80),
+  }));
+}
+
+export function autopilotFeedEntryLabel(entry, nowMs = Date.now()) {
+  const action = String(entry?.action || "stop");
+  const kind = String(entry?.kind || action || "stop");
+  const outcome = action === "message" ? kind || "message" : action;
+  const atMs = Date.parse(entry?.at || "");
+  let age = "";
+  if (Number.isFinite(atMs)) {
+    const seconds = Math.max(0, Math.round((nowMs - atMs) / 1000));
+    age = seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.round(seconds / 60)}m ago` : `${Math.round(seconds / 3600)}h ago`;
+  }
+  return [outcome, age].filter(Boolean).join(" - ");
+}
+
 export function createSessionSendGate() {
   const pending = new Set();
   return {

@@ -413,7 +413,8 @@ input {
 }
 
 .session-title,
-.session-meta {
+.session-meta,
+.session-autopilot-feed {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -422,6 +423,12 @@ input {
 .session-title {
   font-size: 14px;
   font-weight: 650;
+}
+
+.session-autopilot-feed {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .session-autopilot-icon {

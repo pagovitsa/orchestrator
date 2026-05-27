@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -145,6 +145,20 @@ test("autopilotStateLabel summarizes workflow state for UI", () => {
   assert.equal(autopilotStateLabel({ state: "running" }, true), "running");
   assert.equal(autopilotStateLabel({ state: "failed" }, true), "failed");
   assert.equal(autopilotStateLabel({ state: "completed" }, false), "paused");
+});
+
+test("autopilot feed helpers keep sidebar labels compact", () => {
+  const feed = normalizeAutopilotFeed([
+    { at: "2026-05-27T10:00:00.000Z", action: "message", kind: "continue", reason: "x".repeat(120), content: "ignored" },
+    { at: "2026-05-27T10:01:00.000Z", action: "stop", kind: "stop", reason: "stopped" },
+    { at: "2026-05-27T10:02:00.000Z", action: "message", kind: "answer", reason: "ignored by limit" },
+  ]);
+
+  assert.equal(feed.length, 2);
+  assert.equal(feed[0].reason.length, 80);
+  assert.equal(feed[0].content, undefined);
+  assert.equal(autopilotFeedEntryLabel(feed[0], Date.parse("2026-05-27T10:02:00.000Z")), "continue - 2m ago");
+  assert.deepEqual(normalizeAutopilotFeed(null), []);
 });
 
 test("createSessionSendGate blocks duplicate sends until released", () => {
