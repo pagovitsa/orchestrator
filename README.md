@@ -152,6 +152,8 @@ The sidebar also shows a compact Autopilot activity feed when available. Set `OR
 
 Autopilot follow-up runs have an idle guard separate from manual messages. Set `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` to stop an automatically sent follow-up after silence, and `ORCH_AUTOPILOT_IDLE_WARNING_MS` to warn shortly before the stop; defaults are 15 minutes and 1 minute. Set the timeout to `0` to disable the idle guard. On server startup, stale Autopilot `running` state and persisted usage `active` flags from a previous process are cleared.
 
+Autopilot decision calls have their own timeout before retry/failure handling. `ORCH_AUTOPILOT_DECISION_TIMEOUT_MS` defaults to the idle timeout for compatibility; set it lower for faster failed decisions, or `0` to disable only this decision timeout. Warning timing uses `ORCH_AUTOPILOT_IDLE_WARNING_MS`.
+
 Autopilot decision calls retry transient DeepSeek/network failures before marking the workflow failed. Set `ORCH_AUTOPILOT_RETRY_ATTEMPTS` and `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` to tune attempts and exponential backoff; attempts includes the first call. HTTP 429 and 5xx responses are retried, while auth/configuration errors fail immediately. The retry is only for the decision step, not the follow-up supervisor run, so persisted user messages are not duplicated.
 
 ## Credentials

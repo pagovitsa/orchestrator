@@ -42,6 +42,10 @@ const idleConfig = normalizeIdleTimeoutConfig({
   timeoutMs: runtime.autopilotIdleTimeoutMs,
   warningMs: runtime.autopilotIdleWarningMs,
 });
+const autopilotDecisionTimeoutConfig = normalizeIdleTimeoutConfig({
+  timeoutMs: runtime.autopilotDecisionTimeoutMs,
+  warningMs: runtime.autopilotIdleWarningMs,
+});
 const autopilotRetryConfig = {
   attempts: runtime.autopilotRetryAttempts,
   backoffMs: runtime.autopilotRetryBackoffMs,
@@ -188,10 +192,12 @@ function checkIdleRuns() {
 
 function createAutopilotDecisionTimeout(session) {
   const abortController = new AbortController();
-  if (!idleConfig.timeoutMs) {
+  if (!autopilotDecisionTimeoutConfig.timeoutMs) {
     return { signal: abortController.signal, abort: (reason) => abortController.abort(reason), clear() {} };
   }
-  const warningDelay = idleConfig.warningMs > 0 ? Math.max(0, idleConfig.timeoutMs - idleConfig.warningMs) : 0;
+  const warningDelay = autopilotDecisionTimeoutConfig.warningMs > 0
+    ? Math.max(0, autopilotDecisionTimeoutConfig.timeoutMs - autopilotDecisionTimeoutConfig.warningMs)
+    : 0;
   const warningTimer = warningDelay > 0
     ? setTimeout(() => {
         broadcastRunEvent(session.id, "", {
@@ -199,14 +205,14 @@ function createAutopilotDecisionTimeout(session) {
           phase: "idle-warning",
           project: session.cwd,
           supervisor: session.supervisor,
-          warning: `Autopilot decision has been idle and will stop in ${Math.ceil(idleConfig.warningMs / 1000)}s`,
+          warning: `Autopilot decision timeout approaching; will stop in ${Math.ceil(autopilotDecisionTimeoutConfig.warningMs / 1000)}s`,
           at: new Date().toISOString(),
         });
       }, warningDelay)
     : null;
   const timeoutTimer = setTimeout(() => {
-    abortController.abort(new Error("Autopilot idle timeout"));
-  }, idleConfig.timeoutMs);
+    abortController.abort(new Error("Autopilot decision timeout"));
+  }, autopilotDecisionTimeoutConfig.timeoutMs);
   warningTimer?.unref();
   timeoutTimer.unref();
   return {
@@ -690,6 +696,7 @@ export async function handleApi(req, res, url) {
       previewPorts: runtime.previewPorts,
       maxUploadBytes: runtime.maxUploadBytes,
       autopilotFeedLimit: runtime.autopilotFeedLimit,
+      autopilotDecisionTimeoutMs: runtime.autopilotDecisionTimeoutMs,
       allowWorkspaceRoot: runtime.allowWorkspaceRoot,
     });
   }

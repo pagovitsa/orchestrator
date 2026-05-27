@@ -520,12 +520,14 @@ test("autopilot workflow state enforces allowed transitions", () => {
 test("autopilot idle timeout warns then stops only autopilot-sourced runs", () => {
   const config = normalizeIdleTimeoutConfig({ timeoutMs: 1000, warningMs: 300 });
   const base = { source: "autopilot", lastActivityMs: 1000 };
+  const shortDecisionConfig = normalizeIdleTimeoutConfig({ timeoutMs: 30, warningMs: 60 });
 
   assert.deepEqual(idleTimeoutDecision({ source: "manual", lastActivityMs: 1000 }, 5000, config), { action: "none" });
   assert.equal(idleTimeoutDecision(base, 1600, config).action, "none");
   const warning = idleTimeoutDecision(base, 1700, config);
   assert.equal(warning.action, "warn");
   assert.equal(warning.remainingMs, 300);
+  assert.deepEqual(shortDecisionConfig, { timeoutMs: 30, warningMs: 29 });
   assert.equal(idleTimeoutDecision({ ...base, idleWarningSent: true }, 1800, config).action, "none");
   assert.equal(idleTimeoutDecision(base, 2000, config).action, "stop");
 });

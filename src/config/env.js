@@ -39,6 +39,8 @@ export const paths = {
   homeDir: process.env.HOME || "/home/node",
 };
 
+const autopilotIdleTimeoutMs = envNumber("ORCH_AUTOPILOT_IDLE_TIMEOUT_MS", 900000);
+
 function readSecret(name) {
   try {
     return readFileSync(path.join(paths.secretsDir, name), "utf8").trim();
@@ -70,8 +72,9 @@ export const runtime = {
   allowWrite: envFlag("ORCH_ALLOW_WRITE", false),
   allowWorkspaceRoot: envFlag("ORCH_ALLOW_WORKSPACE_ROOT", false),
   timeoutMs: envNumber("ORCH_TIMEOUT_MS", 10800000), // 3h; 0 = no auto-timeout (stop manually)
-  autopilotIdleTimeoutMs: envNumber("ORCH_AUTOPILOT_IDLE_TIMEOUT_MS", 900000), // 15m; 0 = disabled
+  autopilotIdleTimeoutMs, // 15m; 0 = disabled
   autopilotIdleWarningMs: envNumber("ORCH_AUTOPILOT_IDLE_WARNING_MS", 60000), // warn 1m before stop
+  autopilotDecisionTimeoutMs: envNumber("ORCH_AUTOPILOT_DECISION_TIMEOUT_MS", autopilotIdleTimeoutMs), // default follows idle timeout; 0 = disabled
   autopilotRetryAttempts: envNumber("ORCH_AUTOPILOT_RETRY_ATTEMPTS", 3),
   autopilotRetryBackoffMs: envNumber("ORCH_AUTOPILOT_RETRY_BACKOFF_MS", 2000),
   autopilotFeedLimit: envNumber("ORCH_AUTOPILOT_FEED_LIMIT", 2),

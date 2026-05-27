@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { checksFromEnv, runHttpSmokeChecks, writeSmokeReport } from "../src/scripts/smoke-report.js";
+
+const execFileAsync = promisify(execFile);
 
 function startMockServer(handler) {
   const server = createServer(handler);
@@ -37,6 +41,7 @@ test("recent public config options stay documented", async () => {
   const publicOptions = [
     "ORCH_AUTOPILOT_IDLE_TIMEOUT_MS",
     "ORCH_AUTOPILOT_IDLE_WARNING_MS",
+    "ORCH_AUTOPILOT_DECISION_TIMEOUT_MS",
     "ORCH_AUTOPILOT_RETRY_ATTEMPTS",
     "ORCH_AUTOPILOT_RETRY_BACKOFF_MS",
     "ORCH_AUTOPILOT_FEED_LIMIT",
@@ -49,6 +54,32 @@ test("recent public config options stay documented", async () => {
   for (const option of publicOptions) {
     assert.match(readme, new RegExp(`\\b${option}\\b`), `${option} missing from README.md`);
     assert.match(envExample, new RegExp(`\\b${option}\\b`), `${option} missing from .env.example`);
+  }
+});
+
+test("autopilot decision timeout follows idle timeout unless explicitly set", async () => {
+  const script = [
+    "import { runtime } from './src/config/env.js';",
+    "console.log(JSON.stringify({ idle: runtime.autopilotIdleTimeoutMs, decision: runtime.autopilotDecisionTimeoutMs }));",
+  ].join("");
+
+  const baseEnv = {
+    ...process.env,
+    ORCH_DATA_DIR: await mkdtemp(path.join(os.tmpdir(), "orch-env-")),
+    ORCH_AUTOPILOT_IDLE_TIMEOUT_MS: "1234",
+  };
+  delete baseEnv.ORCH_AUTOPILOT_DECISION_TIMEOUT_MS;
+
+  try {
+    const inherited = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], { env: baseEnv });
+    assert.deepEqual(JSON.parse(inherited.stdout), { idle: 1234, decision: 1234 });
+
+    const disabled = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+      env: { ...baseEnv, ORCH_AUTOPILOT_DECISION_TIMEOUT_MS: "0" },
+    });
+    assert.deepEqual(JSON.parse(disabled.stdout), { idle: 1234, decision: 0 });
+  } finally {
+    await rm(baseEnv.ORCH_DATA_DIR, { recursive: true, force: true });
   }
 });
 
