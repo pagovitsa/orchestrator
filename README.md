@@ -1,5 +1,7 @@
 # Orchestrator
 
+[![CI](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/pagovitsa/orchestrator/actions/workflows/ci.yml)
+
 Local ChatGPT-style supervisor UI for Claude CLI, Codex CLI, Gemini CLI, and DeepSeek V4 Pro. This refactor keeps the original behavior from `orch-ui`, but splits the server into focused modules for config, workspace scoping, sessions, attachments, PAL MCP wiring, supervisor runners, routes, and static serving.
 
 The shared supervisor prompt lives at:
@@ -223,7 +225,7 @@ npm test
 
 `npm run lint` is the CI-facing alias for `npm run check`, which syntax-checks server, test, and browser JavaScript files.
 
-GitHub Actions runs lint, tests, and an authenticated smoke check on push and pull requests. The smoke job starts the server on loopback with temporary data/workspace directories, then runs `npm run smoke`.
+GitHub Actions runs lint, tests, and an authenticated smoke check on push and pull requests using Node 22. The smoke job starts the server on loopback with temporary data/workspace directories and ephemeral in-workflow auth values, then runs `npm run smoke`; no GitHub repository secrets are injected for this CI smoke path.
 
 ### Smoke Reports
 

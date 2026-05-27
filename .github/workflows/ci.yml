@@ -38,6 +38,7 @@ jobs:
           ORCH_UI_PORT: "8787"
           ORCH_LISTEN_HOST: "127.0.0.1"
           ORCH_BIND_HOST: "127.0.0.1"
+          # CI-only loopback auth for smoke checks; do not reuse for deployed environments.
           ORCH_AUTH_PASSWORD: "ci-smoke-password"
           ORCH_SMOKE_AUTH: "orchestrator:ci-smoke-password"
           ORCH_DATA_DIR: ${{ runner.temp }}/orch-data
