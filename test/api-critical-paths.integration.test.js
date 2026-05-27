@@ -436,6 +436,157 @@ test("message API returns bounded provider rate-limit errors and recovers next r
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
+test("message API falls back when DeepSeek peer tools are unsupported", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdir, mkdtemp, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-fallback-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-fallback-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-fallback-home-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+    const originalFetch = globalThis.fetch;
+    const deepseekRequests = [];
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.DEEPSEEK_API_KEY = "test-deepseek-key";
+
+    globalThis.fetch = async (url, options = {}) => {
+      const target = String(url || "");
+      if (target.includes("api.deepseek.com")) {
+        const body = JSON.parse(String(options.body || "{}"));
+        deepseekRequests.push(body);
+        if (Array.isArray(body.tools)) {
+          return new Response(JSON.stringify({
+            error: {
+              message: "Function tools are not supported for this model.",
+              type: "invalid_request_error",
+            },
+          }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "Fallback plain response." } }],
+          usage: { total_tokens: 13 },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-fallback"), { recursive: true });
+      const created = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "deepseek",
+        cwd: "project-fallback",
+      });
+      assert.equal(created.status, 201);
+      const sessionId = created.body.session.id;
+
+      const posted = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+        content: "Use whichever DeepSeek request path works.",
+      });
+      assert.equal(posted.status, 200);
+      assert.equal(posted.body.message.content, "Fallback plain response.");
+      assert.equal(posted.body.message.error, undefined);
+      assert.equal(posted.body.message.stopped, undefined);
+
+      assert.equal(deepseekRequests.length, 2);
+      assert.equal(deepseekRequests[0].model, "deepseek-v4-pro");
+      assert.ok(Array.isArray(deepseekRequests[0].tools));
+      assert.equal(deepseekRequests[0].tool_choice, "auto");
+      assert.equal(deepseekRequests[1].model, "deepseek-v4-pro");
+      assert.equal(deepseekRequests[1].tools, undefined);
+      assert.equal(deepseekRequests[1].tool_choice, undefined);
+      assert.deepEqual(deepseekRequests[1].messages, deepseekRequests[0].messages);
+
+      const loaded = await loadSession(sessionId);
+      assert.equal(loaded.messages.length, 2);
+      assert.equal(loaded.messages[0].role, "user");
+      assert.equal(loaded.messages[0].content, "Use whichever DeepSeek request path works.");
+      assert.equal(loaded.messages[1].role, "assistant");
+      assert.equal(loaded.messages[1].content, "Fallback plain response.");
+      assert.equal(loaded.messages[1].error, undefined);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 15000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
 test("message API rejects concurrent runs, stops a hung provider call, and recovers", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";
