@@ -325,6 +325,8 @@ function createStderrTraceFilter(command, options) {
 function sanitizedProcessEnv(extra = {}) {
   const env = {
     ...process.env,
+    HOME: paths.homeDir,
+    CODEX_HOME: paths.codexHome,
     HOST: runtime.devServerHost,
     BIND_HOST: runtime.devServerHost,
     VITE_HOST: runtime.devServerHost,

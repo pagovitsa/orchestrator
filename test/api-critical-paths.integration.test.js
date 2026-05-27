@@ -120,6 +120,116 @@ test("session creation API accepts connected providers and persists one conversa
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
+test("tailscale setup API saves redacted Docker-sidecar state", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdtemp, readFile, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-tail-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-tail-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-tail-home-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = body === undefined ? "" : JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      const initial = await jsonRequest("GET", baseUrl + "/api/tailscale");
+      assert.equal(initial.status, 200);
+      assert.equal(initial.body.tailscale.configured, false);
+
+      const saved = await jsonRequest("POST", baseUrl + "/api/tailscale", {
+        authKey: "tskey-auth-test-secret",
+        hostname: "orch-ui",
+        httpsHost: "orch-ui.example.ts.net",
+      });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.body.tailscale.configured, true);
+      assert.equal(saved.body.tailscale.authKeyConfigured, true);
+      assert.equal(saved.body.tailscale.httpsHost, "https://orch-ui.example.ts.net");
+      assert.equal(Object.hasOwn(saved.body.tailscale, "authKey"), false);
+
+      const setupJson = await readFile(path.join(dataDir, "tailscale", "setup.json"), "utf8");
+      assert.equal(setupJson.includes("tskey-auth-test-secret"), false);
+      const setupEnv = await readFile(path.join(dataDir, "tailscale", "setup.env"), "utf8");
+      assert.match(setupEnv, /ORCH_TAILSCALE_AUTHKEY='tskey-auth-test-secret'/);
+      assert.match(setupEnv, /ORCH_TAILSCALE_HTTPS_HOST='https:\/\/orch-ui\.example\.ts\.net'/);
+
+      const after = await jsonRequest("GET", baseUrl + "/api/tailscale");
+      assert.equal(after.body.tailscale.configured, true);
+      assert.equal(Object.hasOwn(after.body.tailscale, "authKey"), false);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 15000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
 test("message API persists uploaded files and sends attachment context to provider", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";
@@ -911,7 +1021,7 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
-test("message API rejects concurrent runs, stops a hung provider call, and recovers", async () => {
+test("message API allows parallel projects, stops a hung provider call, and recovers", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";
     import { createServer } from "node:http";
@@ -1043,11 +1153,11 @@ test("message API rejects concurrent runs, stops a hung provider call, and recov
       assert.equal(sameSession.status, 409);
       assert.match(sameSession.body.error, /already has a running model/);
 
-      const sameSupervisor = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionB + "/messages", {
-        content: "Concurrent same-supervisor message.",
+      const parallelProject = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionB + "/messages", {
+        content: "Concurrent same-supervisor message in another project.",
       });
-      assert.equal(sameSupervisor.status, 409);
-      assert.match(sameSupervisor.body.error, /already running in another project/);
+      assert.equal(parallelProject.status, 200);
+      assert.equal(parallelProject.body.message.content, "Recovered after stop.");
 
       const stop = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionA + "/stop");
       assert.equal(stop.status, 202);
@@ -1081,7 +1191,7 @@ test("message API rejects concurrent runs, stops a hung provider call, and recov
       assert.equal(loaded.messages[2].role, "user");
       assert.equal(loaded.messages[3].role, "assistant");
       assert.equal(loaded.messages[3].content, "Recovered after stop.");
-      assert.equal(deepseekCalls, 2);
+      assert.equal(deepseekCalls, 3);
       console.log(JSON.stringify({ ok: true }));
     } finally {
       globalThis.fetch = originalFetch;

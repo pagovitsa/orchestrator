@@ -57,9 +57,36 @@ http://<host-lan-ip>:8787
 
 ## Security and LAN Access
 
-Set `ORCH_AUTH_PASSWORD` before exposing the UI beyond loopback. The server refuses non-loopback or host-network startup without a password. Preview ports are not auth-protected, so keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` for local-only previews or set it to `0.0.0.0` only when the selected preview ports are acceptable on your LAN/Tailscale network.
+Set `ORCH_AUTH_PASSWORD` before exposing the UI beyond loopback. The server refuses non-loopback or host-network startup without a password. Preview ports are not auth-protected, so keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` for local-only previews or Docker Tailscale sidecar HTTPS; set it to `0.0.0.0` only when the selected preview ports are acceptable directly on your LAN or host-level Tailscale network.
 
 The app also scans obvious credential-shaped text before persistence. Memory writes refuse secrets, text attachments with API keys/tokens are rejected before upload storage, and chat/session strings are redacted before they are saved.
+
+## Tailscale Sidecar HTTPS
+
+The default compose setup runs a separate Tailscale node inside Docker. This does not use the host machine's Tailscale login or state; the sidecar stores its node state in the `orch_tailscale_state` Docker volume and reads UI-saved setup from `/data/tailscale/`.
+
+Open the Tailscale button in the sidebar before creating your first project, or preseed `.env`:
+
+```bash
+ORCH_TAILSCALE_AUTHKEY=<your-auth-key>
+ORCH_TAILSCALE_HOSTNAME=orch-ui
+ORCH_TAILSCALE_HTTPS_HOST=https://orch-ui.<your-tailnet>.ts.net
+```
+
+Then recreate the stack if you changed `.env`:
+
+```bash
+docker compose up -d --build
+```
+
+The sidecar shares the `orch-ui` container network namespace and runs Tailscale Serve when setup is available:
+
+```text
+https://orch-ui.<your-tailnet>.ts.net/       -> UI on 8787
+https://orch-ui.<your-tailnet>.ts.net:5173/  -> preview on 5173
+```
+
+Preview HTTPS ports follow `ORCH_PREVIEW_PORTS`. The UI HTTPS listener defaults to 443 and can be changed with `ORCH_TAILSCALE_UI_HTTPS_PORT`. Keep `ORCH_TAILSCALE_SERVE_RESET=1` unless you intentionally manage extra Serve routes on the same sidecar node. Your tailnet must have MagicDNS and HTTPS certificates enabled for Tailscale Serve HTTPS.
 
 ## Host Network Mode
 

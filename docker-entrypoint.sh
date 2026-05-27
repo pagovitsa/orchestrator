@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export HOME=/home/node
+export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
 mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" /data/sessions /data/orch-mcp /data/secrets
 chown -R node:node "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" /data/sessions /data/orch-mcp /data/secrets
@@ -14,7 +15,7 @@ env_enabled() {
 }
 
 # Default git identity for the node user so auto-init/commits inside /workspace work.
-runuser -u node -- env HOME="$HOME" bash -c '
+runuser -u node -- env HOME="$HOME" CODEX_HOME="$CODEX_HOME" bash -c '
   git config --global --get user.name >/dev/null 2>&1 || git config --global user.name "Orchestrator"
   git config --global --get user.email >/dev/null 2>&1 || git config --global user.email "orchestrator@local.invalid"
   git config --global --get init.defaultBranch >/dev/null 2>&1 || git config --global init.defaultBranch main
@@ -34,6 +35,6 @@ if env_enabled "${ORCH_AUTO_UPDATE_CLIS:-0}"; then
   fi
 fi
 
-runuser -u node -- env HOME="$HOME" PATH="$PATH" node /app/src/scripts/write-startup-mcp.js
+runuser -u node -- env HOME="$HOME" CODEX_HOME="$CODEX_HOME" PATH="$PATH" node /app/src/scripts/write-startup-mcp.js
 
-exec runuser -u node -- env HOME="$HOME" PATH="$PATH" "$@"
+exec runuser -u node -- env HOME="$HOME" CODEX_HOME="$CODEX_HOME" PATH="$PATH" "$@"

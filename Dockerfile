@@ -8,6 +8,7 @@ ENV NODE_ENV=production
 ENV ORCH_WORKSPACE_ROOT=/workspace
 ENV ORCH_DATA_DIR=/data
 ENV ORCH_PROMPT_FILE=/app/prompts/main-orchestrator.md
+ENV CODEX_HOME=/home/node/.codex
 ENV PATH=/home/node/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update \

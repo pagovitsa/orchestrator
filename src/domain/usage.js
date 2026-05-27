@@ -224,6 +224,8 @@ function redactProbeText(text) {
 function probeEnv(extra = {}) {
   const env = {
     ...process.env,
+    HOME: paths.homeDir,
+    CODEX_HOME: paths.codexHome,
     TERM: process.env.TERM || "xterm-256color",
     COLUMNS: "100",
     LINES: "32",

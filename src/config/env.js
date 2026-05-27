@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const srcRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const appRoot = path.resolve(srcRoot, "..");
 const dataDir = path.resolve(process.env.ORCH_DATA_DIR || "/data");
+const homeDir = process.env.HOME || "/home/node";
 
 function envFlag(name, defaultValue = false) {
   const value = process.env[name];
@@ -37,7 +38,8 @@ export const paths = {
   palServerFile: path.join(appRoot, "pal-mcp-server", "server.py"),
   palServerRoot: path.join(appRoot, "pal-mcp-server"),
   deepseekModelsFile: path.join(appRoot, "pal-config", "custom_models_deepseek.json"),
-  homeDir: process.env.HOME || "/home/node",
+  homeDir,
+  codexHome: process.env.CODEX_HOME || path.join(homeDir, ".codex"),
 };
 
 const autopilotIdleTimeoutMs = envNumber("ORCH_AUTOPILOT_IDLE_TIMEOUT_MS", 900000);

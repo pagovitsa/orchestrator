@@ -15,6 +15,9 @@ const state = {
   focusedConnectionInput: null,
   usage: [],
   usageBudget: null,
+  tailscale: null,
+  tailscaleSetupDismissed: false,
+  tailscaleContinueAfterSetup: false,
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
@@ -119,6 +122,18 @@ const el = {
   terminalTimeline: document.getElementById("terminalTimeline"),
   terminalOutput: document.getElementById("terminalOutput"),
   newChat: document.getElementById("newChat"),
+  tailscaleSetup: document.getElementById("tailscaleSetup"),
+  tailscaleDialog: document.getElementById("tailscaleDialog"),
+  tailscaleForm: document.getElementById("tailscaleForm"),
+  closeTailscale: document.getElementById("closeTailscale"),
+  skipTailscale: document.getElementById("skipTailscale"),
+  saveTailscale: document.getElementById("saveTailscale"),
+  tailscaleAuthKey: document.getElementById("tailscaleAuthKey"),
+  tailscaleHostname: document.getElementById("tailscaleHostname"),
+  tailscaleHttpsHost: document.getElementById("tailscaleHttpsHost"),
+  tailscaleStateDot: document.getElementById("tailscaleStateDot"),
+  tailscaleStateText: document.getElementById("tailscaleStateText"),
+  tailscaleStatus: document.getElementById("tailscaleStatus"),
   soundToggle: document.getElementById("soundToggle"),
   speechToggle: document.getElementById("speechToggle"),
   projectContextMenu: document.getElementById("projectContextMenu"),
@@ -2183,8 +2198,10 @@ function createAttachmentList(attachments, removable) {
 
 function renderSelectedAttachments() {
   el.attachmentList.innerHTML = "";
-  if (!state.selectedFiles.length) return;
-  el.attachmentList.appendChild(createAttachmentList(state.selectedFiles, true));
+  if (state.selectedFiles.length) {
+    el.attachmentList.appendChild(createAttachmentList(state.selectedFiles, true));
+  }
+  resizeComposerInput();
 }
 
 function setComposerEnabled(enabled) {
@@ -2200,10 +2217,29 @@ function setComposerEnabled(enabled) {
   el.sendButton.setAttribute("aria-label", busy ? "Stop model" : "Send message");
   el.sendButton.innerHTML = iconSvg(busy ? icons.stop : icons.send);
   if (!enabled || busy) closeAttachmentMenu();
+  resizeComposerInput();
 }
 
 function syncComposerState() {
   setComposerEnabled(Boolean(state.currentSession));
+}
+
+function resizeComposerInput() {
+  if (!el.messageInput) return;
+  const style = getComputedStyle(el.messageInput);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 24;
+  const maxHeight = lineHeight * 10;
+  const minHeight = lineHeight;
+  el.messageInput.style.height = `${minHeight}px`;
+  const nextHeight = Math.max(minHeight, Math.min(el.messageInput.scrollHeight, maxHeight));
+  el.messageInput.style.height = `${Math.ceil(nextHeight)}px`;
+  el.messageInput.style.overflowY = el.messageInput.scrollHeight > maxHeight + 1 ? "auto" : "hidden";
+}
+
+function focusComposerFromClick(event) {
+  if (el.messageInput.disabled || currentRun()?.streaming) return;
+  if (event.target.closest("button, input, select, textarea, a, [role='menu'], .attachment-chip")) return;
+  el.messageInput.focus();
 }
 
 function isEditableElement(node) {
@@ -2249,6 +2285,141 @@ async function refreshSessions() {
   state.projects = projectBody.projects || [];
   renderProjectOptions();
   renderSessions();
+}
+
+function tailscaleConfigured() {
+  return Boolean(state.tailscale?.configured);
+}
+
+function normalizedTailscaleHttpsHost(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+function tailscaleStateLabel(tailscale = state.tailscale) {
+  if (!tailscale) return "Checking";
+  if (tailscale.state === "ready") return `Ready - ${tailscale.httpsHost || tailscale.hostname}`;
+  if (tailscale.configured) return `Saved - ${tailscale.httpsHost || tailscale.hostname}`;
+  if (tailscale.state === "waiting") return "Waiting for setup";
+  if (tailscale.state === "error") return tailscale.detail || "Needs attention";
+  return "Not configured";
+}
+
+function renderTailscaleButton() {
+  if (!el.tailscaleSetup) return;
+  const configured = tailscaleConfigured();
+  el.tailscaleSetup.classList.toggle("configured", configured);
+  el.tailscaleSetup.classList.toggle("needs-setup", !configured);
+  el.tailscaleSetup.title = configured ? "Tailscale configured" : "Set up Tailscale";
+  el.tailscaleSetup.setAttribute("aria-label", configured ? "Tailscale configured" : "Set up Tailscale");
+}
+
+function renderTailscaleDialog() {
+  const tailscale = state.tailscale || {};
+  const configured = tailscaleConfigured();
+  const errored = tailscale.state === "error";
+  el.tailscaleHostname.value = el.tailscaleHostname.value || tailscale.hostname || "orch-ui";
+  el.tailscaleHttpsHost.value = el.tailscaleHttpsHost.value || tailscale.httpsHost || "";
+  el.tailscaleAuthKey.placeholder = tailscale.authKeyConfigured ? "Saved" : "tskey-auth-...";
+  el.tailscaleStateText.textContent = tailscaleStateLabel(tailscale);
+  el.tailscaleStateText.parentElement.classList.toggle("configured", configured);
+  el.tailscaleStateText.parentElement.classList.toggle("error", errored);
+  updateTailscaleFormState();
+}
+
+function updateTailscaleFormState() {
+  const hostname = el.tailscaleHostname.value.trim();
+  const httpsHost = normalizedTailscaleHttpsHost(el.tailscaleHttpsHost.value);
+  const authKey = el.tailscaleAuthKey.value.trim();
+  const needsAuthKey = !state.tailscale?.authKeyConfigured;
+  const missing = !hostname || !httpsHost || (needsAuthKey && !authKey);
+  el.saveTailscale.disabled = missing;
+  el.tailscaleStatus.classList.toggle("is-error", missing);
+  if (!hostname) {
+    el.tailscaleStatus.textContent = "Device name is required.";
+  } else if (!httpsHost) {
+    el.tailscaleStatus.textContent = "HTTPS host is required.";
+  } else if (needsAuthKey && !authKey) {
+    el.tailscaleStatus.textContent = "Auth key is required the first time.";
+  } else {
+    el.tailscaleStatus.classList.remove("is-error");
+    el.tailscaleStatus.textContent = state.tailscale?.detail || tailscaleStateLabel();
+  }
+}
+
+async function refreshTailscaleStatus() {
+  try {
+    const body = await api("/api/tailscale");
+    state.tailscale = body.tailscale || null;
+  } catch (error) {
+    state.tailscale = {
+      configured: false,
+      state: "error",
+      detail: error.message,
+      hostname: "orch-ui",
+      httpsHost: "",
+      authKeyConfigured: false,
+    };
+  }
+  renderTailscaleButton();
+  if (el.tailscaleDialog?.open) renderTailscaleDialog();
+}
+
+async function openTailscaleModal({ continueAfterSetup = false } = {}) {
+  state.tailscaleContinueAfterSetup = continueAfterSetup;
+  await refreshTailscaleStatus();
+  el.tailscaleAuthKey.value = "";
+  el.tailscaleHostname.value = state.tailscale?.hostname || "orch-ui";
+  el.tailscaleHttpsHost.value = state.tailscale?.httpsHost || "";
+  renderTailscaleDialog();
+  el.tailscaleDialog.showModal();
+  const target = state.tailscale?.authKeyConfigured ? el.tailscaleHttpsHost : el.tailscaleAuthKey;
+  target.focus();
+}
+
+function closeTailscaleModal() {
+  el.tailscaleDialog.close();
+  state.tailscaleContinueAfterSetup = false;
+}
+
+async function saveTailscaleFromUi() {
+  updateTailscaleFormState();
+  if (el.saveTailscale.disabled) return;
+  el.saveTailscale.disabled = true;
+  el.tailscaleStatus.classList.remove("is-error");
+  el.tailscaleStatus.textContent = "Saving...";
+  try {
+    const body = await api("/api/tailscale", {
+      method: "POST",
+      body: JSON.stringify({
+        authKey: el.tailscaleAuthKey.value.trim(),
+        hostname: el.tailscaleHostname.value.trim(),
+        httpsHost: normalizedTailscaleHttpsHost(el.tailscaleHttpsHost.value),
+      }),
+    });
+    state.tailscale = body.tailscale;
+    state.tailscaleSetupDismissed = false;
+    renderTailscaleButton();
+    const continueAfterSetup = state.tailscaleContinueAfterSetup;
+    closeTailscaleModal();
+    setStatus("Tailscale setup saved");
+    if (continueAfterSetup) await openNewChatModal({ force: true });
+  } catch (error) {
+    el.tailscaleStatus.classList.add("is-error");
+    el.tailscaleStatus.textContent = error.message;
+    updateTailscaleFormState();
+  } finally {
+    el.saveTailscale.disabled = false;
+    updateTailscaleFormState();
+  }
+}
+
+async function skipTailscaleSetup() {
+  const continueAfterSetup = state.tailscaleContinueAfterSetup;
+  state.tailscaleSetupDismissed = true;
+  closeTailscaleModal();
+  if (continueAfterSetup) await openNewChatModal({ force: true });
 }
 
 function updateModalState() {
@@ -2371,7 +2542,11 @@ async function deleteProjectFromUi(project) {
   }
 }
 
-async function openNewChatModal() {
+async function openNewChatModal({ force = false } = {}) {
+  if (!force && !tailscaleConfigured() && !state.tailscaleSetupDismissed) {
+    await openTailscaleModal({ continueAfterSetup: true });
+    return;
+  }
   await Promise.all([refreshSessions(), refreshModelStatus()]);
   el.modalError.textContent = "";
   el.modalProjectName.value = "";
@@ -2490,8 +2665,7 @@ async function sendMessageForSession(targetSession, content, files = [], options
       attachments,
     }, {
       session(event) {
-        run.session = event.session;
-        run.session.messages.push(draft);
+        run.session = mergeStreamingSession(event.session, run.session, draft);
         if (viewing()) {
           state.currentSession = run.session;
           renderMessages();
@@ -2653,6 +2827,41 @@ function cloneLiveSession(session) {
   };
 }
 
+function messageIdentity(message = {}) {
+  return [
+    message.role || "",
+    String(message.content || message.modelContent || "").slice(0, 1000),
+    Array.isArray(message.attachments) ? String(message.attachments.length) : "0",
+  ].join("\u0000");
+}
+
+function messageIdentityCounts(messages = []) {
+  const counts = new Map();
+  for (const message of messages) {
+    const key = messageIdentity(message);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+function mergeStreamingSession(serverSession, localSession, draft) {
+  const session = cloneLiveSession(serverSession || localSession || {});
+  const messages = session.messages || [];
+  const serverCounts = messageIdentityCounts(messages);
+  for (const message of localSession?.messages || []) {
+    if (!message || message === draft || message.streaming) continue;
+    const key = messageIdentity(message);
+    const count = serverCounts.get(key) || 0;
+    if (count > 0) {
+      serverCounts.set(key, count - 1);
+      continue;
+    }
+    messages.push(message);
+  }
+  attachDraftToSession(session, draft);
+  return session;
+}
+
 function cloneLiveDraft(draft, session) {
   return {
     role: "assistant",
@@ -2711,10 +2920,9 @@ function syncLiveSessionView(run, { forceRender = false } = {}) {
 
 function handleLiveSession(event) {
   if (!event.session?.id) return;
-  const session = cloneLiveSession(event.session);
-  const draft = cloneLiveDraft(event.draft, session);
-  attachDraftToSession(session, draft);
   const existing = state.runs.get(event.sessionId);
+  const draft = cloneLiveDraft(event.draft, event.session);
+  const session = mergeStreamingSession(event.session, existing?.session, draft);
   if (existing?.heartbeat) clearInterval(existing.heartbeat);
   const run = {
     sessionId: event.sessionId,
@@ -2890,6 +3098,7 @@ function connectLiveEvents() {
 async function init() {
   renderMediaToggles();
   state.config = await api("/api/config");
+  await refreshTailscaleStatus();
   await refreshModelStatus();
   renderSupervisors();
   await refreshSessions();
@@ -2904,6 +3113,7 @@ async function init() {
 }
 
 el.newChat.addEventListener("click", openNewChatModal);
+el.tailscaleSetup.addEventListener("click", () => openTailscaleModal());
 el.sidebarToggle.addEventListener("click", toggleSidebar);
 el.soundToggle.addEventListener("click", toggleSoundMute);
 el.speechToggle.addEventListener("click", toggleSpeechMute);
@@ -2966,6 +3176,18 @@ el.terminalDialog.addEventListener("click", (event) => {
 el.terminalDialog.addEventListener("close", () => {
   state.activeTerminalMessage = null;
 });
+el.closeTailscale.addEventListener("click", closeTailscaleModal);
+el.skipTailscale.addEventListener("click", skipTailscaleSetup);
+el.tailscaleDialog.addEventListener("click", (event) => {
+  if (event.target === el.tailscaleDialog) closeTailscaleModal();
+});
+el.tailscaleAuthKey.addEventListener("input", updateTailscaleFormState);
+el.tailscaleHostname.addEventListener("input", updateTailscaleFormState);
+el.tailscaleHttpsHost.addEventListener("input", updateTailscaleFormState);
+el.tailscaleForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveTailscaleFromUi();
+});
 el.modalProjectName.addEventListener("input", updateModalState);
 el.modalSupervisorSelect.addEventListener("change", updateModalState);
 el.cancelNewChat.addEventListener("click", closeNewChatModal);
@@ -3013,9 +3235,12 @@ el.composer.addEventListener("submit", async (event) => {
       el.messageInput.value = "";
       state.selectedFiles = [];
       renderSelectedAttachments();
+      resizeComposerInput();
     },
   });
 });
+el.composer.querySelector(".composer-shell").addEventListener("click", focusComposerFromClick);
+el.messageInput.addEventListener("input", resizeComposerInput);
 el.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();

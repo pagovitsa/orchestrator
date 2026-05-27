@@ -18,6 +18,7 @@ import { emitHookEvent, listHookEvents } from "../domain/hooks.js";
 import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../domain/memory.js";
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
+import { saveTailscaleSetup, tailscaleStatus } from "../domain/tailscale.js";
 import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, clearAutopilotHistory, decideAutopilotNextWithRetry } from "../domain/autopilot.js";
 import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
@@ -139,11 +140,6 @@ function activeRunForProject(project) {
 function registerActiveRun(id, session, abortController, mode) {
   if (activeRuns.has(id)) {
     throw Object.assign(new Error("This project already has a running model. Stop it before sending another message."), { status: 409 });
-  }
-  for (const run of activeRuns.values()) {
-    if (run.supervisor === session.supervisor) {
-      throw Object.assign(new Error(`${supervisors[session.supervisor]?.label || session.supervisor} is already running in another project`), { status: 409 });
-    }
   }
   const run = {
     id,
@@ -717,6 +713,12 @@ export async function handleApi(req, res, url) {
   }
   if (req.method === "GET" && url.pathname === "/api/usage") {
     return sendJson(res, 200, await usageSnapshot());
+  }
+  if (req.method === "GET" && url.pathname === "/api/tailscale") {
+    return sendJson(res, 200, { tailscale: await tailscaleStatus() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/tailscale") {
+    return sendJson(res, 200, { tailscale: await saveTailscaleSetup(await readBody(req)) });
   }
   const connectionStartMatch = url.pathname.match(/^\/api\/connections\/([a-z0-9-]+)\/start$/);
   if (connectionStartMatch && req.method === "POST") {

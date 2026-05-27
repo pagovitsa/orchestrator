@@ -1,3 +1,5 @@
+name: orchestrator
+
 services:
   orch-ui:
     build:
@@ -15,6 +17,7 @@ services:
       # Google OAuth session (which rotates and can invalidate the CLI's stored token).
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       CODEX_ACCESS_TOKEN: "${CODEX_ACCESS_TOKEN:-}"
+      CODEX_HOME: "/home/node/.codex"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
@@ -41,6 +44,7 @@ services:
       ORCH_UI_PORT: "${ORCH_UI_PORT:-8787}"
       ORCH_DEV_SERVER_HOST: "${ORCH_DEV_SERVER_HOST:-0.0.0.0}"
       ORCH_PREVIEW_BIND_HOST: "${ORCH_PREVIEW_BIND_HOST:-127.0.0.1}"
+      ORCH_TAILSCALE_HTTPS_HOST: "${ORCH_TAILSCALE_HTTPS_HOST:-}"
       ORCH_TAILSCALE_HOST: "${ORCH_TAILSCALE_HOST:-}"
       ORCH_LAN_HOST: "${ORCH_LAN_HOST:-}"
       ORCH_PREVIEW_PUBLIC_HOSTS: "${ORCH_PREVIEW_PUBLIC_HOSTS:-}"
@@ -69,6 +73,33 @@ services:
       - "./prompts:/app/prompts:ro"
     working_dir: /app
 
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: orch-tailscale
+    restart: unless-stopped
+    network_mode: "service:orch-ui"
+    depends_on:
+      - orch-ui
+    environment:
+      TS_AUTHKEY: "${ORCH_TAILSCALE_AUTHKEY:-}"
+      TS_STATE_DIR: "/var/lib/tailscale"
+      TS_HOSTNAME: "${ORCH_TAILSCALE_HOSTNAME:-orch-ui}"
+      TS_EXTRA_ARGS: "${ORCH_TAILSCALE_EXTRA_ARGS:---accept-dns=false}"
+      TS_AUTH_ONCE: "${ORCH_TAILSCALE_AUTH_ONCE:-true}"
+      ORCH_TAILSCALE_CONFIG_ENV: "/data/tailscale/setup.env"
+      ORCH_TAILSCALE_SERVE: "${ORCH_TAILSCALE_SERVE:-1}"
+      ORCH_TAILSCALE_SERVE_RESET: "${ORCH_TAILSCALE_SERVE_RESET:-1}"
+      ORCH_TAILSCALE_UI_PORT: "${ORCH_UI_PORT:-8787}"
+      ORCH_TAILSCALE_UI_HTTPS_PORT: "${ORCH_TAILSCALE_UI_HTTPS_PORT:-443}"
+      ORCH_TAILSCALE_PREVIEW_PORTS: "${ORCH_PREVIEW_PORTS:-3000-3020,5173-5190,8000-8020,8080-8090}"
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - orch_data:/data
+      - "./tailscale:/orch-tailscale:ro"
+    entrypoint:
+      - /bin/sh
+      - /orch-tailscale/start.sh
+
 volumes:
   claude_auth:
     name: orch_claude_auth
@@ -78,3 +109,5 @@ volumes:
     name: orch_gemini_auth
   orch_data:
     name: orch_data
+  tailscale_state:
+    name: orch_tailscale_state

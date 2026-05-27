@@ -333,6 +333,16 @@ label,
   opacity: 0.78;
 }
 
+.tailscale-button.needs-setup {
+  border-color: rgba(216, 168, 78, 0.75);
+  color: var(--soft);
+}
+
+.tailscale-button.configured {
+  border-color: rgba(37, 169, 154, 0.7);
+  color: var(--accent);
+}
+
 .sidebar-toggle {
   display: none;
 }
@@ -820,6 +830,8 @@ input {
   border-radius: 0;
   background: transparent;
   padding: 9px 18px 9px 10px;
+  cursor: text;
+  transition: min-height 160ms ease, padding 160ms ease;
 }
 
 .composer-main {
@@ -827,6 +839,7 @@ input {
   align-items: center;
   gap: 5px;
   min-width: 0;
+  cursor: text;
 }
 
 #fileInput {
@@ -836,6 +849,7 @@ input {
 .attachment-menu-wrap {
   position: relative;
   align-self: center;
+  cursor: default;
 }
 
 .attachment-menu-button {
@@ -933,15 +947,17 @@ input {
 }
 
 .composer textarea {
+  --composer-line-height: 24px;
   height: 24px;
   min-height: 24px;
-  max-height: 240px;
+  max-height: calc(var(--composer-line-height) * 10);
   border: 0;
   background: transparent;
   padding: 0;
   resize: none;
-  line-height: 24px;
-  overflow-y: auto;
+  line-height: var(--composer-line-height);
+  overflow-y: hidden;
+  transition: height 140ms ease;
 }
 
 .composer textarea:focus {
@@ -1039,6 +1055,45 @@ input {
 
 .modal-error.is-error {
   color: var(--danger);
+}
+
+.tailscale-modal {
+  width: min(520px, calc(100vw - 28px));
+}
+
+.tailscale-panel {
+  gap: 14px;
+}
+
+.tailscale-state {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tailscale-state-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--soft);
+  box-shadow: 0 0 0 3px rgba(216, 168, 78, 0.13);
+}
+
+.tailscale-state.configured .tailscale-state-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 169, 154, 0.15);
+}
+
+.tailscale-state.error .tailscale-state-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(228, 93, 82, 0.14);
 }
 
 .modal-actions {
@@ -1493,6 +1548,7 @@ textarea:disabled {
   }
 
   .composer textarea {
+    --composer-line-height: 22px;
     height: 22px;
     min-height: 22px;
     line-height: 22px;

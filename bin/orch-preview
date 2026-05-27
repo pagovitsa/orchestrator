@@ -21,6 +21,8 @@ host="${ORCH_DEV_SERVER_HOST:-0.0.0.0}"
 port_ranges="${ORCH_PREVIEW_PORTS:-3000-3020,5173-5190,8000-8020,8080-8090}"
 preview_bind_host="${ORCH_PREVIEW_BIND_HOST:-127.0.0.1}"
 lan_host="${ORCH_LAN_HOST:-}"
+tailscale_https_host="${ORCH_TAILSCALE_HTTPS_HOST:-}"
+tailscale_setup_file="${ORCH_TAILSCALE_SETUP_FILE:-/data/tailscale/setup.json}"
 tailscale_host="${ORCH_TAILSCALE_HOST:-}"
 public_hosts="${ORCH_PREVIEW_PUBLIC_HOSTS:-}"
 browser_host="${ORCH_BROWSER_HOST:-}"
@@ -81,6 +83,18 @@ detect_tailscale_host() {
   printf '%s' "$detected"
 }
 
+saved_tailscale_https_host() {
+  if [[ -n "$tailscale_https_host" || ! -f "$tailscale_setup_file" ]]; then
+    printf '%s' "$tailscale_https_host"
+    return
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.httpsHost // ""' "$tailscale_setup_file" 2>/dev/null || true
+    return
+  fi
+  sed -n 's/.*"httpsHost"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tailscale_setup_file" 2>/dev/null | head -n 1 || true
+}
+
 is_loopback_bind() {
   [[ "$preview_bind_host" == "127.0.0.1" || "$preview_bind_host" == "localhost" || "$preview_bind_host" == "::1" ]]
 }
@@ -120,10 +134,12 @@ preview_url_for_host() {
 
 print_urls() {
   local port="$1"
-  local configured host detected label printed=0
+  local configured host detected label saved_https printed=0
   printf 'Local: http://127.0.0.1:%s/\n' "$port"
+  saved_https="$(saved_tailscale_https_host)"
   configured="$public_hosts"
   if [[ -z "$configured" && -n "$browser_host" ]] && ! is_loopback_host "$browser_host"; then configured="$browser_host"; fi
+  if [[ -z "$configured" && -n "$saved_https" ]]; then configured="$saved_https"; fi
   if [[ -z "$configured" && -n "$tailscale_host" ]]; then configured="$tailscale_host"; fi
   if [[ -z "$configured" ]]; then
     detected="$(detect_tailscale_host)"
@@ -139,13 +155,13 @@ print_urls() {
       [[ -n "$host" ]] || continue
       label="Network"
       if is_tailscale_host "$host"; then label="Tailscale"; fi
-      printf '%-9s %s' "$label:" "$(preview_url_for_host "$host" "$port")"
+      printf '%-9s %s\n' "$label:" "$(preview_url_for_host "$host" "$port")"
       printed=1
     done
   fi
   if (( printed == 0 )); then
-    echo "Network: set ORCH_TAILSCALE_HOST or ORCH_LAN_HOST to print a reachable LAN/Tailscale URL."
-  elif is_loopback_bind; then
+    echo "Network: set ORCH_TAILSCALE_HTTPS_HOST, ORCH_TAILSCALE_HOST, or ORCH_LAN_HOST to print a reachable LAN/Tailscale URL."
+  elif is_loopback_bind && [[ -z "$saved_https" ]]; then
     echo "Note: Docker preview ports are bound to $preview_bind_host; set ORCH_PREVIEW_BIND_HOST=0.0.0.0 for LAN/Tailscale devices."
   fi
 }
