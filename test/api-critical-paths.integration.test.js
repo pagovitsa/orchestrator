@@ -557,6 +557,7 @@ test("message API falls back when DeepSeek peer tools are unsupported", async ()
       assert.equal(deepseekRequests.length, 2);
       assert.equal(deepseekRequests[0].model, "deepseek-v4-pro");
       assert.ok(Array.isArray(deepseekRequests[0].tools));
+      assert.ok(deepseekRequests[0].tools.some((tool) => tool.function?.name === "browser_check"));
       assert.equal(deepseekRequests[0].tool_choice, "auto");
       assert.equal(deepseekRequests[1].model, "deepseek-v4-pro");
       assert.equal(deepseekRequests[1].tools, undefined);

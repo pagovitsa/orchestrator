@@ -39,14 +39,14 @@ RUN npm install -g \
 ARG CONTEXT7_MCP_VERSION=3.0.0
 RUN npm install -g @upstash/context7-mcp@${CONTEXT7_MCP_VERSION}
 
+ARG PLAYWRIGHT_MCP_VERSION=0.0.75
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
+  && node "$(npm root -g)/@playwright/mcp/node_modules/playwright/cli.js" install --with-deps chromium \
+  && rm -rf /var/lib/apt/lists/*
+
 ARG SERENA_SPEC=serena-agent
 RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
     uv tool install --python 3.12 ${SERENA_SPEC}
-
-# Playwright browser MCP is opt-in (ORCH_ENABLED_TOOLS=...,playwright). It is NOT installed
-# by default because Chromium + system libs add hundreds of MB. To enable, add a build step
-# (the @playwright/mcp bin is `playwright-mcp`, which mcp.js launches):
-#   RUN npm install -g @playwright/mcp@<ver> && npx playwright install --with-deps chromium
 
 RUN mkdir -p /workspace /data /app \
   && chown -R node:node /workspace /data /app

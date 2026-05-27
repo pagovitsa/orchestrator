@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const srcRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const appRoot = path.resolve(srcRoot, "..");
+const dataDir = path.resolve(process.env.ORCH_DATA_DIR || "/data");
 
 function envFlag(name, defaultValue = false) {
   const value = process.env[name];
@@ -28,11 +29,11 @@ export const paths = {
   srcRoot,
   publicRoot: path.join(appRoot, "public"),
   workspaceRoot: path.resolve(process.env.ORCH_WORKSPACE_ROOT || "/workspace"),
-  dataDir: path.resolve(process.env.ORCH_DATA_DIR || "/data"),
-  secretsDir: path.join(path.resolve(process.env.ORCH_DATA_DIR || "/data"), "secrets"),
+  dataDir,
+  secretsDir: path.join(dataDir, "secrets"),
   promptFile: process.env.ORCH_PROMPT_FILE || path.join(appRoot, "prompts", "main-orchestrator.md"),
-  promptDir: process.env.ORCH_PROMPTS_DIR || path.join(path.resolve(process.env.ORCH_DATA_DIR || "/data"), "prompts"),
-  mcpConfigDir: process.env.ORCH_MCP_CONFIG_DIR || "/data/orch-mcp",
+  promptDir: process.env.ORCH_PROMPTS_DIR || path.join(dataDir, "prompts"),
+  mcpConfigDir: process.env.ORCH_MCP_CONFIG_DIR || path.join(dataDir, "orch-mcp"),
   palServerFile: path.join(appRoot, "pal-mcp-server", "server.py"),
   palServerRoot: path.join(appRoot, "pal-mcp-server"),
   deepseekModelsFile: path.join(appRoot, "pal-config", "custom_models_deepseek.json"),
@@ -91,7 +92,7 @@ export const runtime = {
   authPassword: process.env.ORCH_AUTH_PASSWORD || readAuthPasswordSecret(),
   bindHost: process.env.ORCH_BIND_HOST || "",
   allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
-  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory"),
+  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory,playwright"),
   gitInitProjects: envFlag("ORCH_GIT_INIT_PROJECTS", true),
 };
 

@@ -85,11 +85,11 @@ function runtimeContextText(session, options = {}) {
 function peerRoutingForPrompt(session, options = {}) {
   if (options.enablePeerMcp === false) {
     return [
-      "Peer MCP is disabled for this nested consultation.",
+      "MCP is disabled for this nested consultation.",
       "Answer directly from the prompt and do not attempt to call other model peers or MCP tools.",
     ].join("\n");
   }
-  return peerRoutingText(session.supervisor);
+  return peerRoutingText(session.supervisor, options.mcpConfigOptions || {});
 }
 
 function formatMemoryItems(scope, payload = {}) {
@@ -236,24 +236,29 @@ function tracePeerSetup(session, scoped, options) {
     detail: scoped.scopedCwd,
   });
   if (options.enablePeerMcp === false) {
-    emitTrace(options, `[${session.supervisor}] PAL peers disabled for this nested call`);
+    emitTrace(options, `[${session.supervisor}] MCP disabled for this nested call`);
     emitTimeline(options, {
       id: nextTimelineId("peers"),
       kind: "tool",
       status: "info",
-      title: "PAL peers disabled",
-      detail: "Nested consultation is non-recursive; peer MCP is intentionally disabled.",
+      title: "MCP disabled",
+      detail: "Nested consultation is running without peer or shared MCP servers.",
     });
     return;
   }
-  const peers = supervisorPeers[session.supervisor] || [];
-  emitTrace(options, `[${session.supervisor}] PAL MCP attached: ${peers.map((peer) => `pal-${peer}`).join(", ") || "(none)"}`);
+  const configOptions = options.mcpConfigOptions || {};
+  const peerServers = configOptions.includePeerServers === false
+    ? []
+    : (supervisorPeers[session.supervisor] || []).map((peer) => `pal-${peer}`);
+  const sharedTools = configOptions.includeSharedTools === false ? [] : runtime.enabledTools;
+  const attached = [...peerServers, ...sharedTools];
+  emitTrace(options, `[${session.supervisor}] MCP attached: ${attached.join(", ") || "(none)"}`);
   emitTimeline(options, {
     id: nextTimelineId("peers"),
     kind: "tool",
     status: "info",
-    title: "PAL MCP attached",
-    detail: peers.map((peer) => `pal-${peer}`).join(", ") || "(none)",
+    title: peerServers.length ? "MCP attached" : "Shared MCP attached",
+    detail: attached.join(", ") || "(none)",
   });
 }
 
@@ -602,7 +607,7 @@ async function callClaude(session, prompt, options = {}) {
   const { systemPrompt, ...runOptions } = options;
   const scoped = options.enablePeerMcp === false
     ? { scopedCwd: requireScopedCwd(session.cwd), claudeConfigPath: null }
-    : await writeScopedPeerConfigs(session);
+    : await writeScopedPeerConfigs(session, options.mcpConfigOptions || {});
   tracePeerSetup(session, scoped, runOptions);
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--system-prompt", systemPrompt ?? await loadPrompt(session.supervisor)];
   if (runOptions.enablePeerMcp !== false) args.push("--mcp-config", scoped.claudeConfigPath, "--strict-mcp-config");
@@ -633,7 +638,7 @@ function detectCodexProfileFlag() {
 async function callCodex(session, prompt, options = {}) {
   const scoped = options.enablePeerMcp === false
     ? { scopedCwd: requireScopedCwd(session.cwd), codexProfile: null }
-    : await writeScopedPeerConfigs(session);
+    : await writeScopedPeerConfigs(session, options.mcpConfigOptions || {});
   tracePeerSetup(session, scoped, options);
   const args = ["exec", "--skip-git-repo-check", "-C", scoped.scopedCwd];
   if (options.enablePeerMcp !== false) args.push(await detectCodexProfileFlag(), scoped.codexProfile);
@@ -655,7 +660,7 @@ async function callCodex(session, prompt, options = {}) {
 async function callGemini(session, prompt, options = {}) {
   const scoped = options.enablePeerMcp === false
     ? { scopedCwd: requireScopedCwd(session.cwd), geminiConfigPath: null }
-    : await writeScopedPeerConfigs(session);
+    : await writeScopedPeerConfigs(session, options.mcpConfigOptions || {});
   tracePeerSetup(session, scoped, options);
   const args = ["--skip-trust", "--output-format", "text"];
   if (process.env.GEMINI_MODEL) args.push("--model", process.env.GEMINI_MODEL);
@@ -851,8 +856,37 @@ function deepSeekMemoryTools() {
   ];
 }
 
+function deepSeekBrowserTools() {
+  if (!runtime.enabledTools.includes("playwright")) return [];
+  return [
+    {
+      type: "function",
+      function: {
+        name: "browser_check",
+        description: "Delegate browser automation or UI verification to a CLI peer that has the Playwright browser MCP tool. Use when the task needs a real browser.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: {
+              type: "string",
+              description: "A concise, self-contained browser verification task, including the URL or dev-server command when known.",
+            },
+            peer: {
+              type: "string",
+              enum: ["codex", "claude", "gemini"],
+              description: "The CLI peer to run the browser task. Defaults to codex.",
+            },
+          },
+          required: ["prompt"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+}
+
 function deepSeekTools() {
-  return [...deepSeekPeerTools(), ...deepSeekMemoryTools()];
+  return [...deepSeekPeerTools(), ...deepSeekMemoryTools(), ...deepSeekBrowserTools()];
 }
 
 function memoryFilesForSession(session) {
@@ -931,6 +965,13 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
         emitTrace(options, `[deepseek] ${toolName} -> running peer delegate`);
         result = await runDeepSeekPeerTool(session, toolName, prompt, options);
         emitTrace(options, `[deepseek] ${toolName} <- completed (${result.length} chars)`);
+      } else if (toolName === "browser_check") {
+        const prompt = String(args.prompt || "").trim();
+        if (!prompt) throw new Error("browser_check requires a prompt");
+        const peer = ["codex", "claude", "gemini"].includes(args.peer) ? args.peer : "codex";
+        emitTrace(options, `[deepseek] browser_check -> ${peer} with playwright`);
+        result = await runDeepSeekBrowserTool(session, peer, prompt, options);
+        emitTrace(options, `[deepseek] browser_check <- completed (${result.length} chars)`);
       } else if (toolName.startsWith("memory_")) {
         const taskId = nextTimelineId("memory");
         const startedAt = Date.now();
@@ -1000,6 +1041,15 @@ async function runDeepSeekMemoryTool(session, toolName, args) {
   return JSON.stringify(result, null, 2);
 }
 
+async function runDeepSeekBrowserTool(session, peer, prompt, parentOptions = {}) {
+  return runDeepSeekPeerTool(session, `ask_${peer}`, [
+    "Use the enabled Playwright/browser MCP tools for this browser or UI verification task.",
+    "Do not delegate to other model peers. Report the URL, actions, observations, failures, and any recommended fix.",
+    "",
+    prompt,
+  ].join("\n"), parentOptions);
+}
+
 async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}) {
   const peer = toolName.replace(/^ask_/, "");
   if (!["claude", "codex", "gemini"].includes(peer)) throw new Error(`Unknown DeepSeek peer tool: ${toolName}`);
@@ -1007,15 +1057,18 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
   const startedAt = Date.now();
   const peerSession = { ...session, supervisor: peer, messages: [], cwd: session.cwd || "." };
   const systemPrompt = await loadPrompt(peerSession.supervisor);
+  const sharedOnlyMcp = { includePeerServers: false };
   const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, {
     ...parentOptions,
-    enablePeerMcp: false,
+    enablePeerMcp: true,
+    mcpConfigOptions: sharedOnlyMcp,
     includeSystemPrompt: peer !== "claude",
     memoryContext: parentOptions.memoryContext || await loadMemoryContext(peerSession, prompt),
   });
   const options = {
-    enablePeerMcp: false,
+    enablePeerMcp: true,
     enablePeerTools: false,
+    mcpConfigOptions: sharedOnlyMcp,
     onTrace: parentOptions.onTrace,
     onTask: parentOptions.onTask,
     ...(peer === "claude" ? { systemPrompt } : {}),

@@ -10,18 +10,23 @@ function runtimeBlock(seat) {
     const steps = seat.toolStepLimit || 4;
     return [
       `You run as a direct API model with a small tool loop, **capped at ${steps} model requests total** for the turn.`,
-      "Your peer tools are `ask_claude` / `ask_codex` / `ask_gemini`; your durable memory tools are",
-      "`memory_read`, `memory_search`, `memory_remember`, `memory_forget`, and `memory_update_summary`.",
+      "Your peer tools are `ask_claude` / `ask_codex` / `ask_gemini`; when browser automation is",
+      "enabled, use `browser_check` to delegate a Playwright browser task to a CLI peer; your durable",
+      "memory tools are `memory_read`, `memory_search`, `memory_remember`, `memory_forget`, and",
+      "`memory_update_summary`.",
       "Peer tools run **sequentially**, each peer answers **once**, and peers **cannot** consult further",
-      "peers (non-recursive). Spend the step budget deliberately: ask a peer only for a compact,",
-      "self-contained one-shot answer.",
+      "peers (non-recursive), but CLI peers receive enabled shared tools such as memory, docs, and",
+      "Playwright. Spend the step budget deliberately: ask a peer only for a compact, self-contained",
+      "one-shot answer.",
     ].join("\n");
   }
   return [
-    "You run as a single CLI process for this turn, with PAL MCP peer servers attached so you can",
-    "consult peers (clink for CLI peers, chat for the DeepSeek API peer). The conversation is rebuilt",
-    "from history each turn; there is no persistent agent state between turns. You may issue parallel",
-    "peer tool calls within this turn if your CLI supports it; the calls themselves are synchronous.",
+    "You run as a single CLI process for this turn, with PAL MCP peer servers and shared MCP tools",
+    "attached. You can consult peers (clink for CLI peers, chat for the DeepSeek API peer), and use",
+    "enabled shared tools such as memory, docs, and Playwright browser automation. The conversation is",
+    "rebuilt from history each turn; there is no persistent agent state between turns. You may issue",
+    "parallel peer/tool calls within this turn if your CLI supports it; the calls themselves are",
+    "synchronous.",
   ].join("\n");
 }
 

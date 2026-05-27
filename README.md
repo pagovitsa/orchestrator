@@ -125,9 +125,15 @@ Each CLI supervisor gets PAL MCP peer servers for the other models:
 
 DeepSeek is exposed through the PAL `chat` tool with `deepseek-v4-pro` as the default model. When DeepSeek is the active supervisor, the UI server provides equivalent peer tools for Claude, Codex, and Gemini.
 
+### Shared MCP Tools
+
+`ORCH_ENABLED_TOOLS` defaults to `serena,context7,memory,playwright`. Claude, Codex, and Gemini receive these shared MCP servers directly in their scoped session config. DeepSeek receives memory as native function tools and gets browser automation through `browser_check`, which delegates a one-shot task to a CLI peer with the shared Playwright tool attached and peer-to-peer recursion disabled.
+
+Playwright browser automation is installed in the image with Chromium so supervisors can verify rendered UI when the browser tool is enabled. Because browser automation can reach network URLs, keep the UI behind loopback or `ORCH_AUTH_PASSWORD`.
+
 ### Memory MCP
 
-CLI supervisors also receive the local `memory` MCP server when `ORCH_ENABLED_TOOLS` includes `memory` (enabled by default). It stores durable facts locally:
+Supervisors receive the local `memory` tools when `ORCH_ENABLED_TOOLS` includes `memory` (enabled by default). It stores durable facts locally:
 
 - user/global memory: `/data/orch-memory/user.json`
 - project memory: `<project>/.remember/orchestrator-memory.json`
@@ -160,7 +166,7 @@ Autopilot decision calls retry transient DeepSeek/network failures before markin
 
 ## Credentials
 
-The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, and the DeepSeek model registry. It does not bake account tokens or API keys.
+The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, Playwright browser MCP, Chromium, and the DeepSeek model registry. It does not bake account tokens or API keys.
 
 CLI logins are stored in Docker named volumes:
 

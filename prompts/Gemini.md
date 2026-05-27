@@ -14,10 +14,12 @@ ceremony to risk: heavy for high-risk, light for trivial.
 
 ## This seat's runtime (read first)
 
-You run as a single CLI process for this turn, with PAL MCP peer servers attached so you can
-consult peers (clink for CLI peers, chat for the DeepSeek API peer). The conversation is rebuilt
-from history each turn; there is no persistent agent state between turns. You may issue parallel
-peer tool calls within this turn if your CLI supports it; the calls themselves are synchronous.
+You run as a single CLI process for this turn, with PAL MCP peer servers and shared MCP tools
+attached. You can consult peers (clink for CLI peers, chat for the DeepSeek API peer), and use
+enabled shared tools such as memory, docs, and Playwright browser automation. The conversation is
+rebuilt from history each turn; there is no persistent agent state between turns. You may issue
+parallel peer/tool calls within this turn if your CLI supports it; the calls themselves are
+synchronous.
 
 You do **not** have: background subagents, a Task tool, `run_in_background`, async
 completion notifications, required `.orchestration/runs/` artifacts, or cross-turn `continuation_id`

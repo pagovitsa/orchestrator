@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeUploadName, isTextAttachment, saveAttachments } from "../src/domain/attachments.js";
@@ -34,7 +34,7 @@ import { createTimelineEvent, mergeTimelineEvent } from "../src/domain/run-timel
 import { applySessionPatch, clearStaleAutopilotRuns, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
 import { containsSensitiveText, redactSensitiveStrings, redactSensitiveText } from "../src/domain/safety.js";
 import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../src/domain/idle-timeout.js";
-import { mcpToolCatalog } from "../src/supervisors/mcp.js";
+import { mcpToolCatalog, writeScopedPeerConfigs } from "../src/supervisors/mcp.js";
 import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
   calculateBalanceUsage,
@@ -446,6 +446,43 @@ test("mcpToolCatalog groups peers and shared tools", () => {
   const catalog = mcpToolCatalog("claude");
   assert.ok(catalog.some((tool) => tool.group === "peer-model" && tool.name === "pal-codex"));
   assert.ok(catalog.some((tool) => tool.group === "memory" && tool.name === "memory"));
+  assert.ok(catalog.some((tool) => tool.group === "browser" && tool.name === "playwright"));
+});
+
+test("writeScopedPeerConfigs can attach shared tools without recursive peers", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-mcp-shared-"));
+  const original = {
+    dataDir: paths.dataDir,
+    homeDir: paths.homeDir,
+    mcpConfigDir: paths.mcpConfigDir,
+    enabledTools: runtime.enabledTools,
+  };
+  const projectName = `project-shared-tools-${path.basename(dir)}`;
+  try {
+    paths.dataDir = path.join(dir, "data");
+    paths.homeDir = path.join(dir, "home");
+    paths.mcpConfigDir = path.join(dir, "mcp");
+    runtime.enabledTools = ["memory", "playwright"];
+
+    await mkdir(path.join(paths.workspaceRoot, projectName), { recursive: true });
+    const scoped = await writeScopedPeerConfigs(
+      { id: "session-shared-tools", supervisor: "codex", cwd: projectName },
+      { includePeerServers: false },
+    );
+    const claudeConfig = JSON.parse(await readFile(scoped.claudeConfigPath, "utf8"));
+    const serverNames = Object.keys(claudeConfig.mcpServers).sort();
+
+    assert.deepEqual(serverNames, ["memory", "playwright"]);
+    assert.equal(claudeConfig.mcpServers.playwright.command, "playwright-mcp");
+    assert.equal(serverNames.some((name) => name.startsWith("pal-")), false);
+  } finally {
+    paths.dataDir = original.dataDir;
+    paths.homeDir = original.homeDir;
+    paths.mcpConfigDir = original.mcpConfigDir;
+    runtime.enabledTools = original.enabledTools;
+    await rm(path.join(paths.workspaceRoot, projectName), { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("autopilot history and memory args are bounded", () => {

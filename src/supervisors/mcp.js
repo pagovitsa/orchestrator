@@ -31,8 +31,8 @@ const sharedToolCatalog = {
   },
 };
 
-export function mcpToolCatalog(supervisor) {
-  const peers = (supervisorPeers[supervisor] || []).map((peer) => ({
+export function mcpToolCatalog(supervisor, options = {}) {
+  const peers = options.includePeerServers === false ? [] : (supervisorPeers[supervisor] || []).map((peer) => ({
     name: `pal-${peer}`,
     group: "peer-model",
     namespace: "pal",
@@ -40,7 +40,7 @@ export function mcpToolCatalog(supervisor) {
     label: supervisors[peer]?.label || peer,
     description: `Peer delegate for ${peer}.`,
   }));
-  const shared = Object.entries(sharedToolCatalog).map(([name, entry]) => ({
+  const shared = options.includeSharedTools === false ? [] : Object.entries(sharedToolCatalog).map(([name, entry]) => ({
     name,
     ...entry,
     enabled: runtime.enabledTools.includes(name),
@@ -48,8 +48,8 @@ export function mcpToolCatalog(supervisor) {
   return [...peers, ...shared];
 }
 
-function toolCatalogText(supervisor) {
-  const enabled = mcpToolCatalog(supervisor).filter((tool) => tool.enabled);
+function toolCatalogText(supervisor, options = {}) {
+  const enabled = mcpToolCatalog(supervisor, options).filter((tool) => tool.enabled);
   const groups = new Map();
   for (const tool of enabled) {
     const names = groups.get(tool.group) || [];
@@ -60,11 +60,14 @@ function toolCatalogText(supervisor) {
   return `MCP tool groups enabled: ${[...groups.entries()].map(([group, names]) => `${group}=${names.join(",")}`).join("; ")}.`;
 }
 
-export function peerRoutingText(supervisor) {
+export function peerRoutingText(supervisor, options = {}) {
   const peers = supervisorPeers[supervisor] || [];
   const palPeers = peers.map((peer) => `pal-${peer}`).join(", ") || "(none)";
   const cliPeers = peers.filter((peer) => peer !== "deepseek").join(", ") || "(none)";
-  return [
+  const peerLines = options.includePeerServers === false ? [
+    `Peer delegates for ${supervisor} are disabled for this nested run.`,
+    "Do not call model peers from this nested run; use only the prompt, shell, and enabled shared tools.",
+  ] : [
     `Available peer delegates for ${supervisor}: ${peers.join(", ") || "(none)"}.`,
     `PAL MCP servers exposed to this supervisor: ${palPeers}.`,
     cliPeers === "(none)"
@@ -73,7 +76,10 @@ export function peerRoutingText(supervisor) {
     peers.includes("deepseek")
       ? "Use pal-deepseek chat/listmodels for DeepSeek V4 Pro API. The default model is deepseek-v4-pro."
       : "Do not call DeepSeek as a peer from this session.",
-    toolCatalogText(supervisor),
+  ];
+  return [
+    ...peerLines,
+    toolCatalogText(supervisor, options),
     "Do not delegate back to the active supervisor.",
   ].join("\n");
 }
@@ -121,6 +127,7 @@ export function peerServerConfig(peer, cwd, { scoped = true } = {}) {
 }
 
 export function mcpServersFor(supervisor, cwd, options = {}) {
+  if (options.includePeerServers === false) return {};
   return Object.fromEntries((supervisorPeers[supervisor] || []).map((peer) => [`pal-${peer}`, peerServerConfig(peer, cwd, options)]));
 }
 
@@ -192,14 +199,14 @@ export async function writeCodexProfile(filePath, servers, heading = "Generated 
   await writeFile(filePath, lines.join("\n"), "utf8");
 }
 
-export async function writeScopedPeerConfigs(session) {
+export async function writeScopedPeerConfigs(session, options = {}) {
   const scopedCwd = requireScopedCwd(session.cwd);
   const dir = path.join(paths.mcpConfigDir, "sessions", session.id);
   await mkdir(dir, { recursive: true });
 
   const servers = {
-    ...mcpServersFor(session.supervisor, scopedCwd),
-    ...sharedToolServers(scopedCwd, session.supervisor),
+    ...(options.includePeerServers === false ? {} : mcpServersFor(session.supervisor, scopedCwd)),
+    ...(options.includeSharedTools === false ? {} : sharedToolServers(scopedCwd, session.supervisor)),
   };
   const claudeConfigPath = path.join(dir, "claude.json");
   const geminiConfigPath = path.join(dir, "gemini-system-settings.json");
