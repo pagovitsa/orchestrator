@@ -9,6 +9,7 @@ import {
   autopilotFeedLimit,
   autopilotMemoryArgs,
   clearAutopilotHistory,
+  decideAutopilotNext,
   decideAutopilotNextWithRetry,
   isRetriableAutopilotError,
   normalizeAutopilotDecision,
@@ -868,6 +869,46 @@ test("parseAutopilotDecision stops on explicit stop decisions", () => {
 
   assert.equal(parsed.action, "stop");
   assert.equal(parsed.reason, "auth failed");
+});
+
+test("decideAutopilotNext sends latest messages to DeepSeek for context", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  globalThis.fetch = async (_url, options = {}) => {
+    requestBody = JSON.parse(String(options.body || "{}"));
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Continue carefully.","reason":"has context"}' } }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "claude",
+      cwd: "billing-ui",
+      messages: [
+        { role: "user", content: "Focus on the invoice edge case." },
+        { role: "assistant", supervisor: "claude", content: "I changed the invoice totals." },
+        { role: "user", content: "Also keep the mobile layout stable." },
+        { role: "assistant", supervisor: "claude", modelContent: "Done; tests pass and layout is stable." },
+      ],
+    });
+
+    assert.equal(decision.action, "message");
+    const prompt = requestBody.messages[1].content;
+    assert.match(prompt, /Latest messages for context/);
+    assert.match(prompt, /USER:\nFocus on the invoice edge case\./);
+    assert.match(prompt, /USER:\nAlso keep the mobile layout stable\./);
+    assert.match(prompt, /ASSISTANT\/CLAUDE:\nDone; tests pass and layout is stable\./);
+    assert.match(prompt, /Last assistant message to judge:\nDone; tests pass and layout is stable\./);
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("normalizeAutopilotDecision forces continue after non-blocking completion summary", () => {

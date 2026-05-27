@@ -15,6 +15,7 @@ RUN apt-get update \
     bash \
     build-essential \
     ca-certificates \
+    chromium \
     curl \
     git \
     jq \
@@ -40,15 +41,13 @@ ARG CONTEXT7_MCP_VERSION=3.0.0
 RUN npm install -g @upstash/context7-mcp@${CONTEXT7_MCP_VERSION}
 
 ARG PLAYWRIGHT_MCP_VERSION=0.0.75
-RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
-  && node "$(npm root -g)/@playwright/mcp/node_modules/playwright/cli.js" install --with-deps chromium \
-  && rm -rf /var/lib/apt/lists/*
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION}
 
 ARG SERENA_SPEC=serena-agent
 RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
     uv tool install --python 3.12 ${SERENA_SPEC}
 
-RUN mkdir -p /workspace /data /app \
+RUN mkdir -p /workspace /workspace/οrchestrator /data /app \
   && chown -R node:node /workspace /data /app
 
 WORKDIR /app
@@ -56,7 +55,7 @@ WORKDIR /app
 COPY --chown=node:node pal-mcp-server ./pal-mcp-server
 RUN python3 -m pip install --no-cache-dir --break-system-packages -r /app/pal-mcp-server/requirements.txt
 
-COPY --chown=node:node package.json ./
+COPY --chown=node:node package.json README.md .env.example ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node test ./test
 COPY --chown=node:node public ./public

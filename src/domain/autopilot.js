@@ -5,6 +5,7 @@ const AUTOPILOT_MODEL = "deepseek-v4-pro";
 const MAX_DECISION_CHARS = 6000;
 const MAX_ERROR_BODY_CHARS = 1000;
 const MAX_FEED_REASON_CHARS = 80;
+const RECENT_TRANSCRIPT_LIMIT = 16;
 const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 const FALLBACK_CONTINUE_MESSAGE = [
   "Autopilot:",
@@ -19,14 +20,18 @@ function latestAssistantMessage(session) {
   return [...(session.messages || [])].reverse().find((message) => message.role === "assistant") || null;
 }
 
-function recentTranscript(session, limit = 10) {
+function messageContent(message) {
+  return String(message?.modelContent || message?.content || "").trim();
+}
+
+function recentTranscript(session, limit = RECENT_TRANSCRIPT_LIMIT) {
   return (session.messages || [])
     .slice(-limit)
     .map((message) => {
       const speaker = message.role === "assistant"
         ? `assistant/${message.supervisor || session.supervisor || "unknown"}`
         : "user";
-      return `${speaker.toUpperCase()}:\n${message.modelContent || message.content || ""}`;
+      return `${speaker.toUpperCase()}:\n${messageContent(message)}`;
     })
     .join("\n\n");
 }
@@ -38,7 +43,7 @@ function hasRunError(message) {
 }
 
 function assistantContent(message) {
-  return String(message?.modelContent || message?.content || "").trim();
+  return messageContent(message);
 }
 
 function shouldForceContinue(lastAssistant) {
@@ -112,6 +117,8 @@ function autopilotPrompt(session, lastAssistant) {
     "Return ONLY compact JSON. No markdown, no prose outside JSON.",
     "",
     "Rules:",
+    "- First read the latest messages as the context window. Use them to form an accurate picture of the project state before deciding.",
+    "- Judge the latest assistant message in that context, not in isolation.",
     "- If the last assistant message is an app/model error, failed login, auth failure, missing credential, timeout, permission failure, or asks for destructive/human approval, return {\"action\":\"stop\",\"reason\":\"...\"}.",
     "- If the last assistant asks the user a question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
     "- The answer should act like a careful project owner: prefer reversible steps, no destructive approval, no fake secrets, no guessy external commitments.",
@@ -122,11 +129,11 @@ function autopilotPrompt(session, lastAssistant) {
     `Project: ${session.cwd || session.project || "."}`,
     `Supervisor to answer: ${session.supervisor || "unknown"}`,
     "",
-    "Recent conversation:",
+    `Latest messages for context (oldest to newest, last ${RECENT_TRANSCRIPT_LIMIT} max):`,
     recentTranscript(session),
     "",
     "Last assistant message to judge:",
-    lastAssistant.content || "",
+    assistantContent(lastAssistant),
   ].join("\n");
 }
 

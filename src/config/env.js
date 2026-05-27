@@ -93,6 +93,9 @@ export const runtime = {
   bindHost: process.env.ORCH_BIND_HOST || "",
   allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
   enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory,playwright"),
+  playwrightExecutablePath: process.env.ORCH_PLAYWRIGHT_EXECUTABLE_PATH || "",
+  playwrightHeadless: envFlag("ORCH_PLAYWRIGHT_HEADLESS", false),
+  playwrightNoSandbox: envFlag("ORCH_PLAYWRIGHT_NO_SANDBOX", false),
   gitInitProjects: envFlag("ORCH_GIT_INIT_PROJECTS", true),
 };
 

@@ -137,6 +137,14 @@ function serenaContext(supervisor) {
   return "codex";
 }
 
+function playwrightArgs() {
+  const args = [];
+  if (runtime.playwrightExecutablePath) args.push("--executable-path", runtime.playwrightExecutablePath);
+  if (runtime.playwrightHeadless) args.push("--headless");
+  if (runtime.playwrightNoSandbox) args.push("--no-sandbox");
+  return args;
+}
+
 // Shared 3rd-party tool MCP servers (pre-installed + pinned in the image), gated by
 // runtime.enabledTools. Kept separate from PAL peers: lower trust, network-reaching.
 // Only injected into per-session scoped configs (not startup/auth configs), scoped to scopedCwd.
@@ -167,7 +175,7 @@ export function sharedToolServers(scopedCwd, supervisor) {
     },
     playwright: {
       command: "playwright-mcp",
-      args: [],
+      args: playwrightArgs(),
       cwd: scopedCwd,
       env,
     },
