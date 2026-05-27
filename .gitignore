@@ -2,7 +2,8 @@
 .env.*
 !.env.example
 .remember/
-.orchestration/runs/
+.orchestration/
+.serena/
 .playwright-mcp/
 data/
 orch-connect-modal.png

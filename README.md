@@ -84,7 +84,7 @@ http://<host-lan-ip>:5173
 
 If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
 
-The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews. When a chat is opened through Tailscale/LAN, the UI passes the current browser host into the supervisor so `orch-preview` can print that reachable host instead of only `localhost`.
+The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. `.orchestration/` is runtime-only and ignored by git. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews. When a chat is opened through Tailscale/LAN, the UI passes the current browser host into the supervisor so `orch-preview` can print that reachable host instead of only `localhost`.
 
 Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. In bridge mode it treats shell `127.0.0.1` as container-local and uses Docker-published ports for browser/LAN previews; in host network mode it knows the container shares the host network namespace.
 
@@ -177,3 +177,5 @@ The default total upload limit per message is 25 MB. Override it with `ORCH_UPLO
 npm run check
 npm test
 ```
+
+`npm run check` syntax-checks server, test, and browser JavaScript files.
