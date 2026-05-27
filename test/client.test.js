@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -137,6 +137,14 @@ test("applyTerminalFlags preserves stopped and error metadata", () => {
   const target = {};
   applyTerminalFlags(target, { error: true, stopped: true });
   assert.deepEqual(target, { error: true, stopped: true });
+});
+
+test("autopilotStateLabel summarizes workflow state for UI", () => {
+  assert.equal(autopilotStateLabel({ state: "created" }, true), "ready");
+  assert.equal(autopilotStateLabel({ state: "completed" }, true), "ready");
+  assert.equal(autopilotStateLabel({ state: "running" }, true), "running");
+  assert.equal(autopilotStateLabel({ state: "failed" }, true), "failed");
+  assert.equal(autopilotStateLabel({ state: "completed" }, false), "paused");
 });
 
 test("createSessionSendGate blocks duplicate sends until released", () => {

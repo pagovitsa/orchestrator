@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, readAttachments, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -21,7 +21,7 @@ const state = {
   activeModelId: null,
   activeModelTab: "connection",
   projectMenuProject: null,
-  projectAutopilot: readProjectAutopilot(),
+  autopilotPhases: new Map(),
   soundMuted: readBooleanPreference("orch.soundMuted", false),
   speechEnabled: readBooleanPreference("orch.speechEnabled", false),
   audioContext: null,
@@ -34,23 +34,6 @@ const state = {
   pendingSends: createSessionSendGate(),
   statusText: "Ready",
 };
-
-function readProjectAutopilot() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem("orch.projectAutopilot") || "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeProjectAutopilot() {
-  try {
-    localStorage.setItem("orch.projectAutopilot", JSON.stringify(state.projectAutopilot));
-  } catch {
-    // Storage can be unavailable in strict privacy modes; the toggle still works for this session.
-  }
-}
 
 function readBooleanPreference(key, fallback = false) {
   try {
@@ -1499,18 +1482,29 @@ function projectIsRunning(project) {
 }
 
 function projectAutopilotEnabled(project) {
-  const key = projectMenuKey(project);
-  return Boolean(key && state.projectAutopilot[key]);
+  return project?.autopilotEnabled === true;
 }
 
-function setProjectAutopilot(project, enabled) {
+async function setProjectAutopilot(project, enabled) {
   const key = projectMenuKey(project);
-  if (!key) return;
-  if (enabled) state.projectAutopilot[key] = true;
-  else delete state.projectAutopilot[key];
-  writeProjectAutopilot();
-  renderSessions();
-  setStatus(`${key} autopilot ${enabled ? "on" : "off"}`);
+  if (!key || !project?.id) return;
+  try {
+    const body = await api(`/api/sessions/${project.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ autopilotEnabled: enabled }),
+    });
+    const session = body.session;
+    if (session) {
+      upsertSessionSummary(session);
+      if (isViewing(session.id)) state.currentSession = session;
+    }
+    renderSessions();
+    syncComposerState();
+    setStatus(`${key} autopilot ${enabled ? "on" : "paused"}`);
+    if (enabled && state.currentSession?.id === project.id) scheduleAutopilot(state.currentSession);
+  } catch (error) {
+    setStatus(`Autopilot toggle error: ${error.message}`);
+  }
 }
 
 function autopilotContent(decision) {
@@ -1527,6 +1521,12 @@ async function maybeRunAutopilot(session) {
     setStatus(`${projectName} autopilot thinking...`);
     const body = await api(`/api/sessions/${session.id}/autopilot`, { method: "POST" });
     const decision = body.decision || {};
+    if (body.session) {
+      session = body.session;
+      upsertSessionSummary(session);
+      if (isViewing(session.id)) state.currentSession = session;
+      renderSessions();
+    }
     if (!projectAutopilotEnabled(session)) {
       setStatus(`${projectName} autopilot off`);
       return;
@@ -1595,8 +1595,8 @@ function openProjectContextMenu(event, project) {
   autopilot.className = "project-context-item";
   autopilot.innerHTML = `<span>Autopilot</span><strong>${autopilotOn ? "On" : "Off"}</strong>`;
   autopilot.addEventListener("click", () => {
-    setProjectAutopilot(project, !autopilotOn);
     closeProjectContextMenu();
+    void setProjectAutopilot(project, !autopilotOn);
   });
 
   const separator = document.createElement("div");
@@ -1644,8 +1644,9 @@ function renderSessions() {
     if (autopilotOn) {
       const autopilotIcon = document.createElement("span");
       autopilotIcon.className = "session-autopilot-icon";
-      autopilotIcon.title = "Autopilot on";
-      autopilotIcon.setAttribute("aria-label", "Autopilot on");
+      const label = state.autopilotPhases.get(session.id) || autopilotStateLabel(session.autopilotState, autopilotOn);
+      autopilotIcon.title = `Autopilot ${label}`;
+      autopilotIcon.setAttribute("aria-label", `Autopilot ${label}`);
       autopilotIcon.innerHTML = iconSvg(icons.autopilot);
       button.appendChild(autopilotIcon);
     }
@@ -1662,7 +1663,8 @@ function renderSessions() {
 
     const meta = document.createElement("div");
     meta.className = "session-meta";
-    meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs`;
+    const autopilotLabel = autopilotOn ? ` - autopilot ${state.autopilotPhases.get(session.id) || autopilotStateLabel(session.autopilotState, autopilotOn)}` : "";
+    meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs${autopilotLabel}`;
 
     button.append(title, meta);
     button.addEventListener("click", () => openProjectSession(session));
@@ -2305,8 +2307,7 @@ async function deleteProjectFromUi(project) {
     const body = await api(`/api/projects/${encodeURIComponent(projectName)}`, { method: "DELETE" });
     state.projects = body.projects || [];
     state.sessions = body.sessions || [];
-    delete state.projectAutopilot[projectName];
-    writeProjectAutopilot();
+    if (project.id) state.autopilotPhases.delete(project.id);
     if (isCurrentProject(project)) {
       state.currentSession = null;
       renderMessages();
@@ -2573,6 +2574,8 @@ function sessionSummaryFromSession(session) {
     createdAt: session.createdAt || messages[0]?.at || "",
     updatedAt: session.updatedAt || messages.at(-1)?.at || new Date().toISOString(),
     messageCount: messages.length,
+    autopilotEnabled: session.autopilotEnabled === true,
+    autopilotState: session.autopilotState,
   };
 }
 
@@ -2741,14 +2744,6 @@ function finishLiveRun(event) {
 
 function handleLiveAutopilot(event) {
   const project = event.project || state.currentSession?.cwd || "project";
-  if (event.phase === "thinking") {
-    setStatus(`${project} autopilot thinking...`);
-    return;
-  }
-  if (event.phase === "error") {
-    setStatus(`Autopilot error: ${event.error || "failed"}`);
-    return;
-  }
   if (event.session) {
     const session = cloneLiveSession(event.session);
     upsertSessionSummary(session);
@@ -2757,10 +2752,28 @@ function handleLiveAutopilot(event) {
       renderMessages();
       syncComposerState();
     }
+  }
+  if (event.phase === "thinking") {
+    state.autopilotPhases.set(event.sessionId, "running");
     renderSessions();
+    setStatus(`${project} autopilot thinking...`);
+    return;
+  }
+  if (event.phase === "error") {
+    state.autopilotPhases.set(event.sessionId, "failed");
+    renderSessions();
+    setStatus(`Autopilot error: ${event.error || "failed"}`);
+    return;
+  }
+  if (event.phase === "state") {
+    state.autopilotPhases.delete(event.sessionId);
+    renderSessions();
+    return;
   }
   if (event.phase === "decision") {
     const decision = event.decision || {};
+    state.autopilotPhases.set(event.sessionId, decision.action === "message" ? "ready" : "stopped");
+    renderSessions();
     setStatus(decision.action === "message"
       ? `${project} autopilot decided: ${decision.kind || "message"}`
       : `Autopilot stopped: ${decision.reason || "no next action"}`);

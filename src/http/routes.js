@@ -11,6 +11,7 @@ import {
   listSessions,
   loadSession,
   saveSession,
+  updateSessionForCwd,
 } from "../domain/sessions.js";
 import { listPrompts, resetPrompts, savePrompts } from "../domain/prompts.js";
 import { emitHookEvent, listHookEvents } from "../domain/hooks.js";
@@ -19,6 +20,7 @@ import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
 import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
+import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
 import {
   connectionStatus,
   disconnectConnection,
@@ -33,6 +35,7 @@ import { runSupervisor } from "../supervisors/runner.js";
 import { readBody, sendJson, writeStreamEvent } from "./response.js";
 
 const activeRuns = new Map();
+const activeAutopilotRuns = new Map();
 const eventClients = new Set();
 
 function sendEventClient(client, event) {
@@ -209,6 +212,42 @@ async function rememberAutopilotDecision(session, decision) {
   } catch (error) {
     console.error("autopilot memory failed:", error.message || error);
   }
+}
+
+async function saveAutopilotDecision(session, decision) {
+  return updateSessionForCwd(session.cwd, (fresh) => {
+    appendAutopilotHistory(fresh, decision);
+    if (decision.action === "message") {
+      if (fresh.autopilotEnabled) {
+        fresh.autopilotState = transitionWorkflowStatus(
+          fresh.autopilotState,
+          "completed",
+          decision.reason || decision.kind || "",
+        );
+      }
+      return fresh;
+    }
+    fresh.autopilotEnabled = false;
+    fresh.autopilotState = transitionWorkflowStatus(
+      fresh.autopilotState,
+      "stopped",
+      decision.reason || decision.kind || "",
+    );
+    return fresh;
+  });
+}
+
+async function saveAutopilotFailure(session, error) {
+  return updateSessionForCwd(session.cwd, (fresh) => {
+    if (!fresh.autopilotEnabled) return fresh;
+    fresh.autopilotEnabled = false;
+    fresh.autopilotState = transitionWorkflowStatus(
+      fresh.autopilotState,
+      "failed",
+      error.message || String(error),
+    );
+    return fresh;
+  });
 }
 
 function memoryFilesForCwd(cwd) {
@@ -572,6 +611,14 @@ export async function handleApi(req, res, url) {
   if (sessionMatch && req.method === "PATCH") {
     const session = applySessionPatch(await loadSession(sessionMatch[1]), await readBody(req), { allowIdentityChange: false });
     await saveSession(session);
+    broadcastRunEvent(session.id, "", {
+      type: "autopilot",
+      phase: "state",
+      project: session.cwd,
+      supervisor: session.supervisor,
+      session,
+      at: new Date().toISOString(),
+    });
     return sendJson(res, 200, { session });
   }
   const stopMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/stop$/);
@@ -587,18 +634,25 @@ export async function handleApi(req, res, url) {
     if (activeRuns.has(autopilotMatch[1])) {
       throw Object.assign(new Error("Autopilot waits for the current model run to finish"), { status: 409 });
     }
+    if (activeAutopilotRuns.has(autopilotMatch[1])) {
+      throw Object.assign(new Error("Autopilot decision is already running"), { status: 409 });
+    }
     const session = await loadSession(autopilotMatch[1]);
+    if (!workflowCanRun(session.autopilotState, session.autopilotEnabled)) {
+      throw Object.assign(new Error(`Autopilot is ${session.autopilotState?.state || "paused"}`), { status: 409 });
+    }
+    activeAutopilotRuns.set(session.id, true);
     broadcastRunEvent(session.id, "", {
       type: "autopilot",
       phase: "thinking",
       project: session.cwd,
       supervisor: session.supervisor,
+      session,
       at: new Date().toISOString(),
     });
     try {
       const decision = await decideAutopilotNext(session);
-      appendAutopilotHistory(session, decision);
-      await saveSession(session);
+      const saved = await saveAutopilotDecision(session, decision);
       void rememberAutopilotDecision(session, decision);
       emitHookEvent({
         type: "autopilot.decision",
@@ -611,23 +665,30 @@ export async function handleApi(req, res, url) {
       broadcastRunEvent(session.id, "", {
         type: "autopilot",
         phase: "decision",
-        project: session.cwd,
-        supervisor: session.supervisor,
+        project: saved.cwd,
+        supervisor: saved.supervisor,
         decision,
-        session,
+        session: saved,
         at: new Date().toISOString(),
       });
-      return sendJson(res, 200, { decision });
+      return sendJson(res, 200, { decision, session: saved });
     } catch (error) {
+      const saved = await saveAutopilotFailure(session, error).catch((saveError) => {
+        console.error("autopilot state save failed:", saveError.message || saveError);
+        return session;
+      });
       broadcastRunEvent(session.id, "", {
         type: "autopilot",
         phase: "error",
-        project: session.cwd,
-        supervisor: session.supervisor,
+        project: saved.cwd,
+        supervisor: saved.supervisor,
         error: error.message || String(error),
+        session: saved,
         at: new Date().toISOString(),
       });
       throw error;
+    } finally {
+      activeAutopilotRuns.delete(session.id);
     }
   }
 

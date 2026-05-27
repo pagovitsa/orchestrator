@@ -4,6 +4,7 @@ import path from "node:path";
 import { runtime, supervisors } from "../config/env.js";
 import { redactSensitiveStrings } from "./safety.js";
 import { requireScopedCwd, resolveCwd, listProjects } from "./workspace.js";
+import { normalizeWorkflowStatus, transitionWorkflowStatus } from "./workflow-state.js";
 
 const rememberDirName = ".remember";
 const rememberFileName = "orchestrator-chat.json";
@@ -19,6 +20,21 @@ export function projectLabel(cwd = ".") {
 
 export function rememberPathForCwd(cwd = ".") {
   return path.join(resolveCwd(cwd), rememberDirName, rememberFileName);
+}
+
+async function writeRememberSession(cwd, saved, targetSession = null) {
+  const filePath = rememberPathForCwd(cwd);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = path.join(path.dirname(filePath), `${path.basename(filePath)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tempPath, JSON.stringify(saved, null, 2), "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+  if (targetSession) Object.assign(targetSession, saved);
+  return saved;
 }
 
 async function readRememberFile(cwd) {
@@ -44,6 +60,17 @@ async function withSessionLock(cwd, task) {
 
 function normalizeProjectSession(session, cwd) {
   const project = projectLabel(cwd);
+  const autopilotEnabled = session.autopilotEnabled === true;
+  let autopilotState = normalizeWorkflowStatus(
+    session.autopilotState,
+    autopilotEnabled ? "created" : "paused",
+  );
+  if (autopilotState.state === "running") {
+    autopilotState = normalizeWorkflowStatus({
+      state: autopilotEnabled ? "created" : "paused",
+      reason: "Cleared stale running state",
+    });
+  }
   return {
     id: /^[a-f0-9-]{36}$/.test(session.id || "") ? session.id : randomUUID(),
     schemaVersion: 1,
@@ -55,6 +82,8 @@ function normalizeProjectSession(session, cwd) {
     updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
     messages: Array.isArray(session.messages) ? session.messages.map((message) => redactSensitiveStrings(message)) : [],
     autopilotHistory: Array.isArray(session.autopilotHistory) ? session.autopilotHistory.slice(-50) : [],
+    autopilotEnabled,
+    autopilotState,
   };
 }
 
@@ -89,18 +118,31 @@ export async function saveSession(session) {
     saved.project = projectLabel(cwd);
     saved.title = saved.project;
 
-    const filePath = rememberPathForCwd(cwd);
-    await mkdir(path.dirname(filePath), { recursive: true });
-    const tempPath = path.join(path.dirname(filePath), `${path.basename(filePath)}.${randomUUID()}.tmp`);
-    try {
-      await writeFile(tempPath, JSON.stringify(saved, null, 2), "utf8");
-      await rename(tempPath, filePath);
-    } catch (error) {
-      await rm(tempPath, { force: true }).catch(() => {});
-      throw error;
-    }
-    Object.assign(session, saved);
+    await writeRememberSession(cwd, saved, session);
     return session;
+  });
+}
+
+export async function updateSessionForCwd(cwd, updater) {
+  return withSessionLock(cwd, async () => {
+    const existing = await readRememberFile(cwd);
+    if (!existing) throw Object.assign(new Error("Project conversation not found"), { status: 404 });
+    const updated = await updater(existing) || existing;
+    if (!Array.isArray(updated.messages)) {
+      throw Object.assign(new Error("session.messages must be an array"), { status: 400 });
+    }
+    const normalized = normalizeProjectSession(updated, cwd);
+    const saved = {
+      ...normalized,
+      id: existing.id,
+      createdAt: existing.createdAt || normalized.createdAt,
+      messages: normalized.messages,
+      updatedAt: new Date().toISOString(),
+    };
+    saved.project = projectLabel(cwd);
+    saved.title = saved.project;
+    await writeRememberSession(cwd, saved, updated);
+    return updated;
   });
 }
 
@@ -120,6 +162,8 @@ export async function listSessions() {
         updatedAt: session.updatedAt,
         messageCount: session.messages?.length || 0,
         rememberPath: rememberPathForCwd(session.cwd),
+        autopilotEnabled: session.autopilotEnabled === true,
+        autopilotState: session.autopilotState,
       });
     } catch {
       // Ignore malformed remember files so one project cannot break the UI.
@@ -151,6 +195,8 @@ export async function createSession(body = {}) {
     createdAt: now,
     updatedAt: now,
     messages: [],
+    autopilotEnabled: false,
+    autopilotState: { state: "created", updatedAt: now, reason: "" },
   };
 
   session.supervisor = supervisor;
@@ -186,6 +232,15 @@ export function applySessionPatch(session, body = {}, options = {}) {
     session.cwd = nextCwd;
     session.project = projectLabel(nextCwd);
     session.title = session.project;
+  }
+  if (body.autopilotEnabled !== undefined) {
+    const enabled = body.autopilotEnabled === true;
+    session.autopilotEnabled = enabled;
+    session.autopilotState = transitionWorkflowStatus(
+      session.autopilotState,
+      enabled ? "created" : "paused",
+      enabled ? "Autopilot enabled" : "Autopilot paused",
+    );
   }
   return session;
 }

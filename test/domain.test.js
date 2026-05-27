@@ -11,6 +11,12 @@ import {
   parseAutopilotDecision,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
+import {
+  normalizeWorkflowStatus,
+  transitionWorkflowStatus,
+  workflowCanRun,
+  workflowStateLabel,
+} from "../src/domain/workflow-state.js";
 import { paths, runtime } from "../src/config/env.js";
 import {
   extractUserMemoriesFromText,
@@ -416,6 +422,73 @@ test("autopilot history and memory args are bounded", () => {
   const memory = autopilotMemoryArgs({ action: "message", kind: "continue", reason: "phase done" });
   assert.equal(memory.namespace, "autopilot");
   assert.deepEqual(memory.tags, ["autopilot", "continue"]);
+});
+
+test("autopilot workflow state normalizes and gates runnable states", () => {
+  const created = normalizeWorkflowStatus({ state: "CREATED" });
+  assert.equal(created.state, "created");
+  assert.equal(workflowCanRun(created, true), true);
+  assert.equal(workflowCanRun({ state: "paused" }, true), false);
+  assert.equal(workflowCanRun({ state: "completed" }, true), true);
+  assert.equal(workflowStateLabel({ state: "completed" }), "ready");
+});
+
+test("autopilot workflow state enforces allowed transitions", () => {
+  const running = transitionWorkflowStatus({ state: "created" }, "running", "deciding");
+  assert.equal(running.state, "running");
+  assert.equal(running.reason, "deciding");
+  assert.equal(transitionWorkflowStatus(running, "completed").state, "completed");
+  assert.equal(transitionWorkflowStatus({ state: "created" }, "completed").state, "completed");
+  assert.equal(transitionWorkflowStatus({ state: "created" }, "failed").state, "failed");
+  assert.throws(
+    () => transitionWorkflowStatus({ state: "paused" }, "completed"),
+    /Invalid workflow transition/,
+  );
+});
+
+test("applySessionPatch updates persisted autopilot workflow state", () => {
+  const session = {
+    id: "77777777-7777-4777-8777-777777777777",
+    supervisor: "codex",
+    cwd: "project-a",
+    messages: [],
+    autopilotEnabled: false,
+    autopilotState: { state: "paused" },
+  };
+
+  applySessionPatch(session, { autopilotEnabled: true }, { allowIdentityChange: false });
+  assert.equal(session.autopilotEnabled, true);
+  assert.equal(session.autopilotState.state, "created");
+  assert.equal(workflowCanRun(session.autopilotState, session.autopilotEnabled), true);
+
+  applySessionPatch(session, { autopilotEnabled: false }, { allowIdentityChange: false });
+  assert.equal(session.autopilotEnabled, false);
+  assert.equal(session.autopilotState.state, "paused");
+});
+
+test("saveSession clears stale autopilot running state on load", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const session = {
+      id: "88888888-8888-4888-8888-888888888888",
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [],
+      autopilotEnabled: true,
+      autopilotState: { state: "running" },
+    };
+
+    await saveSession(session);
+    const loaded = await loadSession(session.id);
+    assert.equal(loaded.autopilotEnabled, true);
+    assert.equal(loaded.autopilotState.state, "created");
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("hook events are normalized for best-effort logging", () => {

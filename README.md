@@ -132,6 +132,10 @@ Set `ORCH_BUDGET_WARNING_USD` to show a budget warning once lifetime reported do
 
 The terminal modal includes a chronological run timeline for supervisor, command, tool, peer, memory, hook, and autopilot events. Timeline cards show status, timestamp, duration when known, redacted metadata, and compact details so failed or slow steps can be inspected without digging through raw terminal output.
 
+### Autopilot Workflow State
+
+Autopilot enablement is stored with each project chat instead of only in browser storage. The workflow state uses `created`, `running`, `stopped`, `completed`, `failed`, and `paused`: `running` is used while Autopilot is deciding, `completed` means the last decision produced the next message and can continue, and `paused`/`stopped`/`failed` block further automatic turns until Autopilot is enabled again. The sidebar shows the current Autopilot indicator for enabled projects.
+
 ## Credentials
 
 The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, and the DeepSeek model registry. It does not bake account tokens or API keys.

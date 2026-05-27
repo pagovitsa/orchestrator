@@ -63,6 +63,17 @@ export function applyTerminalFlags(target, draft) {
   if (draft.stopped) target.stopped = true;
 }
 
+export function autopilotStateLabel(autopilotState = {}, enabled = false) {
+  const state = String(autopilotState?.state || (enabled ? "created" : "paused")).toLowerCase();
+  if (!enabled && state !== "running") return "paused";
+  if (state === "created" || state === "completed") return "ready";
+  if (state === "running") return "running";
+  if (state === "stopped") return "stopped";
+  if (state === "failed") return "failed";
+  if (state === "paused") return "paused";
+  return enabled ? "ready" : "paused";
+}
+
 export function createSessionSendGate() {
   const pending = new Set();
   return {
