@@ -2737,6 +2737,34 @@ function finishLiveRun(event) {
   refreshUsage().catch((error) => setStatus(`Usage refresh error: ${error.message}`));
 }
 
+function handleLiveAutopilot(event) {
+  const project = event.project || state.currentSession?.cwd || "project";
+  if (event.phase === "thinking") {
+    setStatus(`${project} autopilot thinking...`);
+    return;
+  }
+  if (event.phase === "error") {
+    setStatus(`Autopilot error: ${event.error || "failed"}`);
+    return;
+  }
+  if (event.session) {
+    const session = cloneLiveSession(event.session);
+    upsertSessionSummary(session);
+    if (isViewing(event.sessionId)) {
+      state.currentSession = session;
+      renderMessages();
+      syncComposerState();
+    }
+    renderSessions();
+  }
+  if (event.phase === "decision") {
+    const decision = event.decision || {};
+    setStatus(decision.action === "message"
+      ? `${project} autopilot decided: ${decision.kind || "message"}`
+      : `Autopilot stopped: ${decision.reason || "no next action"}`);
+  }
+}
+
 function applyLiveEvent(event) {
   if (!event?.type || !event.sessionId) return;
   if (event.clientId === state.clientId && state.runs.has(event.sessionId)) return;
@@ -2744,6 +2772,7 @@ function applyLiveEvent(event) {
   else if (event.type === "chunk") handleLiveChunk(event);
   else if (event.type === "trace") handleLiveTrace(event);
   else if (event.type === "task") handleLiveTask(event);
+  else if (event.type === "autopilot") handleLiveAutopilot(event);
   else if (event.type === "done" || event.type === "error" || event.type === "stopped") finishLiveRun(event);
 }
 

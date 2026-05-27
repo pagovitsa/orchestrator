@@ -20,6 +20,7 @@ import {
 import { mergeTimelineEvent } from "../src/domain/run-timeline.js";
 import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
 import { mcpToolCatalog } from "../src/supervisors/mcp.js";
+import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
   calculateBalanceUsage,
   parseClaudeUsagePayload,
@@ -178,6 +179,22 @@ test("run timeline events merge updates by id", () => {
   assert.equal(merged[0].status, "completed");
   assert.equal(merged[0].detail, "[cwd] /workspace/app");
   assert.equal(merged[0].durationMs, 1234);
+});
+
+test("formatMemoryContext injects namespaced memories for supervisors", () => {
+  const text = formatMemoryContext({
+    user: {
+      summary: "Prefers concise answers",
+      memories: [{ namespace: "profile", kind: "fact", text: "The user's name is Kostas", tags: ["identity"] }],
+    },
+    project: {
+      memories: [{ namespace: "solutions", kind: "decision", text: "Use run timeline cards" }],
+    },
+  });
+
+  assert.match(text, /DURABLE MEMORY/);
+  assert.match(text, /user\/profile\/fact/);
+  assert.match(text, /project\/solutions\/decision/);
 });
 
 test("mcpToolCatalog groups peers and shared tools", () => {

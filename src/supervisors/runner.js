@@ -89,6 +89,59 @@ function peerRoutingForPrompt(session, options = {}) {
   return peerRoutingText(session.supervisor);
 }
 
+function formatMemoryItems(scope, payload = {}) {
+  const lines = [];
+  if (payload.summary) lines.push(`- ${scope} summary: ${payload.summary}`);
+  for (const memory of payload.memories || []) {
+    const namespace = memory.namespace || "general";
+    const tags = memory.tags?.length ? ` [${memory.tags.join(", ")}]` : "";
+    lines.push(`- ${scope}/${namespace}/${memory.kind || "note"}${tags}: ${memory.text}`);
+  }
+  return lines;
+}
+
+export function formatMemoryContext(memory = {}) {
+  const lines = [
+    ...formatMemoryItems("user", memory.user),
+    ...formatMemoryItems("project", memory.project),
+  ].filter(Boolean);
+  return lines.length
+    ? `DURABLE MEMORY:\n${lines.slice(0, 24).join("\n")}`
+    : "DURABLE MEMORY:\n(no stored memories found)";
+}
+
+function uniqueMemories(memories = []) {
+  const seen = new Set();
+  return memories.filter((memory) => {
+    const key = memory.id || `${memory.scope}:${memory.namespace}:${memory.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function loadMemoryContext(session, query = "") {
+  try {
+    const files = memoryFilesForSession(session);
+    const all = await readMemory(files, { scope: "all", limit: 10 });
+    const queried = String(query || "").trim()
+      ? await readMemory(files, { scope: "all", query, limit: 6 })
+      : {};
+    return formatMemoryContext({
+      user: {
+        summary: all.user?.summary || queried.user?.summary || "",
+        memories: uniqueMemories([...(queried.user?.memories || []), ...(all.user?.memories || [])]),
+      },
+      project: {
+        summary: all.project?.summary || queried.project?.summary || "",
+        memories: uniqueMemories([...(queried.project?.memories || []), ...(all.project?.memories || [])]),
+      },
+    });
+  } catch (error) {
+    return `DURABLE MEMORY:\n(memory unavailable: ${compactTraceText(error.message || String(error), 220)})`;
+  }
+}
+
 function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
   const history = compactHistory(session.messages || []);
   const sections = [];
@@ -100,6 +153,8 @@ function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
     "",
     "PEER MODEL ROUTING:",
     peerRoutingForPrompt(session, options),
+    "",
+    options.memoryContext || "DURABLE MEMORY:\n(not loaded)",
     "",
     history ? `SESSION HISTORY:\n${history}\n` : "SESSION HISTORY:\n(empty)\n",
     "NEW USER MESSAGE:",
@@ -622,6 +677,8 @@ async function callDeepSeek(session, userContent, systemPrompt, options = {}) {
         "",
         runtimeContextText(session, options),
         "",
+        options.memoryContext || await loadMemoryContext(session, userContent),
+        "",
         `PEER MODEL ROUTING:\n${peerRoutingText("deepseek")}`,
       ].filter(Boolean).join("\n"),
     },
@@ -923,6 +980,7 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
     ...parentOptions,
     enablePeerMcp: false,
     includeSystemPrompt: peer !== "claude",
+    memoryContext: parentOptions.memoryContext || await loadMemoryContext(peerSession, prompt),
   });
   const options = {
     enablePeerMcp: false,
@@ -1012,6 +1070,7 @@ async function readDeepSeekStream(body, options = {}) {
 export async function runSupervisor(session, userContent, options = {}) {
   const supervisor = supervisors[session.supervisor] ? session.supervisor : runtime.defaultSupervisor;
   const runSession = { ...session, supervisor };
+  const memoryContext = options.memoryContext || await loadMemoryContext(runSession, userContent);
   const taskId = nextTimelineId("supervisor");
   emitTimeline(options, {
     id: taskId,
@@ -1025,10 +1084,11 @@ export async function runSupervisor(session, userContent, options = {}) {
     const systemPrompt = await loadPrompt(supervisor);
     let answer;
     if (supervisor === "deepseek") {
-      answer = await callDeepSeek(runSession, userContent, systemPrompt, options);
+      answer = await callDeepSeek(runSession, userContent, systemPrompt, { ...options, memoryContext });
     } else {
       const prompt = buildCliPrompt(runSession, userContent, systemPrompt, {
         ...options,
+        memoryContext,
         includeSystemPrompt: supervisor !== "claude",
       });
       if (supervisor === "claude") answer = await callClaude(runSession, prompt, { ...options, systemPrompt });

@@ -13,8 +13,8 @@ import {
   saveSession,
 } from "../domain/sessions.js";
 import { listPrompts, resetPrompts, savePrompts } from "../domain/prompts.js";
-import { emitHookEvent } from "../domain/hooks.js";
-import { extractUserMemoriesFromText, rememberMemory } from "../domain/memory.js";
+import { emitHookEvent, listHookEvents } from "../domain/hooks.js";
+import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../domain/memory.js";
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
@@ -203,6 +203,13 @@ async function rememberAutopilotDecision(session, decision) {
   } catch (error) {
     console.error("autopilot memory failed:", error.message || error);
   }
+}
+
+function memoryFilesForCwd(cwd) {
+  return {
+    globalFile: path.join(paths.dataDir, "orch-memory", "user.json"),
+    projectFile: path.join(requireScopedCwd(cwd), ".remember", "orchestrator-memory.json"),
+  };
 }
 
 async function appendUserMessage(session, body) {
@@ -568,19 +575,69 @@ export async function handleApi(req, res, url) {
       throw Object.assign(new Error("Autopilot waits for the current model run to finish"), { status: 409 });
     }
     const session = await loadSession(autopilotMatch[1]);
-    const decision = await decideAutopilotNext(session);
-    appendAutopilotHistory(session, decision);
-    await saveSession(session);
-    void rememberAutopilotDecision(session, decision);
-    emitHookEvent({
-      type: "autopilot.decision",
-      sessionId: session.id,
+    broadcastRunEvent(session.id, "", {
+      type: "autopilot",
+      phase: "thinking",
       project: session.cwd,
       supervisor: session.supervisor,
-      status: decision.action,
-      detail: decision.reason || decision.kind || "",
+      at: new Date().toISOString(),
     });
-    return sendJson(res, 200, { decision });
+    try {
+      const decision = await decideAutopilotNext(session);
+      appendAutopilotHistory(session, decision);
+      await saveSession(session);
+      void rememberAutopilotDecision(session, decision);
+      emitHookEvent({
+        type: "autopilot.decision",
+        sessionId: session.id,
+        project: session.cwd,
+        supervisor: session.supervisor,
+        status: decision.action,
+        detail: decision.reason || decision.kind || "",
+      });
+      broadcastRunEvent(session.id, "", {
+        type: "autopilot",
+        phase: "decision",
+        project: session.cwd,
+        supervisor: session.supervisor,
+        decision,
+        session,
+        at: new Date().toISOString(),
+      });
+      return sendJson(res, 200, { decision });
+    } catch (error) {
+      broadcastRunEvent(session.id, "", {
+        type: "autopilot",
+        phase: "error",
+        project: session.cwd,
+        supervisor: session.supervisor,
+        error: error.message || String(error),
+        at: new Date().toISOString(),
+      });
+      throw error;
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/hooks/events") {
+    return sendJson(res, 200, {
+      events: await listHookEvents({
+        limit: url.searchParams.get("limit") || 100,
+        project: url.searchParams.get("project") || "",
+        sessionId: url.searchParams.get("sessionId") || "",
+      }),
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/memory") {
+    const cwd = url.searchParams.get("cwd") || ".";
+    return sendJson(res, 200, {
+      memory: await readMemory(memoryFilesForCwd(cwd), {
+        scope: url.searchParams.get("scope") || "all",
+        namespace: url.searchParams.get("namespace") || "all",
+        query: url.searchParams.get("query") || "",
+        limit: url.searchParams.get("limit") || 25,
+      }),
+    });
   }
 
   const streamMessageMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/messages\/stream$/);
