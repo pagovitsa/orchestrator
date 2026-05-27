@@ -4,6 +4,7 @@ import { paths, runtime } from "./config/env.js";
 import { authorizeRequest, startupAuthError } from "./http/auth.js";
 import { ensurePromptStore } from "./domain/prompts.js";
 import { ensureSessionStore } from "./domain/sessions.js";
+import { startUsagePolling } from "./domain/usage.js";
 import { handleApi } from "./http/routes.js";
 import { sendJson } from "./http/response.js";
 import { serveStatic } from "./http/static.js";
@@ -46,6 +47,7 @@ server.listen(runtime.port, runtime.listenHost, () => {
   console.log(`orch-ui listening on ${runtime.listenHost}:${runtime.port}`);
   console.log(`workspace: ${paths.workspaceRoot}`);
   console.log(`default supervisor: ${runtime.defaultSupervisor}`);
+  startUsagePolling();
   if (!runtime.authPassword) {
     console.warn(
       "[orch-ui] WARNING: no ORCH_AUTH_PASSWORD set. The server has no login; only expose it on " +

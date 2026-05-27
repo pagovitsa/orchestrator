@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
 import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
+import { parseUsageProbeOutput } from "../src/domain/usage.js";
 import { normalizeProjectName } from "../src/domain/workspace.js";
 
 test("normalizeProjectName accepts a single folder name", () => {
@@ -44,4 +45,25 @@ test("applySessionPatch keeps supervisor and workspace fixed when locked", () =>
 test("projectLabel returns project-oriented history labels", () => {
   assert.equal(projectLabel("test"), "test");
   assert.equal(projectLabel("."), "workspace");
+});
+
+test("parseUsageProbeOutput extracts numeric status without secrets", () => {
+  const parsed = parseUsageProbeOutput(
+    "Current session usage: 32%\nWeekly limit usage: 73%\nTokens used: 12,345\nAuthorization: Bearer secret-token",
+  );
+
+  assert.equal(parsed.percent, 73);
+  assert.equal(parsed.currentPercent, 32);
+  assert.equal(parsed.weeklyPercent, 73);
+  assert.equal(parsed.tokens, 12345);
+  assert.match(parsed.output, /Authorization: \.\.\.redacted/);
+  assert.doesNotMatch(parsed.output, /secret-token/);
+});
+
+test("parseUsageProbeOutput keeps missing percentages unknown", () => {
+  const parsed = parseUsageProbeOutput("Signed in with Google /auth\nPlan: Pro");
+
+  assert.equal(parsed.percent, null);
+  assert.equal(parsed.currentPercent, null);
+  assert.equal(parsed.weeklyPercent, null);
 });

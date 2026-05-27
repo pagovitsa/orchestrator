@@ -352,15 +352,11 @@ function renderModelStatus(connections = state.connections) {
     chip.title = usageTitle(connection, usage);
     chip.setAttribute("aria-label", chip.title);
 
-    const icon = document.createElement("span");
-    icon.className = "model-chip-icon";
-    icon.appendChild(createModelIcon(connection.id));
-
     const dot = document.createElement("span");
     dot.className = "model-chip-dot";
     dot.setAttribute("aria-hidden", "true");
 
-    chip.append(icon, createUsageBars(connection, usage), dot);
+    chip.append(createUsageRing(connection, usage), createUsagePopover(usage), dot);
     chip.addEventListener("click", openConnectModal);
     el.status.appendChild(chip);
   }
@@ -373,43 +369,105 @@ function usageForModel(id) {
 function usageTitle(connection, usage) {
   const connected = connection.connected ? "on" : "off";
   if (!usage) return `${connection.label}: ${connected} - usage unknown`;
-  const source = usage.mode === "provider" ? `${usage.percent || 0}% real provider limit` : "real limit unknown";
+  const source = usageSourceText(usage);
   const parts = [
     `${connection.label}: ${connected}`,
     source,
     `${usage.runsToday || 0} runs today`,
   ];
   if (usage.active) parts.push("running now");
+  if (usage.currentPercent !== null && usage.currentPercent !== undefined) parts.push(`current ${usage.currentPercent}%`);
+  if (usage.weeklyPercent !== null && usage.weeklyPercent !== undefined) parts.push(`week ${usage.weeklyPercent}%`);
   if (usage.lastTokens) parts.push(`${usage.lastTokens.toLocaleString()} tokens last seen`);
   if (usage.lastCostUsd !== null && usage.lastCostUsd !== undefined) parts.push(`last cost $${Number(usage.lastCostUsd).toFixed(4)}`);
   if (usage.lastKnownLabel) parts.push(usage.lastKnownLabel);
+  if (usage.lastProbeAt) parts.push(`checked ${new Date(usage.lastProbeAt).toLocaleString()}`);
+  if (usage.lastProbeError) parts.push(`probe error: ${usage.lastProbeError}`);
+  if (usage.lastProbeOutput && !usage.lastProbeError) parts.push(usage.lastProbeOutput.split("\n").slice(0, 2).join(" / "));
   return parts.join(" - ");
 }
 
-function usageLevel(connection, usage) {
-  const percent = Math.max(0, Math.min(100, Number(usage?.percent || 0)));
-  if (usage?.mode === "provider") return Math.ceil(percent / 25);
-  return usage?.active && connection.connected ? 4 : 0;
+function usageSourceText(usage) {
+  if (usage.mode === "provider") return `${usage.percent || 0}% real provider limit`;
+  if (usage.mode === "balance") {
+    const balance = usage.balanceLabel ? ` (${usage.balanceLabel})` : "";
+    return `DeepSeek balance ${usage.balanceAvailable ? "available" : "unavailable"}${balance}`;
+  }
+  return usage.lastProbeAt ? "real status checked, no numeric limit returned" : "real limit unknown";
 }
 
-function createUsageBars(connection, usage) {
-  const level = usageLevel(connection, usage);
-  const bars = document.createElement("span");
-  bars.className = `usage-bars ${connection.connected ? "connected" : "disconnected"} ${usage?.active ? "active" : ""} ${usage?.mode === "provider" ? "provider" : "unknown"}`;
-  bars.setAttribute("aria-hidden", "true");
-  for (let index = 1; index <= 4; index += 1) {
-    const bar = document.createElement("span");
-    bar.className = index <= level ? "filled" : "";
-    bars.appendChild(bar);
-  }
-  return bars;
+function usageDisplayPercent(connection, usage) {
+  const percent = Math.max(0, Math.min(100, Number(usage?.percent || 0)));
+  if (usage?.mode === "provider") return percent;
+  if (usage?.mode === "balance") return usage.balanceAvailable ? 100 : 0;
+  return usage?.active && connection.connected ? 100 : 0;
+}
+
+function usageColor(percent, usage) {
+  if (usage?.active) return "#f4f5f2";
+  if (usage?.mode === "balance") return usage.balanceAvailable ? "#79d69e" : "var(--danger)";
+  if (percent >= 90) return "var(--danger)";
+  if (percent >= 70) return "#ff9f1c";
+  if (percent >= 50) return "#3384ff";
+  return "var(--accent)";
+}
+
+function createUsageRing(connection, usage) {
+  const percent = usageDisplayPercent(connection, usage);
+  const ring = document.createElement("span");
+  ring.className = `usage-ring ${usage?.mode || "unknown"} ${usage?.active ? "active" : ""}`;
+  ring.style.setProperty("--usage-deg", `${percent * 3.6}deg`);
+  ring.style.setProperty("--usage-color", usageColor(percent, usage));
+  ring.setAttribute("aria-hidden", "true");
+
+  const icon = document.createElement("span");
+  icon.className = "model-chip-icon";
+  icon.appendChild(createModelIcon(connection.id));
+  ring.appendChild(icon);
+  return ring;
+}
+
+function createUsagePopover(usage) {
+  const popover = document.createElement("span");
+  popover.className = "usage-popover";
+  popover.setAttribute("aria-hidden", "true");
+  const current = usage?.currentPercent ?? (usage?.mode === "provider" ? usage.percent : null);
+  popover.append(
+    createUsageBarRow("Current", current),
+    createUsageBarRow("Week", usage?.weeklyPercent),
+  );
+  return popover;
+}
+
+function createUsageBarRow(label, value) {
+  const percent = value === null || value === undefined ? null : Math.max(0, Math.min(100, Number(value)));
+  const row = document.createElement("span");
+  row.className = "usage-bar-row";
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "usage-bar-label";
+  labelEl.textContent = label;
+
+  const track = document.createElement("span");
+  track.className = "usage-bar-track";
+  const fill = document.createElement("span");
+  fill.className = "usage-bar-fill";
+  fill.style.width = percent === null || !Number.isFinite(percent) ? "0%" : `${percent}%`;
+  track.appendChild(fill);
+
+  const valueEl = document.createElement("span");
+  valueEl.className = "usage-bar-value";
+  valueEl.textContent = percent === null || !Number.isFinite(percent) ? "--" : `${Math.round(percent)}%`;
+
+  row.append(labelEl, track, valueEl);
+  return row;
 }
 
 function markLocalUsageActive(supervisor) {
   if (!supervisor) return;
   let usage = state.usage.find((item) => item.id === supervisor);
   if (!usage) {
-    usage = { id: supervisor, percent: 0, mode: "observed", runsToday: 0, active: false };
+    usage = { id: supervisor, percent: null, mode: "unknown", runsToday: 0, active: false };
     state.usage.push(usage);
   }
   usage.active = true;
