@@ -86,7 +86,9 @@ http://127.0.0.1:5173
 http://<host-lan-ip>:5173
 ```
 
-If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
+If another machine still cannot connect, check the host firewall for the selected preview port and confirm Docker published the preview range on a non-loopback interface. The UI and preview published ports default to loopback for safety. Use `ORCH_BIND_HOST=0.0.0.0` for LAN UI access with `ORCH_AUTH_PASSWORD` set, and use `ORCH_PREVIEW_BIND_HOST=0.0.0.0` only when the unauthenticated preview ports are acceptable on your LAN/Tailscale network.
+
+Because these are Docker port-publish settings, recreate the compose container after changing them.
 
 The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. `.orchestration/` is runtime-only and ignored by git. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews. When a chat is opened through Tailscale/LAN, the UI passes the current browser host into the supervisor so `orch-preview` can print that reachable host instead of only `localhost`.
 
