@@ -47,6 +47,8 @@ http://<host-lan-ip>:8787
 
 Set `ORCH_AUTH_PASSWORD` before exposing the UI beyond loopback. The server refuses non-loopback or host-network startup without a password. Preview ports are not auth-protected, so keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` for local-only previews or set it to `0.0.0.0` only when the selected preview ports are acceptable on your LAN/Tailscale network.
 
+The app also scans obvious credential-shaped text before persistence. Memory writes refuse secrets, text attachments with API keys/tokens are rejected before upload storage, and chat/session strings are redacted before they are saved.
+
 ## Host Network Mode
 
 On Linux you can run `orch-ui` on the host network instead of Docker bridge/port publishing:
@@ -119,6 +121,12 @@ CLI supervisors also receive the local `memory` MCP server when `ORCH_ENABLED_TO
 - project memory: `<project>/.remember/orchestrator-memory.json`
 
 Examples: if the user says "my name is Kostas", the active supervisor should store that with `memory_remember` using `scope: "user"`, so future projects can recall it. Project-specific decisions and constraints use `scope: "project"`. The memory layer refuses obvious secrets such as passwords, API keys, and tokens.
+
+### Usage and Budget Warnings
+
+Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage probes, last-seen tokens/cost, daily totals, and lifetime totals per supervisor. Token/cost signals are treated as cumulative within a run and accumulated by delta so repeated final signals do not double-count.
+
+Set `ORCH_BUDGET_WARNING_USD` to show a budget warning once lifetime reported dollar cost reaches that amount. `ORCH_BUDGET_USD` is accepted as a legacy alias. This is a warning only; it does not stop runs. Models that do not report dollar cost still show runs/tokens/provider quota but do not contribute dollar spend unless a provider balance probe exposes spend.
 
 ## Credentials
 

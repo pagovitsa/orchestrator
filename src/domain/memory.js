@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { assertNoSensitiveText, containsSensitiveText } from "./safety.js";
 
 const validScopes = new Set(["user", "project"]);
 const validKinds = new Set(["fact", "preference", "decision", "summary", "note"]);
 export const memoryNamespaces = ["general", "profile", "tasks", "solutions", "patterns", "feedback", "security", "autopilot"];
 const validNamespaces = new Set(memoryNamespaces);
-const secretPattern = /\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|bearer|password|passwd|secret|private[_ -]?key)\b/i;
 
 function nowIso() {
   return new Date().toISOString();
@@ -135,9 +135,7 @@ function validateFiles(files) {
 }
 
 function rejectSecretLikeText(text) {
-  if (secretPattern.test(text)) {
-    throw Object.assign(new Error("Refusing to store secrets, tokens, passwords, or keys in memory"), { status: 400 });
-  }
+  assertNoSensitiveText(text, "store");
 }
 
 function sortMemories(memories) {
@@ -188,7 +186,7 @@ export function extractUserMemoriesFromText(text) {
   for (const pattern of patterns) {
     const match = value.match(pattern);
     const name = cleanName(match?.[1] || "");
-    if (name && !secretPattern.test(name)) {
+    if (name && !containsSensitiveText(name)) {
       return [{
         scope: "user",
         kind: "fact",

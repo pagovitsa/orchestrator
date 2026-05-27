@@ -14,6 +14,7 @@ const state = {
   connectionOutputScroll: {},
   focusedConnectionInput: null,
   usage: [],
+  usageBudget: null,
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
@@ -752,11 +753,14 @@ function toggleSpeechMute() {
 function renderModelStatus(connections = state.connections) {
   el.status.innerHTML = "";
   el.status.removeAttribute("title");
+  if (state.usageBudget?.warning) {
+    el.status.setAttribute("title", `Budget warning: ${formatUsageMoney(state.usageBudget.totalCostUsd, "USD")} spent`);
+  }
   for (const connection of connections) {
     const usage = usageForModel(connection.id);
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = `model-chip ${connection.connected ? "on" : "off"}`;
+    chip.className = `model-chip ${connection.connected ? "on" : "off"} ${usage?.budgetWarning || state.usageBudget?.warning ? "budget-warning" : ""}`;
     chip.setAttribute("aria-label", usageTitle(connection, usage));
 
     const dot = document.createElement("span");
@@ -788,6 +792,9 @@ function usageTitle(connection, usage) {
   if (usage.sonnetWeeklyPercent !== null && usage.sonnetWeeklyPercent !== undefined) parts.push(`sonnet week ${usage.sonnetWeeklyPercent}%`);
   if (usage.lastTokens) parts.push(`${usage.lastTokens.toLocaleString()} tokens last seen`);
   if (usage.lastCostUsd !== null && usage.lastCostUsd !== undefined) parts.push(`last cost $${Number(usage.lastCostUsd).toFixed(4)}`);
+  if (usage.costTodayUsd) parts.push(`today cost $${Number(usage.costTodayUsd).toFixed(4)}`);
+  if (usage.totalCostUsd) parts.push(`total cost $${Number(usage.totalCostUsd).toFixed(4)}`);
+  if (usage.budgetWarning && usage.budgetWarningUsd) parts.push(`budget warning at $${Number(usage.budgetWarningUsd).toFixed(2)}`);
   if (usage.lastKnownLabel) parts.push(usage.lastKnownLabel);
   if (usage.lastProbeAt) parts.push(`checked ${formatDate(usage.lastProbeAt)}`);
   if (usage.lastProbeError) parts.push(`probe error: ${usage.lastProbeError}`);
@@ -860,6 +867,10 @@ function createUsagePopover(usage) {
   if (usage?.sonnetWeeklyPercent !== null && usage?.sonnetWeeklyPercent !== undefined) {
     rows.push(createUsageBarRow("Sonnet", usage.sonnetWeeklyPercent));
   }
+  if (usage?.costTodayUsd || usage?.totalCostUsd) {
+    rows.push(createUsageBarRow("Today", null, formatUsageMoney(usage.costTodayUsd, "USD") || "--"));
+    rows.push(createUsageBarRow("Total", null, formatUsageMoney(usage.totalCostUsd, "USD") || "--"));
+  }
   popover.append(...rows);
   return popover;
 }
@@ -900,7 +911,8 @@ function formatUsageMoney(value, currency = "") {
   const number = Number(value);
   if (!Number.isFinite(number)) return "";
   const prefix = currency ? `${currency} ` : "";
-  return `${prefix}${number.toFixed(2)}`;
+  const places = Math.abs(number) > 0 && Math.abs(number) < 1 ? 4 : 2;
+  return `${prefix}${number.toFixed(places)}`;
 }
 
 function markLocalUsageActive(supervisor, { countRun = true } = {}) {
@@ -957,6 +969,7 @@ async function refreshModelStatus() {
     ]);
     state.connections = connectionBody.connections || [];
     state.usage = usageBody.usage || [];
+    state.usageBudget = usageBody.budget || null;
     renderModelStatus();
     renderSupervisors();
     updateModalState();
@@ -970,6 +983,7 @@ async function refreshUsage() {
   try {
     const body = await api("/api/usage");
     state.usage = body.usage || [];
+    state.usageBudget = body.budget || null;
     renderModelStatus();
   } catch (error) {
     setStatus(`Usage status error: ${error.message}`);
@@ -1704,6 +1718,7 @@ function createMessageElement(message) {
   who.textContent = message.role === "assistant" ? (message.supervisor || "assistant") : "You";
   const stateLabel = messageStateLabel(message);
   if (stateLabel && stateLabel !== "live") who.textContent += ` (${stateLabel})`;
+  if (message.safetyRedacted) who.textContent += " (redacted)";
 
   const when = document.createElement("span");
   when.className = "message-time";

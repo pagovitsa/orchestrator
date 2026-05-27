@@ -71,6 +71,7 @@ export const runtime = {
   allowWorkspaceRoot: envFlag("ORCH_ALLOW_WORKSPACE_ROOT", false),
   timeoutMs: envNumber("ORCH_TIMEOUT_MS", 10800000), // 3h; 0 = no auto-timeout (stop manually)
   usagePollIntervalMs: envNumber("ORCH_USAGE_POLL_INTERVAL_MS", 300000), // 5m; 0 = disabled
+  budgetWarningUsd: envNumber("ORCH_BUDGET_WARNING_USD", envNumber("ORCH_BUDGET_USD", 0)),
   maxUploadBytes: envNumber("ORCH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),
   maxInlineAttachmentChars: envNumber("ORCH_UPLOAD_INLINE_CHARS", 60000),
   networkMode: process.env.ORCH_NETWORK_MODE || "bridge",

@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime } from "../config/env.js";
 import { formatBytes } from "../utils/format.js";
+import { assertNoHighConfidenceSensitiveText, redactSensitiveText } from "./safety.js";
 import { resolveCwd } from "./workspace.js";
 
 export function safeUploadName(name) {
@@ -72,6 +73,9 @@ export async function saveAttachments(session, rawAttachments = []) {
   for (const [index, attachment] of rawAttachments.entries()) {
     const originalName = String(attachment.name || `attachment-${index + 1}`);
     const buffer = decodeAttachmentData(attachment.dataBase64, originalName);
+    const isText = isTextAttachment(originalName, String(attachment.type || ""));
+    const text = isText ? buffer.toString("utf8").replace(/\0/g, "") : "";
+    if (text) assertNoHighConfidenceSensitiveText(text, `store attachment ${originalName}`);
     totalBytes += buffer.length;
     if (totalBytes > runtime.maxUploadBytes) {
       throw Object.assign(new Error(`Attached files exceed ${formatBytes(runtime.maxUploadBytes)}`), { status: 413 });
@@ -94,9 +98,9 @@ export async function saveAttachments(session, rawAttachments = []) {
       workspacePath: path.relative(paths.workspaceRoot, filePath),
     };
 
-    if (remainingInlineChars > 0 && isTextAttachment(originalName, metadata.type)) {
-      const text = buffer.toString("utf8").replace(/\0/g, "");
-      metadata.inlineText = text.slice(0, remainingInlineChars);
+    if (remainingInlineChars > 0 && isText) {
+      const safeText = redactSensitiveText(text);
+      metadata.inlineText = safeText.slice(0, remainingInlineChars);
       metadata.inlineTruncated = text.length > metadata.inlineText.length;
       remainingInlineChars -= metadata.inlineText.length;
     }

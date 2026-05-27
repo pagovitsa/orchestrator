@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runtime, supervisors } from "../config/env.js";
+import { redactSensitiveStrings } from "./safety.js";
 import { requireScopedCwd, resolveCwd, listProjects } from "./workspace.js";
 
 const rememberDirName = ".remember";
@@ -52,7 +53,7 @@ function normalizeProjectSession(session, cwd) {
     cwd,
     createdAt: session.createdAt || new Date().toISOString(),
     updatedAt: session.updatedAt || session.createdAt || new Date().toISOString(),
-    messages: Array.isArray(session.messages) ? session.messages : [],
+    messages: Array.isArray(session.messages) ? session.messages.map((message) => redactSensitiveStrings(message)) : [],
     autopilotHistory: Array.isArray(session.autopilotHistory) ? session.autopilotHistory.slice(-50) : [],
   };
 }

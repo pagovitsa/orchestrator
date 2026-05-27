@@ -121,6 +121,14 @@ label,
   color: var(--text);
 }
 
+.model-chip.budget-warning .usage-ring {
+  box-shadow: 0 0 0 2px rgba(255, 159, 28, 0.24), inset 0 0 0 1px #6b5126;
+}
+
+.model-chip.budget-warning .model-chip-dot {
+  background: #ff9f1c;
+}
+
 .usage-ring {
   display: grid;
   place-items: center;

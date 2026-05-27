@@ -1,9 +1,8 @@
-import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { paths, runtime, supervisors } from "../config/env.js";
 
-const usageFile = path.join(paths.dataDir, "usage.json");
 const DEEPSEEK_BALANCE_TTL_MS = 60_000;
 const PROBE_OUTPUT_LIMIT = 5000;
 const GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal";
@@ -42,7 +41,11 @@ function defaultModelUsage(id) {
   return {
     id,
     totalRuns: 0,
+    totalTokens: 0,
+    totalCostUsd: 0,
     active: false,
+    activeRunTokens: 0,
+    activeRunCostUsd: 0,
     lastStartedAt: "",
     lastFinishedAt: "",
     lastError: "",
@@ -79,13 +82,20 @@ function normalizeStore(raw = {}) {
   for (const id of Object.keys(supervisors)) {
     models[id] = { ...defaultModelUsage(id), ...(models[id] || {}) };
     models[id].days = models[id].days && typeof models[id].days === "object" ? models[id].days : {};
+    for (const day of Object.keys(models[id].days)) {
+      models[id].days[day] = normalizeDay(models[id].days[day]);
+    }
   }
   return { schemaVersion: 1, models };
 }
 
+function usageFilePath() {
+  return path.join(paths.dataDir, "usage.json");
+}
+
 async function readStore() {
   try {
-    return normalizeStore(JSON.parse(await readFile(usageFile, "utf8")));
+    return normalizeStore(JSON.parse(await readFile(usageFilePath(), "utf8")));
   } catch (error) {
     if (error.code === "ENOENT") return normalizeStore();
     throw error;
@@ -93,8 +103,16 @@ async function readStore() {
 }
 
 async function writeStore(store) {
-  await mkdir(path.dirname(usageFile), { recursive: true });
-  await writeFile(usageFile, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  const file = usageFilePath();
+  await mkdir(path.dirname(file), { recursive: true });
+  const tempPath = path.join(path.dirname(file), `${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await rename(tempPath, file);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function withUsageLock(task) {
@@ -119,9 +137,17 @@ async function hasAuthFile(dir, names) {
   return false;
 }
 
+function normalizeDay(day = {}) {
+  return {
+    runs: Number.isFinite(day.runs) ? day.runs : 0,
+    tokens: Number.isFinite(day.tokens) ? day.tokens : 0,
+    costUsd: Number.isFinite(day.costUsd) ? day.costUsd : 0,
+  };
+}
+
 function daily(model) {
   const key = todayKey();
-  model.days[key] ||= { runs: 0 };
+  model.days[key] = normalizeDay(model.days[key]);
   return model.days[key];
 }
 
@@ -136,6 +162,42 @@ function numberOrNull(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function addUsageDeltas(model, { tokens = null, costUsd = null } = {}) {
+  const day = daily(model);
+  const tokenValue = numberOrNull(tokens);
+  if (tokenValue !== null) {
+    const rounded = Math.max(0, Math.round(tokenValue));
+    const previous = numberOrNull(model.activeRunTokens) ?? 0;
+    const delta = Math.max(0, rounded - previous);
+    model.activeRunTokens = Math.max(previous, rounded);
+    model.lastTokens = rounded;
+    model.totalTokens = Math.max(0, Math.round(numberOrNull(model.totalTokens) ?? 0) + delta);
+    day.tokens = Math.max(0, Math.round(numberOrNull(day.tokens) ?? 0) + delta);
+  }
+
+  const costValue = numberOrNull(costUsd);
+  if (costValue !== null) {
+    const clean = Math.max(0, costValue);
+    const previous = numberOrNull(model.activeRunCostUsd) ?? 0;
+    const delta = Math.max(0, clean - previous);
+    model.activeRunCostUsd = Math.max(previous, clean);
+    model.lastCostUsd = clean;
+    model.totalCostUsd = Math.max(0, (numberOrNull(model.totalCostUsd) ?? 0) + delta);
+    day.costUsd = Math.max(0, (numberOrNull(day.costUsd) ?? 0) + delta);
+  }
+}
+
+function addDeepSeekBalanceCost(model, spent) {
+  const spentValue = numberOrNull(spent);
+  if (spentValue === null) return;
+  const previousSpent = numberOrNull(model.balanceSpent) ?? 0;
+  const delta = Math.max(0, spentValue - previousSpent);
+  if (!delta) return;
+  const day = daily(model);
+  model.totalCostUsd = Math.max(0, (numberOrNull(model.totalCostUsd) ?? 0) + delta);
+  day.costUsd = Math.max(0, (numberOrNull(day.costUsd) ?? 0) + delta);
 }
 
 function stripAnsi(text) {
@@ -719,6 +781,8 @@ export async function recordRunStart(supervisor) {
     const model = store.models[supervisor];
     model.totalRuns += 1;
     model.active = true;
+    model.activeRunTokens = 0;
+    model.activeRunCostUsd = 0;
     model.lastStartedAt = new Date().toISOString();
     model.lastError = "";
     daily(model).runs += 1;
@@ -732,6 +796,8 @@ export async function recordRunEnd(supervisor, { error = "", stopped = false } =
     const store = await readStore();
     const model = store.models[supervisor];
     model.active = false;
+    model.activeRunTokens = 0;
+    model.activeRunCostUsd = 0;
     model.lastFinishedAt = new Date().toISOString();
     model.lastError = stopped ? "Stopped" : String(error || "");
     await writeStore(store);
@@ -749,6 +815,7 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     const sonnetWeeklyPercent = clampPercent(signal.sonnetWeeklyPercent);
     const tokens = numberOrNull(signal.tokens);
     const costUsd = numberOrNull(signal.costUsd);
+    if ((tokens !== null || costUsd !== null) && !model.active) return;
     if (percent !== null) {
       model.lastKnownPercent = percent;
       model.lastKnownLabel = String(signal.label || signal.type || "provider signal");
@@ -757,8 +824,7 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     if (currentPercent !== null) model.currentPercent = currentPercent;
     if (weeklyPercent !== null) model.weeklyPercent = weeklyPercent;
     if (sonnetWeeklyPercent !== null) model.sonnetWeeklyPercent = sonnetWeeklyPercent;
-    if (tokens !== null) model.lastTokens = Math.max(0, Math.round(tokens));
-    if (costUsd !== null) model.lastCostUsd = costUsd;
+    addUsageDeltas(model, { tokens, costUsd });
     await writeStore(store);
   });
 }
@@ -803,6 +869,7 @@ async function recordProbeResult(supervisor, signal = {}) {
         model.balanceObservedMax,
         signal.balanceTotal,
       );
+      addDeepSeekBalanceCost(model, spent);
 
       model.balanceAvailable = Boolean(signal.balanceAvailable);
       model.balanceLabel = String(signal.balanceLabel || "");
@@ -956,6 +1023,9 @@ export async function listUsage() {
     const hasKnownPercent = Number.isFinite(model.lastKnownPercent);
     const hasBalance = model.balanceAvailable !== null && model.balanceUpdatedAt;
     const balanceUsagePercent = Number.isFinite(model.balanceUsagePercent) ? model.balanceUsagePercent : null;
+    const todayUsage = normalizeDay(model.days?.[today]);
+    const totalCostUsd = Number.isFinite(model.totalCostUsd) ? model.totalCostUsd : 0;
+    const budgetWarning = runtime.budgetWarningUsd > 0 && totalCostUsd >= runtime.budgetWarningUsd;
     return {
       id,
       label: supervisors[id].label,
@@ -964,6 +1034,12 @@ export async function listUsage() {
       active: Boolean(model.active),
       runsToday,
       totalRuns: model.totalRuns || 0,
+      tokensToday: todayUsage.tokens,
+      totalTokens: Number.isFinite(model.totalTokens) ? model.totalTokens : 0,
+      costTodayUsd: todayUsage.costUsd,
+      totalCostUsd,
+      budgetWarning,
+      budgetWarningUsd: runtime.budgetWarningUsd > 0 ? runtime.budgetWarningUsd : null,
       lastStartedAt: model.lastStartedAt || "",
       lastFinishedAt: model.lastFinishedAt || "",
       lastError: model.lastError || "",
@@ -992,4 +1068,21 @@ export async function listUsage() {
       balanceUsagePercent,
     };
   });
+}
+
+export function summarizeUsageBudget(usage) {
+  const totalCostUsd = usage.reduce((total, item) => total + (numberOrNull(item.totalCostUsd) ?? 0), 0);
+  const todayCostUsd = usage.reduce((total, item) => total + (numberOrNull(item.costTodayUsd) ?? 0), 0);
+  const warningUsd = runtime.budgetWarningUsd > 0 ? runtime.budgetWarningUsd : null;
+  return {
+    totalCostUsd,
+    todayCostUsd,
+    warningUsd,
+    warning: warningUsd !== null && totalCostUsd >= warningUsd,
+  };
+}
+
+export async function usageSnapshot() {
+  const usage = await listUsage();
+  return { usage, budget: summarizeUsageBudget(usage) };
 }

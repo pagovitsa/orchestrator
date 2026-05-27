@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
+import { safeUploadName, isTextAttachment, saveAttachments } from "../src/domain/attachments.js";
 import {
   appendAutopilotHistory,
   autopilotMemoryArgs,
@@ -11,7 +11,7 @@ import {
   parseAutopilotDecision,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
-import { paths } from "../src/config/env.js";
+import { paths, runtime } from "../src/config/env.js";
 import {
   extractUserMemoriesFromText,
   normalizeMemoryNamespace,
@@ -20,14 +20,20 @@ import {
 } from "../src/domain/memory.js";
 import { mergeTimelineEvent } from "../src/domain/run-timeline.js";
 import { applySessionPatch, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
+import { containsSensitiveText, redactSensitiveText } from "../src/domain/safety.js";
 import { mcpToolCatalog } from "../src/supervisors/mcp.js";
 import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
   calculateBalanceUsage,
+  listUsage,
   parseClaudeUsagePayload,
   parseCodexRateLimitPayload,
   parseGeminiQuotaPayload,
   parseUsageProbeOutput,
+  recordRunEnd,
+  recordRunStart,
+  recordUsageSignal,
+  usageSnapshot,
 } from "../src/domain/usage.js";
 import { normalizeProjectName } from "../src/domain/workspace.js";
 
@@ -225,6 +231,87 @@ test("memory refuses to store secret-like text", async () => {
   }
 });
 
+test("safety scanner detects and redacts credential-shaped text", () => {
+  const input = "Authorization: Bearer abcdefghijklmnop\napi_key = sk-secret123456";
+
+  assert.equal(containsSensitiveText(input), true);
+  assert.equal(containsSensitiveText("The key is simply to wait"), false);
+  const redacted = redactSensitiveText(input);
+  assert.match(redacted, /Bearer \[redacted\]/);
+  assert.match(redacted, /api_key = \[redacted\]/);
+  assert.doesNotMatch(redacted, /abcdefghijklmnop/);
+  assert.doesNotMatch(redacted, /sk-secret123456/);
+});
+
+test("saveSession redacts secrets before persistence", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const session = {
+      id: "44444444-4444-4444-8444-444444444444",
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [{ role: "user", content: "token: sk-secret123456", at: "2026-01-01T00:00:00.000Z" }],
+    };
+
+    await saveSession(session);
+    const loaded = await loadSession(session.id);
+    assert.equal(loaded.messages[0].content, "token: [redacted]");
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveAttachments refuses text files with secrets before writing", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    await assert.rejects(
+      () => saveAttachments(
+        { id: "55555555-5555-4555-8555-555555555555", cwd: "project-a" },
+        [{
+          name: ".env",
+          type: "text/plain",
+          dataBase64: Buffer.from("DEEPSEEK_API_KEY=sk-secret123456").toString("base64"),
+        }],
+      ),
+      /Refusing to store attachment/,
+    );
+    assert.deepEqual(await readdir(path.join(dir, "project-a", ".orch-ui", "uploads", "55555555-5555-4555-8555-555555555555")).catch(() => []), []);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveAttachments accepts placeholder config while redacting inline preview", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const [attachment] = await saveAttachments(
+      { id: "66666666-6666-4666-8666-666666666666", cwd: "project-a" },
+      [{
+        name: ".env.example",
+        type: "text/plain",
+        dataBase64: Buffer.from("API_KEY=your_api_key_here").toString("base64"),
+      }],
+    );
+
+    assert.equal(attachment.name, ".env.example");
+    assert.equal(attachment.inlineText, "API_KEY=[redacted]");
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("memory extracts a stated user name for global recall", () => {
   const memories = extractUserMemoriesFromText("hey, my name is KOstas and I like dark mode");
 
@@ -359,6 +446,72 @@ test("calculateBalanceUsage tracks DeepSeek spent from observed balance", () => 
     remaining: 25,
     spent: 0,
     usagePercent: 0,
+  });
+});
+
+async function withUsageDataDir(fn) {
+  const originalDataDir = paths.dataDir;
+  const originalBudgetWarningUsd = runtime.budgetWarningUsd;
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-usage-"));
+  try {
+    paths.dataDir = dir;
+    runtime.budgetWarningUsd = 0;
+    return await fn(dir);
+  } finally {
+    paths.dataDir = originalDataDir;
+    runtime.budgetWarningUsd = originalBudgetWarningUsd;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("recordUsageSignal accumulates per-run token and cost deltas once", async () => {
+  await withUsageDataDir(async () => {
+    await recordRunStart("deepseek");
+    await recordUsageSignal("deepseek", { tokens: 1000 });
+    await recordUsageSignal("deepseek", { tokens: 1500 });
+    await recordUsageSignal("deepseek", { tokens: 1500 });
+    await recordRunEnd("deepseek");
+    await recordUsageSignal("deepseek", { tokens: 2000 });
+
+    await recordRunStart("deepseek");
+    await recordUsageSignal("deepseek", { tokens: 200 });
+
+    await recordRunStart("claude");
+    await recordUsageSignal("claude", { costUsd: 0.05 });
+    await recordUsageSignal("claude", { costUsd: 0.05 });
+    await recordRunEnd("claude");
+    await recordRunStart("claude");
+    await recordUsageSignal("claude", { costUsd: 0.02 });
+
+    const usage = await listUsage();
+    const deepseek = usage.find((item) => item.id === "deepseek");
+    const claude = usage.find((item) => item.id === "claude");
+
+    assert.equal(deepseek.totalTokens, 1700);
+    assert.equal(deepseek.tokensToday, 1700);
+    assert.equal(Math.round(claude.totalCostUsd * 100), 7);
+    assert.equal(Math.round(claude.costTodayUsd * 100), 7);
+  });
+});
+
+test("usageSnapshot reports aggregate budget warnings", async () => {
+  await withUsageDataDir(async () => {
+    runtime.budgetWarningUsd = 0.1;
+    await recordRunStart("claude");
+    await recordUsageSignal("claude", { costUsd: 0.08 });
+
+    let snapshot = await usageSnapshot();
+    assert.equal(snapshot.budget.warning, false);
+    assert.equal(Math.round(snapshot.budget.totalCostUsd * 100), 8);
+
+    await recordRunEnd("claude");
+    await recordRunStart("claude");
+    await recordUsageSignal("claude", { costUsd: 0.03 });
+    snapshot = await usageSnapshot();
+
+    assert.equal(snapshot.budget.warning, true);
+    assert.equal(Math.round(snapshot.budget.totalCostUsd * 100), 11);
+    assert.equal(snapshot.usage.find((item) => item.id === "claude").budgetWarning, true);
   });
 });
 

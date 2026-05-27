@@ -16,7 +16,8 @@ import { listPrompts, resetPrompts, savePrompts } from "../domain/prompts.js";
 import { emitHookEvent, listHookEvents } from "../domain/hooks.js";
 import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../domain/memory.js";
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
-import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
+import { redactSensitiveText } from "../domain/safety.js";
+import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
 import {
   connectionStatus,
@@ -110,6 +111,11 @@ function activeRunForProject(project) {
 function registerActiveRun(id, session, abortController, mode) {
   if (activeRuns.has(id)) {
     throw Object.assign(new Error("This project already has a running model. Stop it before sending another message."), { status: 409 });
+  }
+  for (const run of activeRuns.values()) {
+    if (run.supervisor === session.supervisor) {
+      throw Object.assign(new Error(`${supervisors[session.supervisor]?.label || session.supervisor} is already running in another project`), { status: 409 });
+    }
   }
   const run = {
     id,
@@ -213,7 +219,9 @@ function memoryFilesForCwd(cwd) {
 }
 
 async function appendUserMessage(session, body) {
-  const content = String(body.content || "").trim();
+  const rawContent = String(body.content || "").trim();
+  const content = redactSensitiveText(rawContent);
+  const safetyRedacted = content !== rawContent;
   const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
   if (!content && !hasAttachments) {
     throw Object.assign(new Error("Message content or attachment is required"), { status: 400 });
@@ -231,6 +239,7 @@ async function appendUserMessage(session, body) {
     content: displayContent,
     modelContent,
     attachments: publicAttachments,
+    safetyRedacted,
     at: new Date().toISOString(),
   });
   await saveSession(session);
@@ -291,23 +300,25 @@ async function handleStreamMessage(req, res, id) {
   let transcript = "";
   let usageStarted = false;
   const onOutput = ({ stream, content }) => {
-    transcript += content;
+    const safeContent = redactSensitiveText(content);
+    transcript += safeContent;
     if (activeRun.draft) {
       activeRun.draft.status = "";
-      activeRun.draft.content += content;
+      activeRun.draft.content += safeContent;
     }
-    emitRunEvent(res, id, clientId, { type: "chunk", stream, content });
+    emitRunEvent(res, id, clientId, { type: "chunk", stream, content: safeContent });
   };
   const onTrace = ({ stream = "trace", content }) => {
+    const safeContent = redactSensitiveText(content);
     if (activeRun.draft) {
       activeRun.draft.trace ||= [];
-      activeRun.draft.trace.push(String(content || ""));
+      activeRun.draft.trace.push(String(safeContent || ""));
       let totalChars = activeRun.draft.trace.reduce((total, item) => total + item.length, 0);
       while (activeRun.draft.trace.length > 1 && totalChars > 60000) {
         totalChars -= activeRun.draft.trace.shift().length;
       }
     }
-    emitRunEvent(res, id, clientId, { type: "trace", stream, content, at: new Date().toISOString() });
+    emitRunEvent(res, id, clientId, { type: "trace", stream, content: safeContent, at: new Date().toISOString() });
   };
   const onTask = (event) => {
     if (activeRun.draft) {
@@ -327,10 +338,11 @@ async function handleStreamMessage(req, res, id) {
       onUsage: captureUsage(session.supervisor),
       signal: abortController.signal,
     });
+    const finalAnswer = redactSensitiveText(answer || transcript.trim() || "(empty response)");
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
-      content: answer || transcript.trim() || "(empty response)",
+      content: finalAnswer,
       at: new Date().toISOString(),
       trace: activeRun.draft?.trace || [],
       timeline: activeRun.draft?.timeline || [],
@@ -416,10 +428,11 @@ async function handleJsonMessage(req, res, id) {
       signal: abortController.signal,
       onUsage: captureUsage(session.supervisor),
     });
+    const finalAnswer = redactSensitiveText(answer || "(empty response)");
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
-      content: answer || "(empty response)",
+      content: finalAnswer,
       at: new Date().toISOString(),
     });
     await saveSession(session);
@@ -509,7 +522,7 @@ export async function handleApi(req, res, url) {
     return sendJson(res, 200, { connections: await connectionStatus() });
   }
   if (req.method === "GET" && url.pathname === "/api/usage") {
-    return sendJson(res, 200, { usage: await listUsage() });
+    return sendJson(res, 200, await usageSnapshot());
   }
   const connectionStartMatch = url.pathname.match(/^\/api\/connections\/([a-z0-9-]+)\/start$/);
   if (connectionStartMatch && req.method === "POST") {
