@@ -339,6 +339,40 @@ test("saveAttachments accepts placeholder config while redacting inline preview"
   }
 });
 
+test("saveAttachments respects inline attachment character budget", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const originalInlineChars = runtime.maxInlineAttachmentChars;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  try {
+    paths.workspaceRoot = dir;
+    runtime.maxInlineAttachmentChars = 5;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const attachments = await saveAttachments(
+      { id: "77777777-7777-4777-8777-777777777777", cwd: "project-a" },
+      [
+        {
+          name: "first.txt",
+          type: "text/plain",
+          dataBase64: Buffer.from("abcdef").toString("base64"),
+        },
+        {
+          name: "second.txt",
+          type: "text/plain",
+          dataBase64: Buffer.from("ghijkl").toString("base64"),
+        },
+      ],
+    );
+
+    assert.equal(attachments[0].inlineText, "abcde");
+    assert.equal(attachments[0].inlineTruncated, true);
+    assert.equal(attachments[1].inlineText, undefined);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    runtime.maxInlineAttachmentChars = originalInlineChars;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("memory extracts a stated user name for global recall", () => {
   const memories = extractUserMemoriesFromText("hey, my name is KOstas and I like dark mode");
 

@@ -136,6 +136,8 @@ Examples: if the user says "my name is Kostas", the active supervisor should sto
 
 Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage probes, last-seen tokens/cost, daily totals, and lifetime totals per supervisor. Token/cost signals are treated as cumulative within a run and accumulated by delta so repeated final signals do not double-count.
 
+Hidden provider usage probes run every 5 minutes by default. Set `ORCH_USAGE_POLL_INTERVAL_MS` to tune the interval, or `0` to disable polling.
+
 Set `ORCH_BUDGET_WARNING_USD` to show a budget warning once lifetime reported dollar cost reaches that amount. `ORCH_BUDGET_USD` is accepted as a legacy alias. This is a warning only; it does not stop runs. Models that do not report dollar cost still show runs/tokens/provider quota but do not contribute dollar spend unless a provider balance probe exposes spend.
 
 ### Run Timeline
@@ -207,7 +209,7 @@ Use `Attach` in the composer to add one or more files to a message. Files are wr
 /workspace/<selected-folder>/.orch-ui/uploads/<session-id>/
 ```
 
-The default total upload limit per message is 25 MB. Override it with `ORCH_UPLOAD_MAX_BYTES`.
+The default total upload limit per message is 25 MB. Override it with `ORCH_UPLOAD_MAX_BYTES`. Text attachments are also inlined into the supervisor prompt up to `ORCH_UPLOAD_INLINE_CHARS` characters across one message; the saved files remain available by path when inline previews are truncated.
 
 ## Checks
 

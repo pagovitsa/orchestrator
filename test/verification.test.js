@@ -29,6 +29,29 @@ test("checksFromEnv preserves defaults when env is empty", () => {
   assert.equal(custom[1].expectJson, true);
 });
 
+test("recent public config options stay documented", async () => {
+  const [readme, envExample] = await Promise.all([
+    readFile(path.resolve("README.md"), "utf8"),
+    readFile(path.resolve(".env.example"), "utf8"),
+  ]);
+  const publicOptions = [
+    "ORCH_AUTOPILOT_IDLE_TIMEOUT_MS",
+    "ORCH_AUTOPILOT_IDLE_WARNING_MS",
+    "ORCH_AUTOPILOT_RETRY_ATTEMPTS",
+    "ORCH_AUTOPILOT_RETRY_BACKOFF_MS",
+    "ORCH_AUTOPILOT_FEED_LIMIT",
+    "ORCH_BUDGET_WARNING_USD",
+    "ORCH_USAGE_POLL_INTERVAL_MS",
+    "ORCH_UPLOAD_INLINE_CHARS",
+    "ORCH_UPLOAD_MAX_BYTES",
+  ];
+
+  for (const option of publicOptions) {
+    assert.match(readme, new RegExp(`\\b${option}\\b`), `${option} missing from README.md`);
+    assert.match(envExample, new RegExp(`\\b${option}\\b`), `${option} missing from .env.example`);
+  }
+});
+
 test("runHttpSmokeChecks records passing HTTP and JSON checks", async () => {
   const server = await startMockServer((req, res) => {
     if (req.url === "/api/config") {
