@@ -1,5 +1,8 @@
 import { runtime } from "../config/env.js";
+import { redactSensitiveText } from "../domain/safety.js";
 import { formatBytes } from "../utils/format.js";
+
+const MAX_ERROR_RESPONSE_CHARS = 1000;
 
 export function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -8,6 +11,13 @@ export function sendJson(res, status, body) {
     "content-length": Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+export function sendErrorJson(res, error) {
+  const status = error?.status || 500;
+  const message = redactSensitiveText(error?.message || String(error || "Unknown error"))
+    .slice(0, MAX_ERROR_RESPONSE_CHARS);
+  return sendJson(res, status, { error: message });
 }
 
 export function sendText(res, status, body) {

@@ -587,6 +587,165 @@ test("message API falls back when DeepSeek peer tools are unsupported", async ()
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
+test("message API redacts CLI provider failures and recovers next request", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-cli-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-home-"));
+    const binDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-bin-"));
+    const stateFile = path.join(dataDir, "fake-codex-state");
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "codex";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.ORCH_FAKE_CODEX_STATE = stateFile;
+    process.env.PATH = binDir + path.delimiter + process.env.PATH;
+
+    const fakeCodex = path.join(binDir, "codex");
+    await writeFile(fakeCodex, [
+      "#!/usr/bin/env node",
+      "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      "if (args[0] === 'exec' && args.includes('--help')) {",
+      "  console.log('Usage: codex exec --profile-v2 <profile>');",
+      "  process.exit(0);",
+      "}",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      "  const stateFile = process.env.ORCH_FAKE_CODEX_STATE;",
+      "  const count = existsSync(stateFile) ? Number(readFileSync(stateFile, 'utf8')) : 0;",
+      "  writeFileSync(stateFile, String(count + 1));",
+      "  if (count === 0) {",
+      "    console.error('simulated codex failure sk-super-secret-token ' + 'x'.repeat(2000));",
+      "    process.exit(1);",
+      "  }",
+      "  console.log('Recovered from fake codex.');",
+      "});",
+    ].join("\n") + "\n", "utf8");
+    await chmod(fakeCodex, 0o755);
+
+    const { sendErrorJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+    const { usageSnapshot } = await import(new URL("src/domain/usage.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendErrorJson(res, error);
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-cli"), { recursive: true });
+      const created = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "codex",
+        cwd: "project-cli",
+      });
+      assert.equal(created.status, 201);
+      const sessionId = created.body.session.id;
+
+      const failed = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+        content: "This request should hit a CLI failure.",
+      });
+      assert.equal(failed.status, 500);
+      assert.match(failed.body.error, /simulated codex failure/);
+      assert.doesNotMatch(failed.body.error, /sk-super-secret-token/);
+      assert.ok(failed.body.error.length <= 1000);
+
+      const afterFailure = await loadSession(sessionId);
+      assert.equal(afterFailure.messages.length, 1);
+      assert.equal(afterFailure.messages[0].role, "user");
+      assert.equal(afterFailure.messages[0].content, "This request should hit a CLI failure.");
+
+      const usageAfterFailure = await usageSnapshot();
+      const codexUsage = usageAfterFailure.usage.find((item) => item.id === "codex");
+      assert.equal(codexUsage.active, false);
+      assert.match(codexUsage.lastError, /simulated codex failure/);
+      assert.doesNotMatch(codexUsage.lastError, /sk-super-secret-token/);
+      assert.ok(codexUsage.lastError.length <= 1000);
+
+      const recovered = await jsonRequest("POST", baseUrl + "/api/sessions/" + sessionId + "/messages", {
+        content: "This request should recover.",
+      });
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.message.content, "Recovered from fake codex.");
+
+      const loaded = await loadSession(sessionId);
+      assert.equal(loaded.messages.length, 3);
+      assert.equal(loaded.messages[1].role, "user");
+      assert.equal(loaded.messages[2].role, "assistant");
+      assert.equal(loaded.messages[2].content, "Recovered from fake codex.");
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 15000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
 test("message API rejects concurrent runs, stops a hung provider call, and recovers", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";

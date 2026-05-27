@@ -537,7 +537,7 @@ async function handleStreamMessage(req, res, id) {
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
   } catch (error) {
     const stopped = abortController.signal.aborted;
-    const details = stopped ? runStopReason(abortController.signal) : (error.message || String(error));
+    const details = stopped ? runStopReason(abortController.signal) : errorDetail(error);
     session.messages.push({
       role: "assistant",
       supervisor: session.supervisor,
@@ -638,7 +638,7 @@ async function handleJsonMessage(req, res, id) {
         Object.assign(session, saved);
       }
       if (usageStarted) {
-        await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: error.message || String(error) }));
+        await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor, { error: errorDetail(error) }));
       }
       emitHookEvent({
         type: "run.end",
@@ -646,7 +646,7 @@ async function handleJsonMessage(req, res, id) {
         project: session.cwd,
         supervisor: session.supervisor,
         status: "error",
-        detail: error.message || String(error),
+        detail: errorDetail(error),
       });
       throw error;
     }
@@ -888,7 +888,7 @@ export async function handleApi(req, res, url) {
         phase: "error",
         project: saved.cwd,
         supervisor: saved.supervisor,
-        error: error.message || String(error),
+        error: errorDetail(error, 300),
         session: saved,
         at: new Date().toISOString(),
       });

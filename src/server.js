@@ -6,7 +6,7 @@ import { ensurePromptStore } from "./domain/prompts.js";
 import { clearStaleAutopilotRuns, ensureSessionStore } from "./domain/sessions.js";
 import { clearStaleActiveRuns, startUsagePolling } from "./domain/usage.js";
 import { handleApi } from "./http/routes.js";
-import { sendJson } from "./http/response.js";
+import { sendErrorJson, sendJson } from "./http/response.js";
 import { serveStatic } from "./http/static.js";
 
 async function ensureRuntimeDirs() {
@@ -36,7 +36,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url);
     return await serveStatic(req, res, url);
   } catch (error) {
-    return sendJson(res, error.status || 500, { error: error.message || String(error) });
+    return sendErrorJson(res, error);
   }
 });
 
