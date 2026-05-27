@@ -22,6 +22,7 @@ const state = {
   soundMuted: readBooleanPreference("orch.soundMuted", false),
   speechEnabled: readBooleanPreference("orch.speechEnabled", false),
   audioContext: null,
+  speechVoicesPromise: null,
   typingSoundTimers: new Map(),
   activeTerminalMessage: null,
   eventSource: null,
@@ -520,8 +521,12 @@ function playTypingTick() {
   playTone({ frequency: 780, duration: 0.028, delay: 0.055, type: "triangle", gain: 0.011 });
 }
 
+function shouldPlayProjectAudio(sessionId) {
+  return Boolean(sessionId && state.currentSession?.id === sessionId);
+}
+
 function startTypingSound(sessionId) {
-  if (state.soundMuted || state.typingSoundTimers.has(sessionId)) return;
+  if (state.soundMuted || !shouldPlayProjectAudio(sessionId) || state.typingSoundTimers.has(sessionId)) return;
   state.typingSoundTimers.set(sessionId, null);
   playTypingTick();
 }
@@ -593,9 +598,32 @@ function speechLanguagePrefix(lang) {
   return String(lang || "").toLowerCase().split("-")[0];
 }
 
-function selectSpeechVoice(lang) {
+function availableSpeechVoices() {
+  if (!("speechSynthesis" in window)) return [];
+  return window.speechSynthesis.getVoices?.() || [];
+}
+
+function loadSpeechVoices({ timeoutMs = 900 } = {}) {
+  const voices = availableSpeechVoices();
+  if (voices.length) return Promise.resolve(voices);
+  if (state.speechVoicesPromise) return state.speechVoicesPromise;
+  state.speechVoicesPromise = new Promise((resolve) => {
+    const synthesis = window.speechSynthesis;
+    let timeout = null;
+    const finish = () => {
+      if (timeout) clearTimeout(timeout);
+      synthesis.removeEventListener?.("voiceschanged", finish);
+      state.speechVoicesPromise = null;
+      resolve(availableSpeechVoices());
+    };
+    timeout = setTimeout(finish, timeoutMs);
+    synthesis.addEventListener?.("voiceschanged", finish, { once: true });
+  });
+  return state.speechVoicesPromise;
+}
+
+function selectSpeechVoice(lang, voices = availableSpeechVoices()) {
   if (!("speechSynthesis" in window)) return null;
-  const voices = window.speechSynthesis.getVoices?.() || [];
   const target = String(lang || "").toLowerCase();
   const prefix = speechLanguagePrefix(target);
   return voices.find((voice) => voice.lang.toLowerCase() === target) ||
@@ -603,8 +631,9 @@ function selectSpeechVoice(lang) {
     null;
 }
 
-function speakLatestAnswer(session) {
+async function speakLatestAnswer(session) {
   if (!state.speechEnabled) return;
+  if (!shouldPlayProjectAudio(session?.id)) return;
   if (!("speechSynthesis" in window)) {
     setStatus("Speech is not supported by this browser");
     return;
@@ -612,9 +641,12 @@ function speakLatestAnswer(session) {
   const text = answerTextForSpeech(session);
   if (!text) return;
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
   const lang = detectSpeechLanguage(text);
-  const voice = selectSpeechVoice(lang);
+  const voices = await loadSpeechVoices();
+  if (!state.speechEnabled) return;
+  if (!shouldPlayProjectAudio(session?.id)) return;
+  const voice = selectSpeechVoice(lang, voices);
+  const utterance = new SpeechSynthesisUtterance(text);
   utterance.rate = 1.0;
   utterance.pitch = 1.0;
   utterance.lang = lang;
@@ -1793,6 +1825,23 @@ function syncComposerState() {
   setComposerEnabled(Boolean(state.currentSession));
 }
 
+function isEditableElement(node) {
+  if (!node || node === document.body || node === document.documentElement) return false;
+  const tagName = node.tagName;
+  return node.isContentEditable || tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+}
+
+function focusComposerInput() {
+  if (!state.currentSession || currentRun()?.streaming || el.messageInput.disabled) return;
+  if (document.visibilityState !== "visible") return;
+  if (document.querySelector("dialog[open]")) return;
+  const active = document.activeElement;
+  if (active !== el.messageInput && isEditableElement(active)) return;
+  el.messageInput.focus({ preventScroll: true });
+  const end = el.messageInput.value.length;
+  el.messageInput.setSelectionRange(end, end);
+}
+
 async function stopActiveRun() {
   const run = currentRun();
   if (!run || !run.streaming || run.stopInFlight) return;
@@ -2067,7 +2116,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
         const last = run.session.messages.at(-1);
         if (last) last.trace = draft.trace;
         autopilotCandidate = run.session;
-        playRunFinishedSound("done");
+        if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("done");
         speakLatestAnswer(run.session);
         if (viewing()) {
           state.currentSession = run.session;
@@ -2084,7 +2133,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) last.trace = draft.trace;
-        playRunFinishedSound("error");
+        if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("error");
         if (viewing()) {
           state.currentSession = run.session;
           setStatus(`Error: ${event.error}`);
@@ -2099,7 +2148,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
         run.session = event.session || run.session;
         const last = run.session?.messages?.at(-1);
         if (last) last.trace = draft.trace;
-        playRunFinishedSound("done");
+        if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("done");
         if (viewing()) {
           state.currentSession = run.session;
           setStatus(event.error || "Stopped by user");
@@ -2112,7 +2161,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
     await refreshUsage();
   } catch (error) {
     stopTypingSound(run.sessionId);
-    playRunFinishedSound("error");
+    if (shouldPlayProjectAudio(run.sessionId)) playRunFinishedSound("error");
     draft.error = true;
     draft.streaming = false;
     run.streaming = false;
@@ -2128,7 +2177,10 @@ async function sendMessageForSession(targetSession, content, files = []) {
     state.runs.delete(run.sessionId);
     updateWakeLock();
     renderSessions();
-    if (viewing()) syncComposerState();
+    if (viewing()) {
+      syncComposerState();
+      focusComposerInput();
+    }
     await refreshUsage();
     if (autopilotCandidate) scheduleAutopilot(autopilotCandidate);
   }
@@ -2304,9 +2356,10 @@ function finishLiveRun(event) {
   stopTypingSound(event.sessionId);
   state.runs.delete(event.sessionId);
   upsertSessionSummary(session);
-  if (event.type === "error") playRunFinishedSound("error");
-  else {
-    playRunFinishedSound("done");
+  if (event.type === "error") {
+    if (shouldPlayProjectAudio(event.sessionId)) playRunFinishedSound("error");
+  } else {
+    if (shouldPlayProjectAudio(event.sessionId)) playRunFinishedSound("done");
     if (event.type === "done") speakLatestAnswer(session);
   }
   updateWakeLock();
@@ -2319,6 +2372,7 @@ function finishLiveRun(event) {
     renderMessages();
     if (draft) syncOpenTerminal(draft);
     syncComposerState();
+    focusComposerInput();
   }
   refreshSessions().catch((error) => setStatus(`Session refresh error: ${error.message}`));
   refreshUsage().catch((error) => setStatus(`Usage refresh error: ${error.message}`));
