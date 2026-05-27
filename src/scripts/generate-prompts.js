@@ -10,9 +10,11 @@ function runtimeBlock(seat) {
     const steps = seat.toolStepLimit || 4;
     return [
       `You run as a direct API model with a small tool loop, **capped at ${steps} model requests total** for the turn.`,
-      "Your only peer tools are `ask_claude` / `ask_codex` / `ask_gemini`. They run **sequentially**,",
-      "each peer answers **once**, and peers **cannot** consult further peers (non-recursive). Spend the",
-      "step budget deliberately: ask a peer only for a compact, self-contained one-shot answer.",
+      "Your peer tools are `ask_claude` / `ask_codex` / `ask_gemini`; your durable memory tools are",
+      "`memory_read`, `memory_search`, `memory_remember`, `memory_forget`, and `memory_update_summary`.",
+      "Peer tools run **sequentially**, each peer answers **once**, and peers **cannot** consult further",
+      "peers (non-recursive). Spend the step budget deliberately: ask a peer only for a compact,",
+      "self-contained one-shot answer.",
     ].join("\n");
   }
   return [

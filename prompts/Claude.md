@@ -24,6 +24,19 @@ completion notifications, required `.orchestration/runs/` artifacts, or cross-tu
 reuse. Those belong to a different harness. **Do not claim to have used any of them.** When you
 consult a peer, you actually wait for the answer in this turn.
 
+## Durable memory
+
+Use the `memory_*` tools when they are available.
+
+- At the start of a task, call `memory_read` with `scope: "all"` to load relevant user/global and
+  current-project memories.
+- If the user states a durable personal fact or preference, store it with `memory_remember` using
+  `scope: "user"`. Example: "my name is Kostas" -> remember "The user's name is Kostas".
+- If you learn a durable project decision, architecture fact, command, or constraint, store it with
+  `scope: "project"`.
+- Never store secrets, API keys, passwords, tokens, private auth data, or transient chat noise.
+- Use remembered facts naturally, but do not pretend memory was loaded if the tool is unavailable.
+
 ## Risk tiers
 
 - Trivial / mechanical: typo, formatting, rename, reading files, a known single command, or a factual

@@ -91,6 +91,16 @@ export function sharedToolServers(scopedCwd, supervisor) {
       cwd: scopedCwd,
       env,
     },
+    memory: {
+      command: "node",
+      args: [path.join(paths.appRoot, "src", "mcp", "memory-server.js")],
+      cwd: scopedCwd,
+      env: {
+        ...env,
+        ORCH_MEMORY_GLOBAL_FILE: path.join(paths.dataDir, "orch-memory", "user.json"),
+        ORCH_MEMORY_PROJECT_FILE: path.join(scopedCwd, ".remember", "orchestrator-memory.json"),
+      },
+    },
     playwright: {
       command: "playwright-mcp",
       args: [],

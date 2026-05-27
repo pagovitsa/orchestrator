@@ -84,7 +84,7 @@ http://<host-lan-ip>:5173
 
 If another machine still cannot connect, check the host firewall for the selected preview port. The UI and preview bind host default to `0.0.0.0`; set `ORCH_BIND_HOST=127.0.0.1` only if you want local-only access.
 
-The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews.
+The `orch-preview` helper detaches the server, records PID/log files in `.orchestration/previews/`, and keeps it alive after the model response finishes. Use `orch-preview stop <port>` to stop one, and `orch-preview status` to list active previews. When a chat is opened through Tailscale/LAN, the UI passes the current browser host into the supervisor so `orch-preview` can print that reachable host instead of only `localhost`.
 
 Every supervisor receives an injected runtime note that it is running inside the `orch-ui` Docker image/container. In bridge mode it treats shell `127.0.0.1` as container-local and uses Docker-published ports for browser/LAN previews; in host network mode it knows the container shares the host network namespace.
 
@@ -104,6 +104,15 @@ Each CLI supervisor gets PAL MCP peer servers for the other models:
 - Gemini gets `pal-claude`, `pal-codex`, and `pal-deepseek`.
 
 DeepSeek is exposed through the PAL `chat` tool with `deepseek-v4-pro` as the default model. When DeepSeek is the active supervisor, the UI server provides equivalent peer tools for Claude, Codex, and Gemini.
+
+### Memory MCP
+
+CLI supervisors also receive the local `memory` MCP server when `ORCH_ENABLED_TOOLS` includes `memory` (enabled by default). It stores durable facts locally:
+
+- user/global memory: `/data/orch-memory/user.json`
+- project memory: `<project>/.remember/orchestrator-memory.json`
+
+Examples: if the user says "my name is Kostas", the active supervisor should store that with `memory_remember` using `scope: "user"`, so future projects can recall it. Project-specific decisions and constraints use `scope: "project"`. The memory layer refuses obvious secrets such as passwords, API keys, and tokens.
 
 ## Credentials
 

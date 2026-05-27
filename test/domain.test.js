@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { safeUploadName, isTextAttachment } from "../src/domain/attachments.js";
 import { parseAutopilotDecision } from "../src/domain/autopilot.js";
+import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../src/domain/memory.js";
 import { applySessionPatch, projectLabel } from "../src/domain/sessions.js";
 import {
   calculateBalanceUsage,
@@ -52,6 +56,59 @@ test("applySessionPatch keeps supervisor and workspace fixed when locked", () =>
 test("projectLabel returns project-oriented history labels", () => {
   assert.equal(projectLabel("test"), "test");
   assert.equal(projectLabel("."), "workspace");
+});
+
+test("memory keeps user facts global across project files", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
+  try {
+    const globalFile = path.join(dir, "user.json");
+    const projectA = path.join(dir, "a", "orchestrator-memory.json");
+    const projectB = path.join(dir, "b", "orchestrator-memory.json");
+
+    await rememberMemory({ globalFile, projectFile: projectA }, {
+      scope: "user",
+      kind: "fact",
+      text: "The user's name is Kostas",
+      tags: ["identity", "name"],
+    });
+    await rememberMemory({ globalFile, projectFile: projectA }, {
+      scope: "project",
+      kind: "decision",
+      text: "Use SQLite for the prototype",
+    });
+
+    const projectBMemory = await readMemory({ globalFile, projectFile: projectB }, { scope: "all" });
+    assert.equal(projectBMemory.user.memories[0].text, "The user's name is Kostas");
+    assert.deepEqual(projectBMemory.user.memories[0].tags, ["identity", "name"]);
+    assert.equal(projectBMemory.project.memories.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("memory refuses to store secret-like text", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
+  try {
+    const files = {
+      globalFile: path.join(dir, "user.json"),
+      projectFile: path.join(dir, "project.json"),
+    };
+    await assert.rejects(
+      () => rememberMemory(files, { scope: "user", text: "My api key is sk-secret" }),
+      /Refusing to store secrets/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("memory extracts a stated user name for global recall", () => {
+  const memories = extractUserMemoriesFromText("hey, my name is KOstas and I like dark mode");
+
+  assert.equal(memories.length, 1);
+  assert.equal(memories[0].scope, "user");
+  assert.equal(memories[0].text, "The user's name is KOstas");
+  assert.deepEqual(memories[0].tags, ["identity", "name"]);
 });
 
 test("parseUsageProbeOutput extracts numeric status without secrets", () => {

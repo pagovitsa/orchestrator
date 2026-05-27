@@ -561,6 +561,33 @@ function toggleSoundMute() {
   renderMediaToggles();
 }
 
+function decodeHtmlEntitiesForSpeech(text) {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = text;
+  return textarea.value;
+}
+
+function sanitizeTextForSpeech(text) {
+  const withoutMarkup = String(text || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)]\((?:https?:\/\/|www\.)[^)]*\)/gi, "$1")
+    .replace(/\b(?:https?:\/\/|www\.)[^\s<>()]+/gi, " ")
+    .replace(/\b[\w.+-]+@[\w.-]+\.\w+\b/g, " ");
+  return decodeHtmlEntitiesForSpeech(withoutMarkup)
+    .replace(/[`"'“”‘’«»]/g, " ")
+    .replace(/[!¡#<>()[\]{}*_+=|\\~^$%@;:]/g, " ")
+    .replace(/\s+[-–—]\s+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function answerTextForSpeech(session) {
   const messages = [...(session?.messages || [])].reverse();
   const answer = messages.find((message) =>
@@ -570,7 +597,7 @@ function answerTextForSpeech(session) {
     !message.stopped &&
     String(message.content || "").trim()
   );
-  return String(answer?.content || "").replace(/\s+/g, " ").trim().slice(0, 4500);
+  return sanitizeTextForSpeech(answer?.content).slice(0, 4500);
 }
 
 function countMatches(text, pattern) {
@@ -1628,6 +1655,7 @@ function createMessageElement(message) {
 }
 
 const URL_PATTERN = /(https?:\/\/[^\s<>()]+)/g;
+const HTML_FENCE_PATTERN = /```(?:html?|xhtml)\s*\n?([\s\S]*?)```/gi;
 
 // Appends text to a node, turning http(s) URLs into target=_blank links. Built via DOM nodes only
 // (no innerHTML) and limited to http/https, so message content cannot inject markup.
@@ -1650,12 +1678,57 @@ function appendLinkified(container, value) {
   if (lastIndex < text.length) container.appendChild(document.createTextNode(text.slice(lastIndex)));
 }
 
+function looksLikeStandaloneHtml(value) {
+  return /^\s*(?:<!doctype\s+html|<html[\s>]|<body[\s>]|<iframe[\s>])/i.test(value || "");
+}
+
+function splitMessageContent(message) {
+  const content = String(message.content || message.status || (message.streaming ? "Starting..." : ""));
+  if (message.role !== "assistant") return [{ type: "text", content }];
+
+  const parts = [];
+  let lastIndex = 0;
+  for (const match of content.matchAll(HTML_FENCE_PATTERN)) {
+    if (match.index > lastIndex) parts.push({ type: "text", content: content.slice(lastIndex, match.index) });
+    parts.push({ type: "html", content: match[1].trim() });
+    lastIndex = match.index + match[0].length;
+  }
+  if (parts.length) {
+    if (lastIndex < content.length) parts.push({ type: "text", content: content.slice(lastIndex) });
+    return parts;
+  }
+  if (looksLikeStandaloneHtml(content.trim())) return [{ type: "html", content: content.trim() }];
+  return [{ type: "text", content }];
+}
+
+function createHtmlPreview(html) {
+  const preview = document.createElement("div");
+  preview.className = "html-preview";
+
+  const frame = document.createElement("iframe");
+  frame.className = "html-preview-frame";
+  frame.title = "HTML preview";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.sandbox = "allow-scripts allow-forms allow-popups allow-modals allow-presentation";
+  frame.srcdoc = html;
+  preview.appendChild(frame);
+  return preview;
+}
+
 function renderMessageBody(body, message) {
   body.innerHTML = "";
 
-  const text = document.createElement("span");
-  appendLinkified(text, message.content || message.status || (message.streaming ? "Starting..." : ""));
-  body.appendChild(text);
+  for (const part of splitMessageContent(message)) {
+    if (part.type === "html") {
+      body.appendChild(createHtmlPreview(part.content));
+      continue;
+    }
+    if (!part.content) continue;
+    const text = document.createElement("span");
+    appendLinkified(text, part.content);
+    body.appendChild(text);
+  }
 
   if (!message.streaming && !message.trace?.length) return;
 
@@ -2016,6 +2089,15 @@ function setWorkspaceStatus() {
   setStatus(`${state.currentSession.supervisor} - ${mode} - ${state.currentSession.cwd || "."}`);
 }
 
+function browserContext() {
+  return {
+    origin: window.location.origin,
+    protocol: window.location.protocol,
+    host: window.location.host,
+    hostname: window.location.hostname,
+  };
+}
+
 async function sendMessage(content, files = []) {
   if (!state.currentSession) {
     setStatus("Create a new chat first");
@@ -2080,6 +2162,7 @@ async function sendMessageForSession(targetSession, content, files = []) {
     if (viewing()) setStatus(`Running ${supervisor}...`);
     await streamApi(`/api/sessions/${run.sessionId}/messages/stream`, {
       clientId: state.clientId,
+      browser: browserContext(),
       content,
       attachments,
     }, {

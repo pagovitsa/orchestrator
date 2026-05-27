@@ -82,7 +82,7 @@ export const runtime = {
   authPassword: process.env.ORCH_AUTH_PASSWORD || readAuthPasswordSecret(),
   bindHost: process.env.ORCH_BIND_HOST || "",
   allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
-  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7"),
+  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory"),
   gitInitProjects: envFlag("ORCH_GIT_INIT_PROJECTS", true),
 };
 

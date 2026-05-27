@@ -1,3 +1,4 @@
+import path from "node:path";
 import { runtime, paths, supervisorPeers, supervisors } from "../config/env.js";
 import {
   buildModelContent,
@@ -12,6 +13,7 @@ import {
   saveSession,
 } from "../domain/sessions.js";
 import { listPrompts, savePrompts } from "../domain/prompts.js";
+import { extractUserMemoriesFromText, rememberMemory } from "../domain/memory.js";
 import { listUsage, recordRunEnd, recordRunStart, recordUsageSignal } from "../domain/usage.js";
 import { decideAutopilotNext } from "../domain/autopilot.js";
 import {
@@ -146,6 +148,49 @@ function promptSessionWithoutCurrentUser(session) {
   return { ...session, messages: (session.messages || []).slice(0, -1) };
 }
 
+function cleanHeaderValue(value, maxLength = 240) {
+  return String(Array.isArray(value) ? value[0] : value || "")
+    .replace(/[\r\n]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function cleanBrowserHost(value) {
+  const text = cleanHeaderValue(value, 180);
+  if (!/^[A-Za-z0-9.:[\]_-]+$/.test(text)) return "";
+  return text.replace(/^\[|\]$/g, "");
+}
+
+function browserContextFromRequest(req, body = {}) {
+  const browser = body.browser && typeof body.browser === "object" ? body.browser : {};
+  const forwardedProto = cleanHeaderValue(req.headers["x-forwarded-proto"], 24).split(",")[0] || "";
+  const forwardedHost = cleanHeaderValue(req.headers["x-forwarded-host"], 180).split(",")[0] || "";
+  const protocol = cleanHeaderValue(browser.protocol, 24).replace(/:$/, "") ||
+    forwardedProto ||
+    (req.socket.encrypted ? "https" : "http");
+  const hostname = cleanBrowserHost(browser.hostname) ||
+    cleanBrowserHost((forwardedHost || req.headers.host || "").replace(/:\d+$/, ""));
+  const host = cleanHeaderValue(browser.host, 180) || forwardedHost || cleanHeaderValue(req.headers.host, 180);
+  const origin = cleanHeaderValue(browser.origin, 240) || (host ? `${protocol}://${host}` : "");
+  return { protocol, hostname, host, origin };
+}
+
+async function autoRememberUserFacts(session, content) {
+  const memories = extractUserMemoriesFromText(content);
+  if (!memories.length) return;
+  const files = {
+    globalFile: path.join(paths.dataDir, "orch-memory", "user.json"),
+    projectFile: path.join(requireScopedCwd(session.cwd), ".remember", "orchestrator-memory.json"),
+  };
+  for (const memory of memories) {
+    try {
+      await rememberMemory(files, memory);
+    } catch (error) {
+      console.error("auto memory failed:", error.message || error);
+    }
+  }
+}
+
 async function appendUserMessage(session, body) {
   const content = String(body.content || "").trim();
   const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
@@ -168,6 +213,7 @@ async function appendUserMessage(session, body) {
     at: new Date().toISOString(),
   });
   await saveSession(session);
+  await autoRememberUserFacts(session, content);
   return modelContent;
 }
 
@@ -183,6 +229,7 @@ async function handleStreamMessage(req, res, id) {
     throw error;
   });
   const clientId = String(body.clientId || "");
+  const browserContext = browserContextFromRequest(req, body);
   activeRun.clientId = clientId;
   const modelContent = await appendUserMessage(session, body).catch((error) => {
     clearActiveRun(id, abortController);
@@ -238,6 +285,7 @@ async function handleStreamMessage(req, res, id) {
     usageStarted = true;
     await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
     const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
+      browserContext,
       onOutput,
       onTrace,
       onUsage: captureUsage(session.supervisor),
@@ -295,10 +343,13 @@ async function handleJsonMessage(req, res, id) {
   registerActiveRun(id, session, abortController, "json");
   let usageStarted = false;
   try {
-    const modelContent = await appendUserMessage(session, await readBody(req));
+    const body = await readBody(req);
+    const browserContext = browserContextFromRequest(req, body);
+    const modelContent = await appendUserMessage(session, body);
     usageStarted = true;
     await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
     const answer = await runSupervisor(promptSessionWithoutCurrentUser(session), modelContent, {
+      browserContext,
       signal: abortController.signal,
       onUsage: captureUsage(session.supervisor),
     });

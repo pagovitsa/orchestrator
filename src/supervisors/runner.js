@@ -1,5 +1,12 @@
 import { execFile, spawn } from "node:child_process";
+import path from "node:path";
 import { paths, runtime, supervisorPeers, supervisors } from "../config/env.js";
+import {
+  forgetMemory,
+  readMemory,
+  rememberMemory,
+  updateMemorySummary,
+} from "../domain/memory.js";
 import { loadPrompt } from "../domain/prompts.js";
 import { resolveCwd, requireScopedCwd } from "../domain/workspace.js";
 import { peerRoutingText, writeScopedPeerConfigs } from "./mcp.js";
@@ -32,7 +39,30 @@ function previewServerInstruction() {
   ].join("\n");
 }
 
-function buildCliPrompt(session, userContent, systemPrompt) {
+function browserContextInstruction(context = {}) {
+  const hostname = String(context.hostname || "").trim();
+  const origin = String(context.origin || "").trim();
+  if (!hostname && !origin) return "";
+  return [
+    "BROWSER CONTEXT:",
+    origin ? `The user currently opened Orch UI at: ${origin}` : "",
+    hostname ? `Browser host for preview URLs: ${hostname}` : "",
+    "When reporting preview URLs from `orch-preview`, prefer the browser host/Tailscale/LAN host over localhost when it is non-loopback.",
+  ].filter(Boolean).join("\n");
+}
+
+function browserEnv(context = {}) {
+  const hostname = String(context.hostname || "").trim();
+  const origin = String(context.origin || "").trim();
+  const host = String(context.host || "").trim();
+  const env = {};
+  if (hostname) env.ORCH_BROWSER_HOST = hostname;
+  if (origin) env.ORCH_BROWSER_ORIGIN = origin;
+  if (host) env.ORCH_BROWSER_UI_HOST = host;
+  return env;
+}
+
+function buildCliPrompt(session, userContent, systemPrompt, options = {}) {
   const history = compactHistory(session.messages || []);
   return [
     "SYSTEM PROMPT:",
@@ -45,6 +75,7 @@ function buildCliPrompt(session, userContent, systemPrompt) {
     `WRITE MODE: ${runtime.allowWrite ? "enabled" : "read-only/plan"}`,
     "ACCESS POLICY: Read and edit only inside ALLOWED SESSION ROOT. Do not inspect, modify, create, delete, or run commands against sibling folders under /workspace.",
     previewServerInstruction(),
+    browserContextInstruction(options.browserContext),
     "",
     "PEER MODEL ROUTING:",
     peerRoutingText(session.supervisor),
@@ -187,7 +218,7 @@ function sanitizedProcessEnv(extra = {}) {
   return { ...env, ...extra };
 }
 
-function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, stdoutHandler, signal }) {
+function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, stdoutHandler, signal, browserContext }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
     const stderrTrace = createStderrTraceFilter(command, traceOptions);
@@ -195,7 +226,7 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, st
     emitTrace(traceOptions, `[cwd] ${cwd}`);
     const child = spawn(command, args, {
       cwd,
-      env: sanitizedProcessEnv(env),
+      env: sanitizedProcessEnv({ ...browserEnv(browserContext), ...env }),
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -481,7 +512,16 @@ async function callDeepSeek(session, userContent, systemPrompt, options = {}) {
   emitTrace(options, `[deepseek] workspace: ${resolveCwd(session.cwd)}`);
 
   const messages = [
-    { role: "system", content: `${systemPrompt}\n\nPEER MODEL ROUTING:\n${peerRoutingText("deepseek")}` },
+    {
+      role: "system",
+      content: [
+        systemPrompt,
+        "",
+        browserContextInstruction(options.browserContext),
+        "",
+        `PEER MODEL ROUTING:\n${peerRoutingText("deepseek")}`,
+      ].filter(Boolean).join("\n"),
+    },
     ...(session.messages || []).slice(-20).map((message) => ({
       role: message.role === "assistant" ? "assistant" : "user",
       content: message.modelContent || message.content,
@@ -545,9 +585,111 @@ function deepSeekPeerTools() {
   }));
 }
 
+function deepSeekMemoryTools() {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "memory_read",
+        description: "Read durable user/global and/or current-project memory. Call at the start of a task.",
+        parameters: {
+          type: "object",
+          properties: {
+            scope: { type: "string", enum: ["all", "user", "project"] },
+            query: { type: "string" },
+            limit: { type: "number" },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memory_search",
+        description: "Search durable memory across user/global and/or current-project scopes.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            scope: { type: "string", enum: ["all", "user", "project"] },
+            limit: { type: "number" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memory_remember",
+        description: "Store a durable fact/preference/decision. Use scope=user for facts like the user's name.",
+        parameters: {
+          type: "object",
+          properties: {
+            scope: { type: "string", enum: ["user", "project"] },
+            kind: { type: "string", enum: ["fact", "preference", "decision", "summary", "note"] },
+            text: { type: "string" },
+            tags: { type: "array", items: { type: "string" } },
+            source: { type: "string" },
+          },
+          required: ["scope", "text"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memory_forget",
+        description: "Forget a memory by id or exact text. Never use broad deletion.",
+        parameters: {
+          type: "object",
+          properties: {
+            scope: { type: "string", enum: ["user", "project"] },
+            id: { type: "string" },
+            exactText: { type: "string" },
+          },
+          required: ["scope"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memory_update_summary",
+        description: "Replace the durable summary for user/global or current-project memory.",
+        parameters: {
+          type: "object",
+          properties: {
+            scope: { type: "string", enum: ["user", "project"] },
+            summary: { type: "string" },
+          },
+          required: ["scope", "summary"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+}
+
+function deepSeekTools() {
+  return [...deepSeekPeerTools(), ...deepSeekMemoryTools()];
+}
+
+function memoryFilesForSession(session) {
+  const scopedCwd = requireScopedCwd(session.cwd || ".");
+  return {
+    globalFile: path.join(paths.dataDir, "orch-memory", "user.json"),
+    projectFile: path.join(scopedCwd, ".remember", "orchestrator-memory.json"),
+  };
+}
+
 async function callDeepSeekWithPeerTools(session, messages, options = {}) {
   const toolMessages = [...messages];
-  const tools = deepSeekPeerTools();
+  const tools = deepSeekTools();
   for (let step = 0; step < 4; step += 1) {
     emitTrace(options, `[deepseek] step ${step + 1}: request with peer tools`);
     const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
@@ -606,15 +748,39 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
         });
         continue;
       }
-      const prompt = String(args.prompt || "").trim();
-      if (!prompt) throw new Error(`${toolName} requires a prompt`);
-      emitTrace(options, `[deepseek] ${toolName} -> running peer delegate`);
-      const result = await runDeepSeekPeerTool(session, toolName, prompt, options);
-      emitTrace(options, `[deepseek] ${toolName} <- completed (${result.length} chars)`);
+      let result = "";
+      if (toolName.startsWith("ask_")) {
+        const prompt = String(args.prompt || "").trim();
+        if (!prompt) throw new Error(`${toolName} requires a prompt`);
+        emitTrace(options, `[deepseek] ${toolName} -> running peer delegate`);
+        result = await runDeepSeekPeerTool(session, toolName, prompt, options);
+        emitTrace(options, `[deepseek] ${toolName} <- completed (${result.length} chars)`);
+      } else if (toolName.startsWith("memory_")) {
+        emitTrace(options, `[deepseek] ${toolName} -> memory`);
+        try {
+          result = await runDeepSeekMemoryTool(session, toolName, args);
+        } catch (error) {
+          result = `Memory tool error: ${error.message || String(error)}`;
+        }
+        emitTrace(options, `[deepseek] ${toolName} <- memory completed`);
+      } else {
+        result = `Unknown tool: ${toolName}`;
+      }
       toolMessages.push({ role: "tool", tool_call_id: toolCall.id, content: result.slice(0, 30000) });
     }
   }
   throw new Error("DeepSeek peer tool loop reached its step limit");
+}
+
+async function runDeepSeekMemoryTool(session, toolName, args) {
+  const files = memoryFilesForSession(session);
+  let result;
+  if (toolName === "memory_read" || toolName === "memory_search") result = await readMemory(files, args);
+  else if (toolName === "memory_remember") result = await rememberMemory(files, args);
+  else if (toolName === "memory_forget") result = await forgetMemory(files, args);
+  else if (toolName === "memory_update_summary") result = await updateMemorySummary(files, args);
+  else throw new Error(`Unknown DeepSeek memory tool: ${toolName}`);
+  return JSON.stringify(result, null, 2);
 }
 
 async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}) {
@@ -622,7 +788,7 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
   if (!["claude", "codex", "gemini"].includes(peer)) throw new Error(`Unknown DeepSeek peer tool: ${toolName}`);
   const peerSession = { ...session, supervisor: peer, messages: [], cwd: session.cwd || "." };
   const systemPrompt = await loadPrompt(peerSession.supervisor);
-  const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt);
+  const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, parentOptions);
   const options = { enablePeerMcp: false, enablePeerTools: false, onTrace: parentOptions.onTrace };
   if (peer === "claude") return callClaude(peerSession, peerPrompt, options);
   if (peer === "codex") return callCodex(peerSession, peerPrompt, options);
@@ -678,7 +844,7 @@ export async function runSupervisor(session, userContent, options = {}) {
   const runSession = { ...session, supervisor };
   const systemPrompt = await loadPrompt(supervisor);
   if (supervisor === "deepseek") return callDeepSeek(runSession, userContent, systemPrompt, options);
-  const prompt = buildCliPrompt(runSession, userContent, systemPrompt);
+  const prompt = buildCliPrompt(runSession, userContent, systemPrompt, options);
   if (supervisor === "claude") return callClaude(runSession, prompt, options);
   if (supervisor === "codex") return callCodex(runSession, prompt, options);
   if (supervisor === "gemini") return callGemini(runSession, prompt, options);

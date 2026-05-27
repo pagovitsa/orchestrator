@@ -582,7 +582,8 @@ input {
 
 .message-body {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
   overflow-wrap: anywhere;
 }
@@ -591,6 +592,25 @@ input {
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.html-preview {
+  flex: 1 0 100%;
+  width: 100%;
+  min-width: min(620px, 100%);
+  overflow: hidden;
+  border: 1px solid #3b454a;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.html-preview-frame {
+  display: block;
+  width: 100%;
+  height: min(62vh, 520px);
+  min-height: 280px;
+  border: 0;
+  background: #fff;
 }
 
 .terminal-open-button,
