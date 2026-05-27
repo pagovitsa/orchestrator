@@ -30,7 +30,11 @@ jobs:
         run: npm run lint
 
       - name: Test
-        run: npm test
+        env:
+          ORCH_WORKSPACE_ROOT: ${{ runner.temp }}/orch-workspace
+        run: |
+          mkdir -p "$ORCH_WORKSPACE_ROOT/οrchestrator"
+          npm test
 
       - name: Smoke
         shell: bash
