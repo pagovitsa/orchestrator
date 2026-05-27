@@ -2767,6 +2767,13 @@ function handleLiveAutopilot(event) {
     setStatus(`${project} autopilot thinking...`);
     return;
   }
+  if (event.phase === "retry") {
+    state.autopilotPhases.set(event.sessionId, "running");
+    renderSessions();
+    const seconds = Math.max(0, Math.ceil((Number(event.delayMs) || 0) / 1000));
+    setStatus(`${project} autopilot retry ${event.attempt || "?"}/${event.attempts || "?"}${seconds ? ` in ${seconds}s` : ""}`);
+    return;
+  }
   if (event.phase === "error") {
     state.autopilotPhases.set(event.sessionId, "failed");
     renderSessions();

@@ -19,7 +19,7 @@ import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../doma
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
 import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
-import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNext } from "../domain/autopilot.js";
+import { appendAutopilotHistory, autopilotMemoryArgs, decideAutopilotNextWithRetry } from "../domain/autopilot.js";
 import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
 import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../domain/idle-timeout.js";
 import {
@@ -42,6 +42,10 @@ const idleConfig = normalizeIdleTimeoutConfig({
   timeoutMs: runtime.autopilotIdleTimeoutMs,
   warningMs: runtime.autopilotIdleWarningMs,
 });
+const autopilotRetryConfig = {
+  attempts: runtime.autopilotRetryAttempts,
+  backoffMs: runtime.autopilotRetryBackoffMs,
+};
 const idleCheckIntervalMs = idleConfig.timeoutMs > 0 ? Math.max(250, Math.min(5000, Math.floor(idleConfig.timeoutMs / 4))) : 0;
 let idleCheckTimer = null;
 
@@ -117,6 +121,10 @@ function runStopReason(signal) {
   return "Stopped by user";
 }
 
+function errorDetail(error, limit = 1000) {
+  return redactSensitiveText(error?.message || String(error || "")).slice(0, limit);
+}
+
 function activeRunForProject(project) {
   for (const run of activeRuns.values()) {
     if (run.cwd === project) return run;
@@ -179,8 +187,10 @@ function checkIdleRuns() {
 }
 
 function createAutopilotDecisionTimeout(session) {
-  if (!idleConfig.timeoutMs) return { signal: undefined, clear() {} };
   const abortController = new AbortController();
+  if (!idleConfig.timeoutMs) {
+    return { signal: abortController.signal, abort: (reason) => abortController.abort(reason), clear() {} };
+  }
   const warningDelay = idleConfig.warningMs > 0 ? Math.max(0, idleConfig.timeoutMs - idleConfig.warningMs) : 0;
   const warningTimer = warningDelay > 0
     ? setTimeout(() => {
@@ -201,6 +211,7 @@ function createAutopilotDecisionTimeout(session) {
   timeoutTimer.unref();
   return {
     signal: abortController.signal,
+    abort: (reason) => abortController.abort(reason),
     clear() {
       if (warningTimer) clearTimeout(warningTimer);
       clearTimeout(timeoutTimer);
@@ -312,7 +323,7 @@ async function saveAutopilotFailure(session, error) {
     fresh.autopilotState = transitionWorkflowStatus(
       fresh.autopilotState,
       "failed",
-      error.message || String(error),
+      errorDetail(error),
     );
     return fresh;
   });
@@ -747,6 +758,9 @@ export async function handleApi(req, res, url) {
   if (sessionMatch && req.method === "PATCH") {
     const session = applySessionPatch(await loadSession(sessionMatch[1]), await readBody(req), { allowIdentityChange: false });
     await saveSession(session);
+    if (!session.autopilotEnabled) {
+      activeAutopilotRuns.get(session.id)?.abort?.(new Error("Autopilot disabled by user"));
+    }
     broadcastRunEvent(session.id, "", {
       type: "autopilot",
       phase: "state",
@@ -779,7 +793,7 @@ export async function handleApi(req, res, url) {
     }
     session = await saveAutopilotRunStarted(session, "Autopilot decision running");
     const decisionTimeout = createAutopilotDecisionTimeout(session);
-    activeAutopilotRuns.set(session.id, { signal: decisionTimeout.signal });
+    activeAutopilotRuns.set(session.id, { signal: decisionTimeout.signal, abort: decisionTimeout.abort });
     broadcastRunEvent(session.id, "", {
       type: "autopilot",
       phase: "thinking",
@@ -789,7 +803,32 @@ export async function handleApi(req, res, url) {
       at: new Date().toISOString(),
     });
     try {
-      const decision = await decideAutopilotNext(session, { signal: decisionTimeout.signal });
+      const result = await decideAutopilotNextWithRetry(session, {
+        signal: decisionTimeout.signal,
+        config: autopilotRetryConfig,
+        getSession: async (current) => {
+          const fresh = await loadSession(current.id);
+          if (!workflowCanRun(fresh.autopilotState, fresh.autopilotEnabled)) {
+            throw Object.assign(new Error(`Autopilot is ${fresh.autopilotState?.state || "paused"}`), { status: 409 });
+          }
+          return fresh;
+        },
+        onRetry: ({ nextAttempt, attempts, delayMs, error }) => {
+          broadcastRunEvent(session.id, "", {
+            type: "autopilot",
+            phase: "retry",
+            project: session.cwd,
+            supervisor: session.supervisor,
+            attempt: nextAttempt,
+            attempts,
+            delayMs,
+            error: errorDetail(error, 300),
+            at: new Date().toISOString(),
+          });
+        },
+      });
+      session = result.session;
+      const decision = result.decision;
       const saved = await saveAutopilotDecision(session, decision);
       void rememberAutopilotDecision(session, decision);
       emitHookEvent({

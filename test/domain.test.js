@@ -7,7 +7,10 @@ import { safeUploadName, isTextAttachment, saveAttachments } from "../src/domain
 import {
   appendAutopilotHistory,
   autopilotMemoryArgs,
+  decideAutopilotNextWithRetry,
+  isRetriableAutopilotError,
   normalizeAutopilotDecision,
+  normalizeAutopilotRetryConfig,
   parseAutopilotDecision,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
@@ -801,4 +804,80 @@ test("normalizeAutopilotDecision keeps stop when assistant asks for approval", (
 
   assert.equal(normalized.action, "stop");
   assert.equal(normalized.reason, "approval required");
+});
+
+test("autopilot retry config clamps invalid values", () => {
+  assert.deepEqual(normalizeAutopilotRetryConfig({ attempts: 0, backoffMs: -50 }), {
+    attempts: 1,
+    backoffMs: 0,
+  });
+  assert.deepEqual(normalizeAutopilotRetryConfig({ attempts: 2.8, backoffMs: 12.4 }), {
+    attempts: 3,
+    backoffMs: 12,
+  });
+});
+
+test("autopilot retry classification skips auth and retries transient failures", () => {
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("rate limited"), { status: 429 })), true);
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("server error"), { status: 503 })), true);
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("bad request"), { status: 400 })), false);
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("auth"), { status: 401 })), false);
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("reset"), { code: "ECONNRESET" })), true);
+  assert.equal(isRetriableAutopilotError(Object.assign(new Error("abort"), { name: "AbortError" })), false);
+});
+
+test("decideAutopilotNextWithRetry retries transient errors and reloads session", async () => {
+  const seen = [];
+  const retries = [];
+  const initial = { id: "s1", marker: 1 };
+  const reloaded = { id: "s1", marker: 2 };
+  const result = await decideAutopilotNextWithRetry(initial, {
+    config: { attempts: 3, backoffMs: 0 },
+    getSession: async () => reloaded,
+    onRetry: (event) => retries.push(event),
+    decide: async (session) => {
+      seen.push(session.marker);
+      if (seen.length === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+      return { action: "message", kind: "continue", content: "next", reason: "ok" };
+    },
+  });
+
+  assert.deepEqual(seen, [1, 2]);
+  assert.equal(retries.length, 1);
+  assert.equal(retries[0].nextAttempt, 2);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.session, reloaded);
+  assert.equal(result.decision.content, "next");
+});
+
+test("decideAutopilotNextWithRetry does not retry non-transient errors", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    decideAutopilotNextWithRetry({ id: "s1" }, {
+      config: { attempts: 3, backoffMs: 0 },
+      decide: async () => {
+        attempts += 1;
+        throw Object.assign(new Error("bad key"), { status: 401 });
+      },
+    }),
+    /bad key/,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("decideAutopilotNextWithRetry aborts during retry backoff", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const promise = decideAutopilotNextWithRetry({ id: "s1" }, {
+    signal: controller.signal,
+    config: { attempts: 3, backoffMs: 1000 },
+    decide: async () => {
+      attempts += 1;
+      throw Object.assign(new Error("rate limited"), { status: 429 });
+    },
+  });
+
+  setTimeout(() => controller.abort(new Error("cancelled")), 10);
+  await assert.rejects(promise, /cancelled/);
+  assert.equal(attempts, 1);
 });

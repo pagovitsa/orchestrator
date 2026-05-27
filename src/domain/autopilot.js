@@ -2,6 +2,8 @@ import { runtime } from "../config/env.js";
 
 const AUTOPILOT_MODEL = "deepseek-v4-pro";
 const MAX_DECISION_CHARS = 6000;
+const MAX_ERROR_BODY_CHARS = 1000;
+const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 const FALLBACK_CONTINUE_MESSAGE = [
   "Autopilot:",
   "Συνέχισε με προσοχή και απόλυτη προσήλωση στο project.",
@@ -155,6 +157,86 @@ export function autopilotMemoryArgs(decision) {
   };
 }
 
+export function normalizeAutopilotRetryConfig({
+  attempts = runtime.autopilotRetryAttempts,
+  backoffMs = runtime.autopilotRetryBackoffMs,
+} = {}) {
+  const normalizedAttempts = Number.isFinite(Number(attempts)) ? Math.max(1, Math.round(Number(attempts))) : 1;
+  const normalizedBackoff = Number.isFinite(Number(backoffMs)) ? Math.max(0, Math.round(Number(backoffMs))) : 0;
+  return { attempts: normalizedAttempts, backoffMs: normalizedBackoff };
+}
+
+export function isRetriableAutopilotError(error) {
+  if (!error) return false;
+  if (error.name === "AbortError") return false;
+  const status = Number(error.status || error.statusCode || 0);
+  if (status === 429 || status >= 500) return true;
+  if (status >= 400) return false;
+  if (TRANSIENT_ERROR_CODES.has(error.code)) return true;
+  if (TRANSIENT_ERROR_CODES.has(error.cause?.code)) return true;
+  return error instanceof TypeError;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : Object.assign(new Error("Autopilot retry aborted"), { name: "AbortError" });
+}
+
+function sleepWithAbort(ms, signal) {
+  throwIfAborted(signal);
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    timer.unref?.();
+    const abort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(signal.reason instanceof Error ? signal.reason : Object.assign(new Error("Autopilot retry aborted"), { name: "AbortError" }));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function decideAutopilotNextWithRetry(session, {
+  signal,
+  config = {},
+  decide = decideAutopilotNext,
+  getSession,
+  onRetry,
+} = {}) {
+  const retry = normalizeAutopilotRetryConfig(config);
+  let currentSession = session;
+  let lastError;
+
+  for (let attempt = 1; attempt <= retry.attempts; attempt += 1) {
+    throwIfAborted(signal);
+    if (attempt > 1 && getSession) currentSession = await getSession(currentSession);
+    try {
+      const decision = await decide(currentSession, { signal, attempt });
+      return { decision, session: currentSession, attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      throwIfAborted(signal);
+      if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) throw error;
+      const delayMs = retry.backoffMs * (2 ** (attempt - 1));
+      onRetry?.({
+        attempt,
+        nextAttempt: attempt + 1,
+        attempts: retry.attempts,
+        delayMs,
+        error,
+      });
+      await sleepWithAbort(delayMs, signal);
+    }
+  }
+
+  throw lastError || new Error("Autopilot retry exhausted");
+}
+
 export async function decideAutopilotNext(session, { signal } = {}) {
   const lastAssistant = latestAssistantMessage(session);
   if (hasRunError(lastAssistant)) {
@@ -186,7 +268,12 @@ export async function decideAutopilotNext(session, { signal } = {}) {
   });
 
   const body = await response.text();
-  if (!response.ok) throw new Error(`DeepSeek autopilot HTTP ${response.status}: ${body}`);
+  if (!response.ok) {
+    const details = body.length > MAX_ERROR_BODY_CHARS
+      ? `${body.slice(0, MAX_ERROR_BODY_CHARS)}...`
+      : body;
+    throw Object.assign(new Error(`DeepSeek autopilot HTTP ${response.status}: ${details}`), { status: response.status });
+  }
   const parsed = JSON.parse(body);
   const content = parsed.choices?.[0]?.message?.content || "";
   let decision;

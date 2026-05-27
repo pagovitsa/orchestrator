@@ -138,6 +138,8 @@ Autopilot enablement is stored with each project chat instead of only in browser
 
 Autopilot follow-up runs have an idle guard separate from manual messages. Set `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` to stop an automatically sent follow-up after silence, and `ORCH_AUTOPILOT_IDLE_WARNING_MS` to warn shortly before the stop; defaults are 15 minutes and 1 minute. Set the timeout to `0` to disable the idle guard. On server startup, stale Autopilot `running` state and persisted usage `active` flags from a previous process are cleared.
 
+Autopilot decision calls retry transient DeepSeek/network failures before marking the workflow failed. Set `ORCH_AUTOPILOT_RETRY_ATTEMPTS` and `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` to tune attempts and exponential backoff; attempts includes the first call. HTTP 429 and 5xx responses are retried, while auth/configuration errors fail immediately. The retry is only for the decision step, not the follow-up supervisor run, so persisted user messages are not duplicated.
+
 ## Credentials
 
 The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, and the DeepSeek model registry. It does not bake account tokens or API keys.
