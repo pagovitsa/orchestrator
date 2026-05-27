@@ -1123,6 +1123,31 @@ input {
   white-space: nowrap;
 }
 
+.timeline-meta-lines {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  border-top: 1px solid var(--line);
+  padding: 8px 10px;
+  color: #cbd7d2;
+  font-size: 12px;
+}
+
+.timeline-meta-lines dt {
+  color: var(--muted);
+}
+
+.timeline-meta-lines dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.timeline-meta-lines + .timeline-detail {
+  border-top: 0;
+}
+
 .timeline-detail {
   margin: 0;
   border-top: 1px solid var(--line);

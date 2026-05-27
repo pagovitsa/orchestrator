@@ -80,6 +80,11 @@ export function redactSensitiveStrings(value) {
   if (Array.isArray(value)) return value.map((item) => redactSensitiveStrings(item));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, redactSensitiveStrings(entry)]),
+    Object.entries(value).map(([key, entry]) => {
+      if (/(?:api|access|refresh|auth|id|client)?[_ -]?(?:key|token|secret|password|passwd)|authorization/i.test(key)) {
+        return [key, "[redacted]"];
+      }
+      return [key, redactSensitiveStrings(entry)];
+    }),
   );
 }

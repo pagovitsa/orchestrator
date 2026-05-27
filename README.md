@@ -128,6 +128,10 @@ Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage 
 
 Set `ORCH_BUDGET_WARNING_USD` to show a budget warning once lifetime reported dollar cost reaches that amount. `ORCH_BUDGET_USD` is accepted as a legacy alias. This is a warning only; it does not stop runs. Models that do not report dollar cost still show runs/tokens/provider quota but do not contribute dollar spend unless a provider balance probe exposes spend.
 
+### Run Timeline
+
+The terminal modal includes a chronological run timeline for supervisor, command, tool, peer, memory, hook, and autopilot events. Timeline cards show status, timestamp, duration when known, redacted metadata, and compact details so failed or slow steps can be inspected without digging through raw terminal output.
+
 ## Credentials
 
 The image contains the UI, the Claude/Codex/Gemini CLIs, PAL MCP, and the DeepSeek model registry. It does not bake account tokens or API keys.

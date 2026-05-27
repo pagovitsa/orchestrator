@@ -341,6 +341,7 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
       status: "running",
       title: commandText,
       detail: `[cwd] ${cwd}\n`,
+      meta: { cwd, command },
     });
     const child = spawn(command, args, {
       cwd,
@@ -396,6 +397,7 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
         detail: [`[cwd] ${cwd}`, `[spawn error] ${error.message}`].join("\n"),
         endedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
+        meta: { cwd, command },
       });
       resolve({ ok: false, stdout, stderr: `${stderr}\n${error.message}`.trim(), code: -1, timedOut });
     });
@@ -417,6 +419,7 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
         ].filter(Boolean).join("\n"),
         endedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAt,
+        meta: { cwd, command, exitCode: code },
       });
       resolve({ ok: code === 0 && !timedOut && !stdinError, stdout, stderr, code, timedOut });
     });
@@ -482,7 +485,8 @@ function createClaudeStreamParser(options = {}) {
   const tools = new Map();
 
   const traceToolResult = (toolUseId, content) => {
-    const name = tools.get(toolUseId) || toolUseId || "tool";
+    const tool = tools.get(toolUseId) || {};
+    const name = tool.name || toolUseId || "tool";
     const summary = summarizeToolResult(content);
     emitTrace(options, `[result] ${palToolLabel(name)} ${summary}`.trim());
     emitTimeline(options, {
@@ -492,6 +496,8 @@ function createClaudeStreamParser(options = {}) {
       title: palToolLabel(name),
       detail: summary,
       endedAt: new Date().toISOString(),
+      durationMs: tool.startedAt ? Date.now() - tool.startedAt : undefined,
+      meta: { tool: name },
     });
   };
 
@@ -524,7 +530,7 @@ function createClaudeStreamParser(options = {}) {
           options.onOutput?.({ stream: "stdout", content: part.text });
         }
         if (part.type === "tool_use") {
-          tools.set(part.id, part.name);
+          tools.set(part.id, { name: part.name, startedAt: Date.now() });
           const input = summarizeToolInput(part.input);
           emitTrace(options, `[tool] ${palToolLabel(part.name)}${input ? ` ${input}` : ""}`);
           emitTimeline(options, {
@@ -533,6 +539,7 @@ function createClaudeStreamParser(options = {}) {
             status: "running",
             title: palToolLabel(part.name),
             detail: input,
+            meta: { tool: part.name },
           });
         }
       }
@@ -920,6 +927,7 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
         emitTrace(options, `[deepseek] ${toolName} <- completed (${result.length} chars)`);
       } else if (toolName.startsWith("memory_")) {
         const taskId = nextTimelineId("memory");
+        const startedAt = Date.now();
         emitTrace(options, `[deepseek] ${toolName} -> memory`);
         emitTimeline(options, {
           id: taskId,
@@ -927,6 +935,7 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
           status: "running",
           title: toolName,
           detail: compactTraceText(JSON.stringify(args), 600),
+          meta: { tool: toolName },
         });
         try {
           result = await runDeepSeekMemoryTool(session, toolName, args);
@@ -937,6 +946,8 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
             title: toolName,
             detail: compactTraceText(result, 1000),
             endedAt: new Date().toISOString(),
+            durationMs: Date.now() - startedAt,
+            meta: { tool: toolName },
           });
         } catch (error) {
           result = `Memory tool error: ${error.message || String(error)}`;
@@ -947,6 +958,8 @@ async function callDeepSeekWithPeerTools(session, messages, options = {}) {
             title: toolName,
             detail: result,
             endedAt: new Date().toISOString(),
+            durationMs: Date.now() - startedAt,
+            meta: { tool: toolName },
           });
         }
         emitTrace(options, `[deepseek] ${toolName} <- memory completed`);
@@ -974,6 +987,7 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
   const peer = toolName.replace(/^ask_/, "");
   if (!["claude", "codex", "gemini"].includes(peer)) throw new Error(`Unknown DeepSeek peer tool: ${toolName}`);
   const taskId = nextTimelineId("peer");
+  const startedAt = Date.now();
   const peerSession = { ...session, supervisor: peer, messages: [], cwd: session.cwd || "." };
   const systemPrompt = await loadPrompt(peerSession.supervisor);
   const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, {
@@ -995,6 +1009,7 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
     status: "running",
     title: `DeepSeek -> ${peer}`,
     detail: compactTraceText(prompt, 1200),
+    meta: { peer, tool: toolName },
   });
   try {
     let answer;
@@ -1009,6 +1024,8 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
       title: `DeepSeek -> ${peer}`,
       detail: `${answer.length} chars returned`,
       endedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      meta: { peer, tool: toolName },
     });
     return answer;
   } catch (error) {
@@ -1019,6 +1036,8 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
       title: `DeepSeek -> ${peer}`,
       detail: error.message || String(error),
       endedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      meta: { peer, tool: toolName },
     });
     throw error;
   }
@@ -1078,6 +1097,7 @@ export async function runSupervisor(session, userContent, options = {}) {
     status: "running",
     title: `${supervisor} supervisor`,
     detail: `cwd=${runSession.cwd || "."}`,
+    meta: { supervisor, cwd: runSession.cwd || "." },
   });
   const startedAt = Date.now();
   try {
@@ -1104,6 +1124,7 @@ export async function runSupervisor(session, userContent, options = {}) {
       detail: `${String(answer || "").length} chars returned`,
       endedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
+      meta: { supervisor, cwd: runSession.cwd || "." },
     });
     return answer;
   } catch (error) {
@@ -1115,6 +1136,7 @@ export async function runSupervisor(session, userContent, options = {}) {
       detail: error.message || String(error),
       endedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
+      meta: { supervisor, cwd: runSession.cwd || "." },
     });
     throw error;
   }

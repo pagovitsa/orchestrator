@@ -1955,6 +1955,41 @@ function formatDuration(ms) {
   return `${seconds}s`;
 }
 
+function formatTimelineTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.toISOString().slice(11, 19)}Z`;
+}
+
+function formatTimelineMetaValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function createTimelineMetaList(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const entries = Object.entries(meta)
+    .map(([key, value]) => [key, formatTimelineMetaValue(value)])
+    .filter(([, value]) => value);
+  if (!entries.length) return null;
+
+  const list = document.createElement("dl");
+  list.className = "timeline-meta-lines";
+  for (const [key, value] of entries) {
+    const term = document.createElement("dt");
+    term.textContent = key;
+    const detail = document.createElement("dd");
+    detail.textContent = value;
+    list.append(term, detail);
+  }
+  return list;
+}
+
 function createTimelineCard(event) {
   const details = document.createElement("details");
   details.className = `timeline-card ${event.status || "info"}`;
@@ -1970,6 +2005,7 @@ function createTimelineCard(event) {
   const meta = document.createElement("span");
   meta.className = "timeline-meta";
   meta.textContent = [
+    formatTimelineTime(event.at),
     event.kind || "info",
     timelineStatusLabel(event.status),
     formatDuration(event.durationMs),
@@ -1977,6 +2013,9 @@ function createTimelineCard(event) {
 
   summary.append(title, meta);
   details.appendChild(summary);
+
+  const metaList = createTimelineMetaList(event.meta);
+  if (metaList) details.appendChild(metaList);
 
   const body = document.createElement("pre");
   body.className = "timeline-detail";

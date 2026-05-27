@@ -1,3 +1,5 @@
+import { redactSensitiveStrings, redactSensitiveText } from "./safety.js";
+
 const validKinds = new Set(["supervisor", "command", "tool", "memory", "model", "hook", "autopilot", "info"]);
 const validStatuses = new Set(["running", "completed", "failed", "stopped", "info"]);
 
@@ -9,7 +11,7 @@ function cleanText(value, max = 240) {
 }
 
 function cleanDetail(value) {
-  return String(value || "").replace(/\0/g, "").slice(0, maxTimelineDetailChars);
+  return redactSensitiveText(String(value || "").replace(/\0/g, "")).slice(0, maxTimelineDetailChars);
 }
 
 function cleanId(value) {
@@ -34,7 +36,9 @@ export function createTimelineEvent(raw = {}) {
   };
   if (raw.endedAt) event.endedAt = raw.endedAt;
   if (Number.isFinite(raw.durationMs)) event.durationMs = Math.max(0, Math.round(raw.durationMs));
-  if (raw.meta && typeof raw.meta === "object" && !Array.isArray(raw.meta)) event.meta = raw.meta;
+  if (raw.meta && typeof raw.meta === "object" && !Array.isArray(raw.meta)) {
+    event.meta = redactSensitiveStrings(raw.meta);
+  }
   return event;
 }
 

@@ -18,9 +18,9 @@ import {
   readMemory,
   rememberMemory,
 } from "../src/domain/memory.js";
-import { mergeTimelineEvent } from "../src/domain/run-timeline.js";
+import { createTimelineEvent, mergeTimelineEvent } from "../src/domain/run-timeline.js";
 import { applySessionPatch, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
-import { containsSensitiveText, redactSensitiveText } from "../src/domain/safety.js";
+import { containsSensitiveText, redactSensitiveStrings, redactSensitiveText } from "../src/domain/safety.js";
 import { mcpToolCatalog } from "../src/supervisors/mcp.js";
 import { formatMemoryContext } from "../src/supervisors/runner.js";
 import {
@@ -244,6 +244,18 @@ test("safety scanner detects and redacts credential-shaped text", () => {
   assert.doesNotMatch(redacted, /sk-secret123456/);
 });
 
+test("safety scanner redacts sensitive object keys", () => {
+  assert.deepEqual(redactSensitiveStrings({
+    model: "deepseek-v4-pro",
+    password: "super-secret-value",
+    nested: { apiToken: "abcdef123456" },
+  }), {
+    model: "deepseek-v4-pro",
+    password: "[redacted]",
+    nested: { apiToken: "[redacted]" },
+  });
+});
+
 test("saveSession redacts secrets before persistence", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
   const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
@@ -343,6 +355,27 @@ test("run timeline events merge updates by id", () => {
   assert.equal(merged[0].status, "completed");
   assert.equal(merged[0].detail, "[cwd] /workspace/app");
   assert.equal(merged[0].durationMs, 1234);
+});
+
+test("run timeline event meta is redacted before storage", () => {
+  const event = createTimelineEvent({
+    id: "tool-1",
+    kind: "tool",
+    status: "completed",
+    title: "tool",
+    detail: "Authorization: Bearer abcdefghijklmnop",
+    meta: {
+      model: "deepseek-v4-pro",
+      authorization: "Bearer sk-secret-token-123456",
+      nested: { password: "super-secret-value" },
+    },
+  });
+
+  assert.equal(event.meta.model, "deepseek-v4-pro");
+  assert.equal(event.meta.authorization, "[redacted]");
+  assert.equal(event.meta.nested.password, "[redacted]");
+  assert.match(event.detail, /Authorization: \[redacted\]/);
+  assert.doesNotMatch(event.detail, /abcdefghijklmnop/);
 });
 
 test("formatMemoryContext injects namespaced memories for supervisors", () => {
