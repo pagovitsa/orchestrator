@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, shouldCollapseTerminalContent, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -151,6 +151,7 @@ const el = {
   sessionList: document.getElementById("sessionList"),
   status: document.getElementById("status"),
   messages: document.getElementById("messages"),
+  scrollToBottomButton: document.getElementById("scrollToBottomButton"),
   composer: document.getElementById("composer"),
   messageInput: document.getElementById("messageInput"),
   attachmentMenuButton: document.getElementById("attachmentMenuButton"),
@@ -1804,6 +1805,7 @@ function renderMessages({ forceScroll = false } = {}) {
     el.messages.appendChild(createMessageElement(message));
   }
   if (shouldStick) scrollMessagesToBottom();
+  else updateScrollToBottomVisibility();
 }
 
 function createMessageElement(message) {
@@ -1960,8 +1962,15 @@ function looksLikeStandaloneHtml(value) {
 }
 
 function splitMessageContent(message) {
-  const content = String(message.content || message.status || (message.streaming ? "Starting..." : ""));
-  if (message.role !== "assistant") return [{ type: "text", content }];
+  const rawContent = String(message.content || message.status || (message.streaming ? "Starting..." : ""));
+  if (message.role !== "assistant") return [{ type: "text", content: rawContent }];
+
+  // A failed/stopped assistant turn that produced megabytes of raw transcript would otherwise
+  // render the entire dump into the chat bubble. Collapse to the trailing reason; the full
+  // payload remains accessible via the terminal button.
+  const content = shouldCollapseTerminalContent(message)
+    ? extractErrorReason(rawContent, { error: Boolean(message.error) })
+    : rawContent;
 
   const parts = [];
   let lastIndex = 0;
@@ -2007,13 +2016,16 @@ function renderMessageBody(body, message) {
     body.appendChild(text);
   }
 
-  if (!message.streaming && !message.trace?.length && !message.timeline?.length) return;
+  const hasTerminalContent = message.streaming || message.trace?.length || message.timeline?.length;
+  const showForCollapsedError = shouldCollapseTerminalContent(message);
+  if (!hasTerminalContent && !showForCollapsedError) return;
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "terminal-open-button";
-  button.title = "Open terminal";
-  button.setAttribute("aria-label", "Open terminal");
+  const title = showForCollapsedError && !hasTerminalContent ? "Show full output" : "Open terminal";
+  button.title = title;
+  button.setAttribute("aria-label", title);
   button.innerHTML = iconSvg(icons.terminal);
   button.addEventListener("click", () => openTerminalModal(message));
   body.appendChild(button);
@@ -2035,8 +2047,12 @@ function terminalTitleFor(message) {
   return `${supervisor} terminal`;
 }
 
-function terminalText(trace = []) {
-  return trace?.length ? trace.join("") : "Waiting for terminal output...";
+function terminalText(message) {
+  if (message?.trace?.length) return message.trace.join("");
+  // For collapsed errors there is no captured trace but the full raw output is in `content`;
+  // route it into the terminal modal so the user can still inspect what the model produced.
+  if (shouldCollapseTerminalContent(message)) return String(message.content || "");
+  return "Waiting for terminal output...";
 }
 
 function timelineStatusLabel(status) {
@@ -2156,7 +2172,7 @@ function renderTerminalModal() {
   }
   el.terminalTitle.textContent = terminalTitleFor(message);
   renderTerminalTimeline(message.timeline || []);
-  el.terminalOutput.textContent = terminalText(message.trace);
+  el.terminalOutput.textContent = terminalText(message);
   if (shouldStick) scrollElementToBottom(el.terminalOutput);
 }
 
@@ -2198,6 +2214,7 @@ function updateLastMessage(message) {
 
 function scrollMessagesToBottom() {
   scrollElementToBottom(el.messages);
+  updateScrollToBottomVisibility();
 }
 
 function createAttachmentList(attachments, removable) {
@@ -3157,6 +3174,22 @@ async function init() {
   connectLiveEvents();
   await resumeAutopilotSessions();
 }
+
+function updateScrollToBottomVisibility() {
+  if (!el.scrollToBottomButton || !el.messages) return;
+  // Only offer the shortcut when there's enough scroll to bother — empty/short conversations
+  // would feel cluttered by the floating button.
+  const overflowing = el.messages.scrollHeight > el.messages.clientHeight + 24;
+  const atBottom = isNearBottom(el.messages);
+  el.scrollToBottomButton.hidden = !overflowing || atBottom;
+}
+
+el.scrollToBottomButton?.addEventListener("click", () => {
+  scrollElementToBottom(el.messages);
+  updateScrollToBottomVisibility();
+});
+el.messages?.addEventListener("scroll", updateScrollToBottomVisibility, { passive: true });
+window.addEventListener("resize", updateScrollToBottomVisibility);
 
 el.newChat.addEventListener("click", openNewChatModal);
 el.tailscaleSetup.addEventListener("click", () => openTailscaleModal());

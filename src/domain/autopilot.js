@@ -207,11 +207,14 @@ function sleepWithAbort(ms, signal) {
   if (!ms) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const cleanup = () => signal?.removeEventListener("abort", abort);
+    // Do NOT unref the timer: under Node 22 the test runner flags unref'd timers as
+    // "Promise resolution is still pending but the event loop has already resolved" when no
+    // other work keeps the loop alive. The actual sleep is bounded (retry backoff in seconds)
+    // so we don't need unref in production either.
     const timer = setTimeout(() => {
       cleanup();
       resolve();
     }, ms);
-    timer.unref?.();
     const abort = () => {
       clearTimeout(timer);
       cleanup();

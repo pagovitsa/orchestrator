@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, shouldCollapseTerminalContent, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -239,4 +239,39 @@ test("createSessionSendGate blocks duplicate sends until released", () => {
   gate.finish("session-a");
   assert.equal(gate.has("session-a"), false);
   assert.equal(gate.tryStart("session-a"), true);
+});
+
+test("shouldCollapseTerminalContent only triggers for long error/stopped messages", () => {
+  assert.equal(shouldCollapseTerminalContent({ role: "assistant", content: "x".repeat(2000) }), false);
+  assert.equal(shouldCollapseTerminalContent({ role: "assistant", content: "Error: oops", error: true }), false);
+  assert.equal(shouldCollapseTerminalContent({ role: "assistant", content: "x".repeat(2000), error: true }), true);
+  assert.equal(shouldCollapseTerminalContent({ role: "assistant", content: "x".repeat(2000), stopped: true }), true);
+  assert.equal(shouldCollapseTerminalContent(null), false);
+});
+
+test("extractErrorReason picks the trailing Error: line and falls back to last lines", () => {
+  const full = `Some long transcript line\nmore stuff\n\nError: HTTP 429 rate limited`;
+  assert.equal(extractErrorReason(full, { error: true }), "Error: HTTP 429 rate limited");
+  // Multi-line error keeps up to 3 non-JSON lines
+  const multiline = `transcript\n\nError: First line\nshort detail\nthird short line\nfourth line drops off`;
+  assert.equal(extractErrorReason(multiline, { error: true }), "Error: First line\nshort detail\nthird short line…");
+  // No Error: prefix → last lines (compressed)
+  const noPrefix = `line a\nline b\nline c`;
+  assert.equal(extractErrorReason(noPrefix, { error: true }), "line a\nline b\nline c");
+  // Empty content
+  assert.equal(extractErrorReason("", { error: true }), "Error");
+  assert.equal(extractErrorReason("", { error: false }), "Stopped");
+  // Huge Error: block (the my-harmony case) — must be capped, not echoed in full.
+  const huge = "Error: stdout:\n" + "x".repeat(500_000);
+  const compact = extractErrorReason(huge, { error: true });
+  assert.ok(compact.length < 500, `reason too long: ${compact.length}`);
+  assert.ok(compact.startsWith("Error: stdout:"), `unexpected start: ${compact.slice(0, 40)}`);
+  // When Error: appears multiple times, the LAST one wins (server appends Error: at the end).
+  const trailing = `Error: noise from elsewhere in transcript\n\nReal text\n\nError: actual reason 429`;
+  assert.equal(extractErrorReason(trailing, { error: true }), "Error: actual reason 429");
+  // JSON-looking lines get replaced with a placeholder so the bubble stays readable.
+  const withJson = `Error: stdout:\n{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":0.99}}\nerror: rate limit hit`;
+  const jsonReason = extractErrorReason(withJson, { error: true });
+  assert.match(jsonReason, /<raw output/);
+  assert.ok(!/rate_limit_event/.test(jsonReason), `JSON leaked into preview: ${jsonReason}`);
 });

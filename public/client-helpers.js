@@ -95,6 +95,71 @@ export function autopilotNeedsDecision(session) {
   return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;
 }
 
+// When a supervisor run fails, the server writes the full transcript followed by an
+// "Error: <details>" line into the assistant message content. Long failures (e.g. Claude
+// streaming megabytes of NDJSON before crashing) produce huge bubbles that drown the actual
+// reason. Collapse those into the reason line and let the terminal modal carry the raw output.
+const ERROR_COLLAPSE_THRESHOLD = 800;
+const ERROR_REASON_MAX_CHARS = 400;
+const ERROR_REASON_MAX_LINES = 3;
+const ERROR_LINE_PATTERN = /(?:^|\n)Error:\s/;
+
+export function shouldCollapseTerminalContent(message) {
+  if (!message || (!message.error && !message.stopped)) return false;
+  return String(message.content || "").length > ERROR_COLLAPSE_THRESHOLD;
+}
+
+// Trim a possibly-huge multi-line block down to a few user-readable lines. The full content
+// remains accessible via the terminal button — this is just for the chat bubble preview.
+// JSON-looking lines (the supervisor's stream-json events dumped into the error) are replaced
+// with a placeholder so the preview stays readable.
+function looksLikeJsonLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (trimmed.length < 30) return false;
+  return /^[{[]/.test(trimmed) || /"\s*:\s*[{["0-9tfn]/.test(trimmed);
+}
+
+function compressReason(text) {
+  const cleaned = String(text || "").replace(/\s+$/g, "");
+  const rawLines = cleaned.split("\n");
+  const condensed = [];
+  let suppressed = false;
+  for (const line of rawLines) {
+    if (looksLikeJsonLine(line)) {
+      if (!suppressed) condensed.push("<raw output - tap terminal to view>");
+      suppressed = true;
+      continue;
+    }
+    suppressed = false;
+    condensed.push(line);
+    if (condensed.length >= ERROR_REASON_MAX_LINES) break;
+  }
+  let result = condensed.join("\n");
+  if (result.length > ERROR_REASON_MAX_CHARS) result = result.slice(0, ERROR_REASON_MAX_CHARS).trimEnd() + "…";
+  else if (cleaned.length > result.length && !result.endsWith("…")) result = result + "…";
+  return result;
+}
+
+export function extractErrorReason(content, { error = true } = {}) {
+  const text = String(content || "");
+  if (!text.trim()) return error ? "Error" : "Stopped";
+  if (error) {
+    // Prefer the LAST "Error: ..." section. Server-side error composition appends
+    // "Error: <details>" after the transcript, so the meaningful reason is at the end.
+    let lastIndex = -1;
+    for (const match of text.matchAll(/(?:^|\n)Error:\s/g)) lastIndex = match.index ?? lastIndex;
+    if (lastIndex >= 0) {
+      const tail = text.slice(lastIndex).replace(/^\n/, "");
+      return compressReason(tail);
+    }
+  }
+  // No explicit Error: marker — show the last few non-empty lines.
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return error ? "Error" : "Stopped";
+  return compressReason(lines.slice(-ERROR_REASON_MAX_LINES).join("\n"));
+}
+
 export function autopilotCanResumeFromSummary(session) {
   if (!session?.id || session.autopilotEnabled !== true) return false;
   const workflowState = String(session.autopilotState?.state || "created").toLowerCase();

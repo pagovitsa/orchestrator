@@ -547,6 +547,48 @@ input {
   min-width: 0;
   height: 100vh;
   height: 100dvh;
+  position: relative;
+}
+
+.scroll-to-bottom-button {
+  position: absolute;
+  right: clamp(14px, 2vw, 28px);
+  bottom: calc(var(--composer-height, 96px) + 18px);
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
+  transition: transform 0.12s ease, opacity 0.12s ease;
+  z-index: 10;
+  opacity: 0.92;
+}
+
+.scroll-to-bottom-button:hover,
+.scroll-to-bottom-button:focus-visible {
+  opacity: 1;
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.scroll-to-bottom-button[hidden] {
+  display: none;
+}
+
+.scroll-to-bottom-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .messages {
@@ -589,6 +631,11 @@ input {
 
 .message.error {
   border-color: var(--danger);
+}
+
+.message.error .message-body,
+.message.stopped .message-body {
+  white-space: pre-wrap;
 }
 
 .message.stopped {
