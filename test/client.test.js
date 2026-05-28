@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, shouldCollapseTerminalContent, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -274,4 +274,37 @@ test("extractErrorReason picks the trailing Error: line and falls back to last l
   const jsonReason = extractErrorReason(withJson, { error: true });
   assert.match(jsonReason, /<raw output/);
   assert.ok(!/rate_limit_event/.test(jsonReason), `JSON leaked into preview: ${jsonReason}`);
+});
+
+test("nextWizardStep skips steps whose prerequisite is not ready, and clamps to the last step", () => {
+  const steps = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  // No skipping
+  assert.equal(nextWizardStep(steps, "a", () => true), "b");
+  assert.equal(nextWizardStep(steps, "c", () => true), "d");
+  // Skip b because it's not ready
+  assert.equal(nextWizardStep(steps, "a", (id) => id !== "b"), "c");
+  // No subsequent ready step -> stop at last
+  assert.equal(nextWizardStep(steps, "c", () => false), "d");
+  // Unknown current id treats as "before a"
+  assert.equal(nextWizardStep(steps, "__start__", () => true), "a");
+  // Empty steps return null
+  assert.equal(nextWizardStep([], "x", () => true), null);
+});
+
+test("prevWizardStep stops at the first step and respects empty arrays", () => {
+  const steps = [{ id: "one" }, { id: "two" }, { id: "three" }];
+  assert.equal(prevWizardStep(steps, "two"), "one");
+  assert.equal(prevWizardStep(steps, "three"), "two");
+  assert.equal(prevWizardStep(steps, "one"), "one");
+  assert.equal(prevWizardStep(steps, "missing"), "one");
+  assert.equal(prevWizardStep([], "x"), null);
+});
+
+test("wizardProgress returns 1-indexed step and percent", () => {
+  const steps = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  assert.deepEqual(wizardProgress(steps, "a"), { index: 1, total: 4, percent: 25 });
+  assert.deepEqual(wizardProgress(steps, "c"), { index: 3, total: 4, percent: 75 });
+  assert.deepEqual(wizardProgress(steps, "d"), { index: 4, total: 4, percent: 100 });
+  assert.deepEqual(wizardProgress(steps, "missing"), { index: 1, total: 4, percent: 25 });
+  assert.deepEqual(wizardProgress([], "x"), { index: 0, total: 0, percent: 0 });
 });

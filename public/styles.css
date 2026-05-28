@@ -1170,8 +1170,72 @@ input {
 .settings-menu-status[data-state="ok"] { color: #22c55e; }
 .settings-menu-status[data-state="warn"] { color: var(--danger); }
 
-.github-modal { width: min(640px, calc(100vw - 28px)); }
-.github-publish-modal { width: min(520px, calc(100vw - 28px)); }
+.github-modal { width: min(560px, calc(100vw - 28px)); }
+
+/* ------------ shared wizard primitives ------------ */
+.wizard { display: grid; gap: 14px; padding: 18px; }
+
+.wizard-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.wizard-step-count {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.wizard-progress {
+  height: 4px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.wizard-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.2s ease;
+}
+
+.wizard-step {
+  display: grid;
+  gap: 12px;
+  padding: 4px 2px 0;
+}
+
+.wizard-step[hidden] { display: none; }
+
+.wizard-step h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.wizard-step input,
+.wizard-step textarea {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-spacer { flex: 1; }
 
 .modal-hint {
   margin: 0;

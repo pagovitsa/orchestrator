@@ -135,72 +135,126 @@
     </dialog>
 
     <dialog id="tailscaleDialog" class="modal tailscale-modal">
-      <form id="tailscaleForm" class="modal-panel tailscale-panel">
+      <form id="tailscaleForm" class="modal-panel wizard tailscale-panel" data-wizard="tailscale">
         <div class="modal-head">
-          <h2>Tailscale</h2>
+          <div class="wizard-head">
+            <h2>Tailscale setup</h2>
+            <span class="wizard-step-count" id="tailscaleStepCount">Step 1 of 4</span>
+          </div>
           <button id="closeTailscale" class="icon-button" type="button" aria-label="Close">x</button>
         </div>
 
-        <div class="tailscale-state">
-          <span id="tailscaleStateDot" class="tailscale-state-dot"></span>
-          <span id="tailscaleStateText">Not configured</span>
-        </div>
+        <div class="wizard-progress"><div class="wizard-progress-bar" id="tailscaleProgressBar"></div></div>
 
-        <div class="modal-field">
-          <label for="tailscaleAuthKey">Auth key</label>
-          <input id="tailscaleAuthKey" type="password" autocomplete="off" placeholder="tskey-auth-...">
-        </div>
+        <section class="wizard-step" data-step="status">
+          <h3>Where are we?</h3>
+          <p class="modal-hint">We'll wire the sidecar so the UI is reachable on your tailnet at <code>https://&lt;hostname&gt;.&lt;tailnet&gt;.ts.net/</code>.</p>
+          <div class="tailscale-state">
+            <span id="tailscaleStateDot" class="tailscale-state-dot"></span>
+            <span id="tailscaleStateText">Not configured</span>
+          </div>
+        </section>
 
-        <div class="modal-field">
-          <label for="tailscaleHostname">Device name</label>
-          <input id="tailscaleHostname" autocomplete="off" maxlength="63" placeholder="orch-ui">
-        </div>
+        <section class="wizard-step" data-step="authkey" hidden>
+          <h3>Tailscale auth key</h3>
+          <p class="modal-hint">Generate one at <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">login.tailscale.com/admin/settings/keys</a>. Reusable + ephemeral both work. Stored only on this server.</p>
+          <div class="modal-field">
+            <label for="tailscaleAuthKey">Auth key</label>
+            <input id="tailscaleAuthKey" type="password" autocomplete="off" placeholder="tskey-auth-...">
+          </div>
+        </section>
 
-        <div class="modal-field">
-          <label for="tailscaleHttpsHost">HTTPS host</label>
-          <input id="tailscaleHttpsHost" autocomplete="off" placeholder="https://orch-ui.example.ts.net">
-        </div>
+        <section class="wizard-step" data-step="identity" hidden>
+          <h3>Device + HTTPS host</h3>
+          <p class="modal-hint">Pick a short device name. The HTTPS host is what the browser uses — usually <code>https://&lt;device&gt;.&lt;your-tailnet&gt;.ts.net</code>.</p>
+          <div class="modal-field">
+            <label for="tailscaleHostname">Device name</label>
+            <input id="tailscaleHostname" autocomplete="off" maxlength="63" placeholder="orch-ui">
+          </div>
+          <div class="modal-field">
+            <label for="tailscaleHttpsHost">HTTPS host</label>
+            <input id="tailscaleHttpsHost" autocomplete="off" placeholder="https://orch-ui.example.ts.net">
+          </div>
+        </section>
+
+        <section class="wizard-step" data-step="done" hidden>
+          <h3>All set</h3>
+          <p class="modal-hint">Tailscale is configured. The sidecar will keep the connection warm.</p>
+          <div class="tailscale-state">
+            <span class="tailscale-state-dot configured"></span>
+            <span id="tailscaleDoneSummary">Ready</span>
+          </div>
+        </section>
 
         <div id="tailscaleStatus" class="modal-error" role="alert"></div>
 
-        <div class="modal-actions">
+        <div class="modal-actions wizard-actions">
+          <button id="tailscaleBack" class="secondary" type="button" data-wizard-back>Back</button>
+          <span class="modal-spacer"></span>
           <button id="skipTailscale" class="secondary" type="button">Skip</button>
-          <button id="saveTailscale" class="primary" type="submit">Save</button>
+          <button id="tailscaleNext" class="primary" type="button" data-wizard-next>Next</button>
+          <button id="saveTailscale" class="primary" type="submit" hidden>Save</button>
+          <button id="tailscaleFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
         </div>
       </form>
     </dialog>
 
     <dialog id="githubDialog" class="modal github-modal">
-      <div class="modal-panel">
+      <div class="modal-panel wizard" data-wizard="github">
         <div class="modal-head">
-          <h2>GitHub setup</h2>
+          <div class="wizard-head">
+            <h2>GitHub setup</h2>
+            <span class="wizard-step-count" id="githubStepCount">Step 1 of 4</span>
+          </div>
           <button id="closeGithubDialog" class="icon-button" type="button" aria-label="Close">x</button>
         </div>
-        <p class="modal-hint">Connect once, publish any project as a <strong>private</strong> repo with one click. New repos always start private.</p>
-        <ol class="github-steps">
-          <li>
-            <h3>Add the SSH public key to your GitHub account</h3>
-            <p class="modal-hint">Open <a href="https://github.com/settings/ssh/new" target="_blank" rel="noopener">github.com/settings/ssh/new</a>, paste the key, give it any title.</p>
-            <textarea id="githubPublicKey" class="github-key" readonly rows="3" placeholder="Click 'Generate key' to create the orchestrator SSH keypair"></textarea>
-            <div class="github-row">
-              <button id="generateGithubKeyButton" class="secondary" type="button">Generate key</button>
-              <button id="copyGithubKeyButton" class="secondary" type="button">Copy</button>
-            </div>
-          </li>
-          <li>
-            <h3>Paste a Personal Access Token (fine-grained or classic) with <code>repo</code> scope</h3>
-            <p class="modal-hint">Create one at <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=Orch%20UI" target="_blank" rel="noopener">github.com/settings/tokens</a>. Stored only on this server.</p>
-            <input id="githubTokenInput" type="password" placeholder="ghp_..." autocomplete="off">
-            <div class="github-row">
-              <button id="saveGithubTokenButton" class="primary" type="button">Save token</button>
-              <button id="testGithubSshButton" class="secondary" type="button">Test SSH</button>
-            </div>
-          </li>
-        </ol>
+
+        <div class="wizard-progress"><div class="wizard-progress-bar" id="githubProgressBar"></div></div>
+
+        <section class="wizard-step" data-step="key">
+          <h3>1. Generate the orchestrator SSH key</h3>
+          <p class="modal-hint">An ed25519 keypair lives only on this server (under <code>/data/secrets/github/</code>). The supervisors use it for every <code>git push</code> and <code>git clone</code>.</p>
+          <button id="generateGithubKeyButton" class="primary" type="button">Generate / load key</button>
+        </section>
+
+        <section class="wizard-step" data-step="add" hidden>
+          <h3>2. Add the public key to your GitHub account</h3>
+          <p class="modal-hint">Open <a href="https://github.com/settings/ssh/new" target="_blank" rel="noopener">github.com/settings/ssh/new</a>, paste the key below, save with any title (e.g. "Orch UI").</p>
+          <textarea id="githubPublicKey" class="github-key" readonly rows="3"></textarea>
+          <div class="github-row">
+            <button id="copyGithubKeyButton" class="secondary" type="button">Copy key</button>
+          </div>
+        </section>
+
+        <section class="wizard-step" data-step="test" hidden>
+          <h3>3. Verify SSH access</h3>
+          <p class="modal-hint">We'll run <code>ssh -T git@github.com</code> with the key — GitHub answers with <code>Hi &lt;login&gt;!</code> on success.</p>
+          <button id="testGithubSshButton" class="primary" type="button">Run SSH test</button>
+          <div id="githubSshResult" class="github-status" aria-live="polite"></div>
+        </section>
+
+        <section class="wizard-step" data-step="token" hidden>
+          <h3>4. Paste a Personal Access Token</h3>
+          <p class="modal-hint">Needed for <strong>creating new repos</strong> via the API (push works with SSH alone). Create one at <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=Orch%20UI" target="_blank" rel="noopener">github.com/settings/tokens</a> with <code>repo</code> scope. Stored only here.</p>
+          <input id="githubTokenInput" type="password" placeholder="ghp_..." autocomplete="off">
+          <div class="github-row">
+            <button id="saveGithubTokenButton" class="primary" type="button">Save token</button>
+          </div>
+        </section>
+
+        <section class="wizard-step" data-step="done" hidden>
+          <h3>All set</h3>
+          <p class="modal-hint" id="githubDoneSummary">Supervisors now have <code>GIT_SSH_COMMAND</code>, <code>GITHUB_TOKEN</code>, and <code>GH_TOKEN</code> in their environment.</p>
+        </section>
+
         <div id="githubStatus" class="github-status" aria-live="polite"></div>
-        <div class="modal-actions">
+
+        <div class="modal-actions wizard-actions">
           <button id="disconnectGithubButton" class="secondary danger" type="button">Disconnect</button>
-          <button class="primary" type="button" data-close-github>Done</button>
+          <button id="githubBack" class="secondary" type="button" data-wizard-back>Back</button>
+          <span class="modal-spacer"></span>
+          <button id="githubNext" class="primary" type="button" data-wizard-next>Next</button>
+          <button id="githubFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
         </div>
       </div>
     </dialog>

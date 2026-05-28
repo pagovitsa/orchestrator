@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, shouldCollapseTerminalContent, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -18,6 +18,8 @@ const state = {
   tailscale: null,
   tailscaleSetupDismissed: false,
   tailscaleContinueAfterSetup: false,
+  githubStatus: null,
+  githubConnected: false,
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
@@ -143,6 +145,19 @@ const el = {
   openGithubFromSettings: document.getElementById("openGithubFromSettings"),
   settingsTailscaleStatus: document.getElementById("settingsTailscaleStatus"),
   settingsGithubStatus: document.getElementById("settingsGithubStatus"),
+  tailscaleStepCount: document.getElementById("tailscaleStepCount"),
+  tailscaleProgressBar: document.getElementById("tailscaleProgressBar"),
+  tailscaleBack: document.getElementById("tailscaleBack"),
+  tailscaleNext: document.getElementById("tailscaleNext"),
+  tailscaleFinish: document.getElementById("tailscaleFinish"),
+  tailscaleDoneSummary: document.getElementById("tailscaleDoneSummary"),
+  githubStepCount: document.getElementById("githubStepCount"),
+  githubProgressBar: document.getElementById("githubProgressBar"),
+  githubBack: document.getElementById("githubBack"),
+  githubNext: document.getElementById("githubNext"),
+  githubFinish: document.getElementById("githubFinish"),
+  githubDoneSummary: document.getElementById("githubDoneSummary"),
+  githubSshResult: document.getElementById("githubSshResult"),
   tailscaleDialog: document.getElementById("tailscaleDialog"),
   tailscaleForm: document.getElementById("tailscaleForm"),
   closeTailscale: document.getElementById("closeTailscale"),
@@ -970,16 +985,78 @@ function renderGithubModalState(status) {
   el.githubTokenInput.placeholder = status?.hasToken ? "Token already saved (paste to replace)" : "ghp_...";
 }
 
+const GITHUB_STEPS = [
+  { id: "key" },
+  { id: "add" },
+  { id: "test" },
+  { id: "token" },
+  { id: "done" },
+];
+
+let githubWizard = null;
+
+function ensureGithubWizard() {
+  if (githubWizard) return githubWizard;
+  if (!el.githubDialog) return null;
+  githubWizard = makeWizard({
+    wizardEl: el.githubDialog.querySelector('[data-wizard="github"]'),
+    steps: GITHUB_STEPS,
+    refs: {
+      stepCount: el.githubStepCount,
+      progressBar: el.githubProgressBar,
+      back: el.githubBack,
+      next: el.githubNext,
+      finish: el.githubFinish,
+    },
+    ready: (id) => {
+      const status = state.githubStatus || {};
+      if (id === "key") return true;
+      if (id === "add") return status.hasKeypair === true;
+      if (id === "test") return status.hasKeypair === true;
+      if (id === "token") return status.hasKeypair === true;
+      if (id === "done") return true;
+      return true;
+    },
+    onEnter: (id) => {
+      // Per-step focus so keyboard users can flow through.
+      if (id === "add") el.githubPublicKey?.select?.();
+      if (id === "test") {
+        if (el.githubSshResult) el.githubSshResult.textContent = "";
+      }
+      if (id === "token") el.githubTokenInput?.focus();
+      if (id === "done") {
+        const status = state.githubStatus || {};
+        const parts = [];
+        parts.push(`SSH key ${status.hasKeypair ? "ready" : "missing"}`);
+        parts.push(`Token ${status.hasToken ? "saved" : "not saved"}`);
+        el.githubDoneSummary.textContent = `Supervisors now run with: ${parts.join(", ")}.`;
+      }
+    },
+    onFinish: () => closeGithubModal(),
+  });
+  return githubWizard;
+}
+
 async function openGithubModal() {
   if (!el.githubDialog) return;
   setGithubStatus("");
   el.githubDialog.showModal();
   try {
     const body = await api("/api/connections/github");
+    state.githubStatus = body.github;
     renderGithubModalState(body.github);
   } catch (error) {
+    state.githubStatus = {};
     setGithubStatus(`Status error: ${error.message}`, "error");
   }
+  const wiz = ensureGithubWizard();
+  const status = state.githubStatus || {};
+  // Resume the wizard at the first incomplete step so a returning user lands on the actionable
+  // next thing instead of always step 1.
+  let resumeAt = "key";
+  if (status.hasKeypair && status.hasToken) resumeAt = "done";
+  else if (status.hasKeypair) resumeAt = "test";
+  wiz?.open(resumeAt);
 }
 
 function closeGithubModal() {
@@ -990,8 +1067,10 @@ async function handleGenerateGithubKey() {
   setGithubStatus("Generating SSH keypair...");
   try {
     const body = await api("/api/connections/github/keypair", { method: "POST" });
+    state.githubStatus = body.github;
     renderGithubModalState(body.github);
-    setGithubStatus(body.github.created ? "Keypair generated. Add the public key to GitHub above." : "Existing keypair loaded.", "ok");
+    setGithubStatus(body.github.created ? "Keypair generated." : "Existing keypair loaded.", "ok");
+    githubWizard?.setStep("add");
   } catch (error) {
     setGithubStatus(`Generate error: ${error.message}`, "error");
   }
@@ -1017,22 +1096,35 @@ async function handleSaveGithubToken() {
       method: "POST",
       body: JSON.stringify({ token }),
     });
+    state.githubStatus = body.github;
     renderGithubModalState(body.github);
     el.githubTokenInput.value = "";
     setGithubStatus(`Token verified for ${body.github.viewer?.login || "GitHub user"}.`, "ok");
+    githubWizard?.setStep("done");
+    void refreshGithubConnectionStatus();
   } catch (error) {
     setGithubStatus(`Token error: ${error.message}`, "error");
   }
 }
 
 async function handleTestGithubSsh() {
-  setGithubStatus("Testing SSH access to github.com...");
+  if (el.githubSshResult) {
+    el.githubSshResult.textContent = "Testing...";
+    el.githubSshResult.dataset.kind = "info";
+  }
   try {
     const body = await api("/api/connections/github/test-ssh", { method: "POST" });
-    if (body.ssh?.connected) setGithubStatus(`SSH ok — ${body.ssh.detail}`, "ok");
-    else setGithubStatus(`SSH not connected: ${body.ssh?.detail || "unknown"}`, "error");
+    const ok = Boolean(body.ssh?.connected);
+    const text = ok ? `SSH ok - ${body.ssh.detail}` : `SSH not connected: ${body.ssh?.detail || "unknown"}`;
+    if (el.githubSshResult) {
+      el.githubSshResult.textContent = text;
+      el.githubSshResult.dataset.kind = ok ? "ok" : "error";
+    }
   } catch (error) {
-    setGithubStatus(`SSH test error: ${error.message}`, "error");
+    if (el.githubSshResult) {
+      el.githubSshResult.textContent = `SSH test error: ${error.message}`;
+      el.githubSshResult.dataset.kind = "error";
+    }
   }
 }
 
@@ -2524,6 +2616,63 @@ function toggleSettingsMenu() {
   }
 }
 
+// ---------------- generic mini-wizard runtime ----------------
+function showWizardStep(wizardEl, stepId) {
+  const sections = wizardEl.querySelectorAll(".wizard-step");
+  for (const section of sections) {
+    section.hidden = section.dataset.step !== stepId;
+  }
+}
+
+function updateWizardChrome(wizardEl, steps, stepId, refs) {
+  const { index, total, percent } = wizardProgress(steps, stepId);
+  if (refs.stepCount) refs.stepCount.textContent = `Step ${index} of ${total}`;
+  if (refs.progressBar) refs.progressBar.style.width = `${percent}%`;
+  const isFirst = stepId === steps[0]?.id;
+  const isLast = stepId === steps[steps.length - 1]?.id;
+  if (refs.back) refs.back.disabled = isFirst;
+  if (refs.next) refs.next.hidden = isLast;
+  if (refs.finish) refs.finish.hidden = !isLast;
+  if (refs.save) refs.save.hidden = !refs.saveOnStep || refs.saveOnStep !== stepId;
+}
+
+function makeWizard({ wizardEl, steps, ready, refs, onEnter, onNext, onFinish }) {
+  const state = { currentId: steps[0]?.id || null };
+
+  function setStep(id) {
+    state.currentId = id;
+    showWizardStep(wizardEl, id);
+    updateWizardChrome(wizardEl, steps, id, refs);
+    onEnter?.(id);
+  }
+
+  async function advance() {
+    const stepId = state.currentId;
+    let allowed = true;
+    if (onNext) allowed = (await onNext(stepId)) !== false;
+    if (!allowed) return;
+    const next = nextWizardStep(steps, stepId, ready);
+    if (next) setStep(next);
+  }
+
+  function back() {
+    const prev = prevWizardStep(steps, state.currentId);
+    if (prev) setStep(prev);
+  }
+
+  function open(initialId) {
+    setStep(initialId || nextWizardStep(steps, "__start__", ready) || steps[0].id);
+  }
+
+  refs.next?.addEventListener("click", advance);
+  refs.back?.addEventListener("click", back);
+  refs.finish?.addEventListener("click", async () => {
+    if (onFinish) await onFinish();
+  });
+
+  return { open, setStep, back, advance, get currentId() { return state.currentId; } };
+}
+
 function renderTailscaleDialog() {
   const tailscale = state.tailscale || {};
   const configured = tailscaleConfigured();
@@ -2575,6 +2724,60 @@ async function refreshTailscaleStatus() {
   if (el.tailscaleDialog?.open) renderTailscaleDialog();
 }
 
+const TAILSCALE_STEPS = [
+  { id: "status" },
+  { id: "authkey" },
+  { id: "identity" },
+  { id: "done" },
+];
+
+let tailscaleWizard = null;
+
+function ensureTailscaleWizard() {
+  if (tailscaleWizard) return tailscaleWizard;
+  if (!el.tailscaleForm) return null;
+  tailscaleWizard = makeWizard({
+    wizardEl: el.tailscaleForm,
+    steps: TAILSCALE_STEPS,
+    refs: {
+      stepCount: el.tailscaleStepCount,
+      progressBar: el.tailscaleProgressBar,
+      back: el.tailscaleBack,
+      next: el.tailscaleNext,
+      finish: el.tailscaleFinish,
+      save: el.saveTailscale,
+      saveOnStep: "identity",
+    },
+    ready: () => true,
+    onEnter: (id) => {
+      // Toggle save vs next on the last input step.
+      el.tailscaleNext.hidden = id === "identity" || id === "done";
+      el.saveTailscale.hidden = id !== "identity";
+      el.tailscaleFinish.hidden = id !== "done";
+      if (id === "status") renderTailscaleDialog();
+      if (id === "done") {
+        el.tailscaleDoneSummary.textContent = tailscaleStateLabel(state.tailscale);
+      }
+    },
+    onNext: (id) => {
+      if (id === "authkey" && !state.tailscale?.authKeyConfigured && !el.tailscaleAuthKey.value.trim()) {
+        setTailscaleStatusMsg("Auth key is required the first time.", true);
+        return false;
+      }
+      setTailscaleStatusMsg("");
+      return true;
+    },
+    onFinish: () => closeTailscaleModal(),
+  });
+  return tailscaleWizard;
+}
+
+function setTailscaleStatusMsg(message, isError = false) {
+  if (!el.tailscaleStatus) return;
+  el.tailscaleStatus.textContent = message || "";
+  el.tailscaleStatus.classList.toggle("is-error", Boolean(message) && isError);
+}
+
 async function openTailscaleModal({ continueAfterSetup = false } = {}) {
   state.tailscaleContinueAfterSetup = continueAfterSetup;
   await refreshTailscaleStatus();
@@ -2583,8 +2786,9 @@ async function openTailscaleModal({ continueAfterSetup = false } = {}) {
   el.tailscaleHttpsHost.value = state.tailscale?.httpsHost || "";
   renderTailscaleDialog();
   el.tailscaleDialog.showModal();
-  const target = state.tailscale?.authKeyConfigured ? el.tailscaleHttpsHost : el.tailscaleAuthKey;
-  target.focus();
+  const wiz = ensureTailscaleWizard();
+  // If already configured, jump straight to the "Done" summary; otherwise start at "status".
+  wiz?.open(state.tailscale?.configured ? "done" : "status");
 }
 
 function closeTailscaleModal() {

@@ -160,6 +160,33 @@ export function extractErrorReason(content, { error = true } = {}) {
   return compressReason(lines.slice(-ERROR_REASON_MAX_LINES).join("\n"));
 }
 
+// Computes which steps in a wizard are blocked / next active. Steps are objects with at least
+// an `id`. `ready(id)` returns whether the step's prerequisite is met (e.g. a key has been
+// generated for the "add" step). Auto-advances past already-completed steps.
+export function nextWizardStep(steps, currentId, ready) {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const idx = steps.findIndex((s) => s.id === currentId);
+  for (let i = idx + 1; i < steps.length; i += 1) {
+    if (ready(steps[i].id)) return steps[i].id;
+  }
+  return steps[steps.length - 1].id;
+}
+
+export function prevWizardStep(steps, currentId) {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const idx = steps.findIndex((s) => s.id === currentId);
+  if (idx <= 0) return steps[0].id;
+  return steps[idx - 1].id;
+}
+
+export function wizardProgress(steps, currentId) {
+  if (!Array.isArray(steps) || steps.length === 0) return { index: 0, total: 0, percent: 0 };
+  const idx = Math.max(0, steps.findIndex((s) => s.id === currentId));
+  const total = steps.length;
+  const percent = Math.round(((idx + 1) / total) * 100);
+  return { index: idx + 1, total, percent };
+}
+
 export function autopilotCanResumeFromSummary(session) {
   if (!session?.id || session.autopilotEnabled !== true) return false;
   const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
