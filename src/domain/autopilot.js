@@ -82,6 +82,11 @@ function mentionsRiskyApproval(text) {
     .test(String(text || ""));
 }
 
+function mentionsDockerGate(text) {
+  return /\b(docker|compose|testcontainers?|container(?:s)?|full .*test(?:s| suite)|merge gate)\b/i
+    .test(String(text || ""));
+}
+
 function fallbackContinuationContent(lastAssistant) {
   const content = assistantContent(lastAssistant);
   if (mentionsManualAuth(content)) {
@@ -89,6 +94,9 @@ function fallbackContinuationContent(lastAssistant) {
   }
   if (mentionsRiskyApproval(content)) {
     return "Choose the safest reversible path that avoids destructive changes, production deployment, force-push, and history rewrites. Continue with local inspection or tests, then report the decision and result.";
+  }
+  if (mentionsDockerGate(content)) {
+    return "Docker is available inside the orch-ui supervisor container. Verify Docker with `docker version` and `docker compose version`, then run the project's Docker/testcontainers verification or merge gate. If Docker itself fails, report that concrete tool/app error instead of saying Docker is unavailable.";
   }
   const nextTask = extractSuggestedNextTask(content);
   if (nextTask) {
@@ -152,6 +160,17 @@ export function normalizeAutopilotDecision(decision, { lastAssistant } = {}) {
   return decision;
 }
 
+function fallbackDecisionForPlannerError(session, error) {
+  const lastAssistant = latestAssistantMessage(session);
+  if (!lastAssistant || hasRunError(lastAssistant)) return null;
+  const reason = String(error?.message || error || "Autopilot planner failed").trim();
+  return normalizeAutopilotDecision({
+    action: "stop",
+    kind: "continue",
+    reason: `Autopilot planner failed, continuing locally: ${reason}`,
+  }, { lastAssistant });
+}
+
 function autopilotPrompt(session, lastAssistant) {
   return [
     "You are Orch UI Autopilot. You decide the next USER message for a coding supervisor.",
@@ -166,6 +185,7 @@ function autopilotPrompt(session, lastAssistant) {
     "- If the last assistant asks a low-risk question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
     "- Never provide or invent secrets, credentials, billing decisions, production access, force-push approval, history rewrites, or destructive approval.",
     "- If a path needs credentials, deployment, production access, or destructive approval, choose a safe local-only/reversible alternative and continue instead of stopping.",
+    "- Docker is available in the orch-ui supervisor container via the mounted Docker socket. If the latest assistant says Docker/testcontainers are unavailable, choose a next message that verifies Docker and runs the Docker gate instead of stopping or repeating that blocker.",
     "- If the last assistant still leaves a clear, concrete, reversible next step, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
     "- For continue, tell the supervisor the specific next step, require verification, and avoid generic continue-only instructions.",
     "- Otherwise, decide the safest concrete next step yourself and continue.",
@@ -304,7 +324,11 @@ export async function decideAutopilotNextWithRetry(session, {
     } catch (error) {
       lastError = error;
       throwIfAborted(signal);
-      if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) throw error;
+      if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) {
+        const fallback = fallbackDecisionForPlannerError(currentSession, error);
+        if (fallback) return { decision: fallback, session: currentSession, attempts: attempt, fallback: true };
+        throw error;
+      }
       // Full jitter: pick uniformly in [base/2, base]. Without jitter, multiple sessions backing
       // off a shared 429 wake up simultaneously and hammer the endpoint together.
       const base = retry.backoffMs * (2 ** (attempt - 1));

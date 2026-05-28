@@ -1092,6 +1092,22 @@ test("normalizeAutopilotDecision keeps stop when the assistant turn is an app er
   assert.equal(normalized.reason, "run failed");
 });
 
+test("normalizeAutopilotDecision turns Docker-gate blockers into Docker verification", () => {
+  const normalized = normalizeAutopilotDecision(
+    { action: "stop", kind: "stop", reason: "Docker unavailable" },
+    {
+      lastAssistant: {
+        role: "assistant",
+        content: "All safe local work is done. The full Docker/testcontainers suite remains as the merge gate when Docker is available.",
+      },
+    },
+  );
+
+  assert.equal(normalized.action, "message");
+  assert.match(normalized.content, /Docker is available inside the orch-ui supervisor container/);
+  assert.match(normalized.content, /docker version/);
+});
+
 test("decideAutopilotNext converts DeepSeek stop decisions into continuations", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
@@ -1298,6 +1314,34 @@ test("decideAutopilotNextWithRetry retries transient errors and reloads session"
   assert.equal(result.attempts, 2);
   assert.equal(result.session, reloaded);
   assert.equal(result.decision.content, "next");
+});
+
+test("decideAutopilotNextWithRetry falls back locally on planner failures after safe assistant turns", async () => {
+  let attempts = 0;
+  const result = await decideAutopilotNextWithRetry({
+    id: "s1",
+    supervisor: "codex",
+    messages: [
+      {
+        role: "assistant",
+        supervisor: "codex",
+        content: "Phase F3 is complete.\n\nRemaining useful next phases:\n- B: tx-history table",
+      },
+    ],
+  }, {
+    config: { attempts: 3, backoffMs: 0 },
+    decide: async () => {
+      attempts += 1;
+      throw new Error("DeepSeek returned an empty autopilot decision");
+    },
+  });
+
+  assert.equal(attempts, 1);
+  assert.equal(result.fallback, true);
+  assert.equal(result.decision.action, "message");
+  assert.equal(result.decision.kind, "continue");
+  assert.match(result.decision.reason, /planner failed/i);
+  assert.match(result.decision.content, /B: tx-history table/);
 });
 
 test("decideAutopilotNextWithRetry retry backoff applies full jitter in [base/2, base]", async () => {

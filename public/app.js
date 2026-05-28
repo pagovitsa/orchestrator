@@ -1765,20 +1765,27 @@ async function maybeRunAutopilot(session) {
       setStatus(`${projectName} autopilot off`);
       return;
     }
-    if (decision.action !== "message") {
-      setStatus(`Autopilot stopped: ${decision.reason || "no next action"}`);
-      return;
-    }
-    const content = autopilotContent(decision);
-    if (!content) {
-      setStatus("Autopilot stopped: empty next message");
-      return;
-    }
-    setStatus(`${projectName} autopilot sending...`);
-    await sendMessageForSession(session, content, [], { source: "autopilot" });
+    await sendAutopilotDecision(session, decision);
   } catch (error) {
     setStatus(`Autopilot error: ${error.message}`);
   }
+}
+
+async function sendAutopilotDecision(session, decision) {
+  if (!session?.id || !projectAutopilotEnabled(session)) return false;
+  if (state.runs.has(session.id) || state.pendingSends.has(session.id)) return false;
+  const projectName = projectMenuKey(session);
+  if (decision?.action !== "message") {
+    setStatus(`Autopilot stopped: ${decision?.reason || "no next action"}`);
+    return false;
+  }
+  const content = autopilotContent(decision);
+  if (!content) {
+    setStatus("Autopilot decision had no next message");
+    return false;
+  }
+  setStatus(`${projectName} autopilot sending...`);
+  return sendMessageForSession(session, content, [], { source: "autopilot" });
 }
 
 function scheduleAutopilot(session) {
@@ -3483,6 +3490,13 @@ function handleLiveAutopilot(event) {
     setStatus(decision.action === "message"
       ? `${project} autopilot decided: ${decision.kind || "message"}`
       : `Autopilot stopped: ${decision.reason || "no next action"}`);
+    if (decision.action === "message" && liveSession) {
+      setTimeout(() => {
+        if (!state.runs.has(event.sessionId) && !state.pendingSends.has(event.sessionId)) {
+          void sendAutopilotDecision(liveSession, decision);
+        }
+      }, 1000);
+    }
   }
 }
 
