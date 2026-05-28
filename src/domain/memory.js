@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertNoSensitiveText, containsSensitiveText } from "./safety.js";
@@ -146,6 +146,22 @@ async function lockIsStale(lockPath) {
 // both think they own it. We gate the rm+recreate behind a separate `.steal` lock that itself
 // uses `wx` for atomicity, encodes the holder PID, and is also stale-recoverable so a crashed
 // stealer cannot permanently wedge writers.
+// Atomic stale-file claim. `rename(src, uniqueDst)` on a freshly-created `uniqueDst` will only
+// succeed once per `src` — Node maps this to the POSIX rename, which atomically unlinks `src`
+// and creates the target. A second concurrent claimer sees ENOENT. We then `rm` the unique
+// per-claimer trash path so a delayed clean-up cannot ever delete another process's fresh file.
+async function claimStaleByRename(filePath) {
+  const trashPath = `${filePath}.trash.${process.pid}.${randomBytes(8).toString("hex")}`;
+  try {
+    await rename(filePath, trashPath);
+  } catch (error) {
+    if (error.code === "ENOENT") return false; // someone else won
+    throw error;
+  }
+  await rm(trashPath, { force: true }).catch(() => {});
+  return true;
+}
+
 async function takeoverStaleLock(lockPath) {
   const stealPath = `${lockPath}.steal`;
   let stealHandle;
@@ -153,20 +169,22 @@ async function takeoverStaleLock(lockPath) {
     stealHandle = await open(stealPath, "wx");
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
-    // If a previous stealer crashed, its `.steal` file would otherwise wedge every future writer.
-    // Recognise it the same way as the main lock and clear it before retrying.
+    // If a previous stealer crashed, its `.steal` file would otherwise wedge every future
+    // writer. Atomically claim it via rename so a delayed cleanup cannot clobber a fresh
+    // .steal created by another process between our check and our remove.
     if (await lockIsStale(stealPath)) {
-      await rm(stealPath, { force: true }).catch(() => {});
+      await claimStaleByRename(stealPath);
     }
     return false; // caller retries — backoff handled by the outer acquire loop
   }
   try {
     await stealHandle.writeFile(String(process.pid), "utf8");
     if (await lockIsStale(lockPath)) {
-      await rm(lockPath, { force: true }).catch(() => {});
+      await claimStaleByRename(lockPath);
     }
   } finally {
     await stealHandle.close().catch(() => {});
+    // We own this .steal (we created it via wx); safe to remove by path.
     await rm(stealPath, { force: true }).catch(() => {});
   }
   return true;
