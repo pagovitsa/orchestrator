@@ -154,6 +154,64 @@
       </form>
     </dialog>
 
+    <dialog id="githubDialog" class="modal github-modal">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2>GitHub setup</h2>
+          <button id="closeGithubDialog" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+        <p class="modal-hint">Connect once, publish any project as a <strong>private</strong> repo with one click. New repos always start private.</p>
+        <ol class="github-steps">
+          <li>
+            <h3>Add the SSH public key to your GitHub account</h3>
+            <p class="modal-hint">Open <a href="https://github.com/settings/ssh/new" target="_blank" rel="noopener">github.com/settings/ssh/new</a>, paste the key, give it any title.</p>
+            <textarea id="githubPublicKey" class="github-key" readonly rows="3" placeholder="Click 'Generate key' to create the orchestrator SSH keypair"></textarea>
+            <div class="github-row">
+              <button id="generateGithubKeyButton" class="secondary" type="button">Generate key</button>
+              <button id="copyGithubKeyButton" class="secondary" type="button">Copy</button>
+            </div>
+          </li>
+          <li>
+            <h3>Paste a Personal Access Token (fine-grained or classic) with <code>repo</code> scope</h3>
+            <p class="modal-hint">Create one at <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=Orch%20UI" target="_blank" rel="noopener">github.com/settings/tokens</a>. Stored only on this server.</p>
+            <input id="githubTokenInput" type="password" placeholder="ghp_..." autocomplete="off">
+            <div class="github-row">
+              <button id="saveGithubTokenButton" class="primary" type="button">Save token</button>
+              <button id="testGithubSshButton" class="secondary" type="button">Test SSH</button>
+            </div>
+          </li>
+        </ol>
+        <div id="githubStatus" class="github-status" aria-live="polite"></div>
+        <div class="modal-actions">
+          <button id="disconnectGithubButton" class="secondary danger" type="button">Disconnect</button>
+          <button class="primary" type="button" data-close-github>Done</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="githubPublishDialog" class="modal github-publish-modal">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2>Publish to GitHub</h2>
+          <button id="closeGithubPublishDialog" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+        <p id="githubPublishHint" class="modal-hint">A new <strong>private</strong> repo will be created and the project will be pushed via SSH.</p>
+        <label class="github-field">
+          <span>Repository name</span>
+          <input id="githubPublishName" type="text" autocomplete="off" placeholder="my-project">
+        </label>
+        <label class="github-field">
+          <span>Description (optional)</span>
+          <input id="githubPublishDescription" type="text" autocomplete="off" placeholder="One-line description">
+        </label>
+        <div id="githubPublishStatus" class="github-status" aria-live="polite"></div>
+        <div class="modal-actions">
+          <button class="secondary" type="button" data-close-github-publish>Cancel</button>
+          <button id="confirmGithubPublishButton" class="primary" type="button">Publish</button>
+        </div>
+      </div>
+    </dialog>
+
     <dialog id="connectDialog" class="modal connect-modal">
       <div class="modal-panel">
         <div class="modal-head">

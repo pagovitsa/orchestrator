@@ -32,6 +32,17 @@ import {
   startConnection,
 } from "../domain/connections.js";
 import { deleteProject, ensureProject, listProjects, requireScopedCwd, resolveCwd } from "../domain/workspace.js";
+import {
+  clearGithubConnection,
+  ensureKeypair,
+  githubConnectionStatus,
+  projectGithubStatus,
+  publishProjectToGithub,
+  saveToken as saveGithubToken,
+  testSshAccess as testGithubSsh,
+  verifyToken as verifyGithubToken,
+  readToken as readGithubToken,
+} from "../domain/github.js";
 import { mcpToolCatalog } from "../supervisors/mcp.js";
 import { runSupervisor } from "../supervisors/runner.js";
 import { readBody, sendJson, writeStreamEvent } from "./response.js";
@@ -763,6 +774,41 @@ export async function handleApi(req, res, url) {
     const body = await readBody(req);
     return sendJson(res, 200, { job: sendConnectionJobInput(connectionJobInputMatch[1], body.input) });
   }
+  if (req.method === "GET" && url.pathname === "/api/connections/github") {
+    return sendJson(res, 200, { github: await githubConnectionStatus() });
+  }
+  if (req.method === "POST" && url.pathname === "/api/connections/github/keypair") {
+    return sendJson(res, 200, { github: { ...await githubConnectionStatus(), ...await ensureKeypair() } });
+  }
+  if (req.method === "POST" && url.pathname === "/api/connections/github/token") {
+    const body = await readBody(req);
+    const viewer = await verifyGithubToken(String(body.token || "").trim());
+    await saveGithubToken(String(body.token || "").trim());
+    return sendJson(res, 200, { github: { ...await githubConnectionStatus(), viewer } });
+  }
+  if (req.method === "POST" && url.pathname === "/api/connections/github/test-ssh") {
+    return sendJson(res, 200, { ssh: await testGithubSsh() });
+  }
+  if (req.method === "DELETE" && url.pathname === "/api/connections/github") {
+    await clearGithubConnection();
+    return sendJson(res, 200, { github: await githubConnectionStatus() });
+  }
+  const githubProjectStatusMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/github$/);
+  if (githubProjectStatusMatch && req.method === "GET") {
+    const project = decodeURIComponent(githubProjectStatusMatch[1]);
+    return sendJson(res, 200, { status: await projectGithubStatus(project) });
+  }
+  const githubPublishMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/github\/publish$/);
+  if (githubPublishMatch && req.method === "POST") {
+    const project = decodeURIComponent(githubPublishMatch[1]);
+    if (!await readGithubToken()) {
+      throw Object.assign(new Error("Connect GitHub first"), { status: 409 });
+    }
+    const body = await readBody(req);
+    const result = await publishProjectToGithub(project, body || {});
+    return sendJson(res, 200, { result, status: await projectGithubStatus(project) });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/projects") {
     const body = await readBody(req);
     const result = await ensureProject(body.name);

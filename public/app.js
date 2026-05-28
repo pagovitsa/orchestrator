@@ -99,6 +99,23 @@ const el = {
   sidebar: document.querySelector(".sidebar"),
   sidebarToggle: document.getElementById("sidebarToggle"),
   connectDialog: document.getElementById("connectDialog"),
+  githubDialog: document.getElementById("githubDialog"),
+  closeGithubDialog: document.getElementById("closeGithubDialog"),
+  githubPublicKey: document.getElementById("githubPublicKey"),
+  generateGithubKeyButton: document.getElementById("generateGithubKeyButton"),
+  copyGithubKeyButton: document.getElementById("copyGithubKeyButton"),
+  githubTokenInput: document.getElementById("githubTokenInput"),
+  saveGithubTokenButton: document.getElementById("saveGithubTokenButton"),
+  testGithubSshButton: document.getElementById("testGithubSshButton"),
+  disconnectGithubButton: document.getElementById("disconnectGithubButton"),
+  githubStatus: document.getElementById("githubStatus"),
+  githubPublishDialog: document.getElementById("githubPublishDialog"),
+  closeGithubPublishDialog: document.getElementById("closeGithubPublishDialog"),
+  githubPublishHint: document.getElementById("githubPublishHint"),
+  githubPublishName: document.getElementById("githubPublishName"),
+  githubPublishDescription: document.getElementById("githubPublishDescription"),
+  githubPublishStatus: document.getElementById("githubPublishStatus"),
+  confirmGithubPublishButton: document.getElementById("confirmGithubPublishButton"),
   closeConnect: document.getElementById("closeConnect"),
   refreshConnections: document.getElementById("refreshConnections"),
   connectionList: document.getElementById("connectionList"),
@@ -934,6 +951,172 @@ async function openConnectModal() {
   await refreshConnections();
 }
 
+function setGithubStatus(message, kind = "info") {
+  if (!el.githubStatus) return;
+  el.githubStatus.textContent = message || "";
+  el.githubStatus.dataset.kind = kind;
+}
+
+function renderGithubModalState(status) {
+  if (!el.githubDialog) return;
+  if (status?.publicKey) {
+    el.githubPublicKey.value = status.publicKey;
+    el.copyGithubKeyButton.disabled = false;
+  } else {
+    el.githubPublicKey.value = "";
+    el.copyGithubKeyButton.disabled = true;
+  }
+  el.disconnectGithubButton.disabled = !(status?.hasKeypair || status?.hasToken);
+  el.githubTokenInput.placeholder = status?.hasToken ? "Token already saved (paste to replace)" : "ghp_...";
+}
+
+async function openGithubModal() {
+  if (!el.githubDialog) return;
+  setGithubStatus("");
+  el.githubDialog.showModal();
+  try {
+    const body = await api("/api/connections/github");
+    renderGithubModalState(body.github);
+  } catch (error) {
+    setGithubStatus(`Status error: ${error.message}`, "error");
+  }
+}
+
+function closeGithubModal() {
+  el.githubDialog?.close();
+}
+
+async function handleGenerateGithubKey() {
+  setGithubStatus("Generating SSH keypair...");
+  try {
+    const body = await api("/api/connections/github/keypair", { method: "POST" });
+    renderGithubModalState(body.github);
+    setGithubStatus(body.github.created ? "Keypair generated. Add the public key to GitHub above." : "Existing keypair loaded.", "ok");
+  } catch (error) {
+    setGithubStatus(`Generate error: ${error.message}`, "error");
+  }
+}
+
+async function handleCopyGithubKey() {
+  if (!el.githubPublicKey?.value) return;
+  try {
+    await navigator.clipboard.writeText(el.githubPublicKey.value);
+    setGithubStatus("Public key copied. Add it at github.com/settings/ssh/new", "ok");
+  } catch {
+    el.githubPublicKey.select();
+    setGithubStatus("Copy failed — selected the key for manual copy", "info");
+  }
+}
+
+async function handleSaveGithubToken() {
+  const token = el.githubTokenInput.value.trim();
+  if (!token) { setGithubStatus("Paste a Personal Access Token first", "error"); return; }
+  setGithubStatus("Verifying token...");
+  try {
+    const body = await api("/api/connections/github/token", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    renderGithubModalState(body.github);
+    el.githubTokenInput.value = "";
+    setGithubStatus(`Token verified for ${body.github.viewer?.login || "GitHub user"}.`, "ok");
+  } catch (error) {
+    setGithubStatus(`Token error: ${error.message}`, "error");
+  }
+}
+
+async function handleTestGithubSsh() {
+  setGithubStatus("Testing SSH access to github.com...");
+  try {
+    const body = await api("/api/connections/github/test-ssh", { method: "POST" });
+    if (body.ssh?.connected) setGithubStatus(`SSH ok — ${body.ssh.detail}`, "ok");
+    else setGithubStatus(`SSH not connected: ${body.ssh?.detail || "unknown"}`, "error");
+  } catch (error) {
+    setGithubStatus(`SSH test error: ${error.message}`, "error");
+  }
+}
+
+async function handleDisconnectGithub() {
+  if (!window.confirm("Remove the stored GitHub token and SSH key from this server?")) return;
+  setGithubStatus("Disconnecting...");
+  try {
+    const body = await api("/api/connections/github", { method: "DELETE" });
+    renderGithubModalState(body.github);
+    setGithubStatus("Disconnected. Generate a new key to reconnect.", "info");
+  } catch (error) {
+    setGithubStatus(`Disconnect error: ${error.message}`, "error");
+  }
+}
+
+function setGithubPublishStatus(message, kind = "info") {
+  if (!el.githubPublishStatus) return;
+  el.githubPublishStatus.textContent = message || "";
+  el.githubPublishStatus.dataset.kind = kind;
+}
+
+async function openGithubPublishFlow(project) {
+  if (!project?.id || !project.cwd) return;
+  state.githubPublishProject = project;
+  el.githubPublishName.value = project.cwd || project.project || "";
+  el.githubPublishDescription.value = "";
+  setGithubPublishStatus("Checking GitHub connection...");
+  el.confirmGithubPublishButton.disabled = true;
+  el.githubPublishDialog.showModal();
+
+  try {
+    const [{ github }, { status }] = await Promise.all([
+      api("/api/connections/github"),
+      api(`/api/projects/${encodeURIComponent(project.cwd)}/github`).catch(() => ({ status: null })),
+    ]);
+    if (!github?.hasToken || !github?.hasKeypair) {
+      setGithubPublishStatus("Connect GitHub first — opening setup.", "info");
+      el.githubPublishDialog.close();
+      await openGithubModal();
+      return;
+    }
+    if (status?.hasOrigin && status?.repo) {
+      el.githubPublishHint.innerHTML = `Already linked to <a href="${status.repo ? `https://github.com/${status.repo.owner}/${status.repo.name}` : "#"}" target="_blank" rel="noopener">${status.repo.owner}/${status.repo.name}</a>. Publishing will fail with an "exists" error — pick a new name or remove the existing remote first.`;
+    } else {
+      el.githubPublishHint.innerHTML = `A new <strong>private</strong> repo will be created on <code>github.com</code> and the project will be pushed via SSH.`;
+    }
+    el.confirmGithubPublishButton.disabled = false;
+    setGithubPublishStatus("");
+  } catch (error) {
+    setGithubPublishStatus(`Status error: ${error.message}`, "error");
+  }
+}
+
+function closeGithubPublishModal() {
+  el.githubPublishDialog?.close();
+  state.githubPublishProject = null;
+}
+
+async function handleConfirmGithubPublish() {
+  const project = state.githubPublishProject;
+  if (!project) return;
+  const repoName = el.githubPublishName.value.trim() || project.cwd;
+  const description = el.githubPublishDescription.value.trim();
+  el.confirmGithubPublishButton.disabled = true;
+  setGithubPublishStatus("Publishing... this can take a few seconds.");
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(project.cwd)}/github/publish`, {
+      method: "POST",
+      body: JSON.stringify({ repoName, description }),
+    });
+    const repo = body.result?.repo;
+    if (repo) {
+      setGithubPublishStatus(`Published to ${repo.fullName}`, "ok");
+      el.githubPublishHint.innerHTML = `Done — <a href="${repo.htmlUrl}" target="_blank" rel="noopener">${repo.htmlUrl}</a>`;
+    } else {
+      setGithubPublishStatus("Published.", "ok");
+    }
+    setStatus(`Published ${project.cwd} to GitHub`);
+  } catch (error) {
+    setGithubPublishStatus(`Publish error: ${error.message}`, "error");
+    el.confirmGithubPublishButton.disabled = false;
+  }
+}
+
 function closeConnectModal() {
   el.connectDialog.close();
 }
@@ -1690,6 +1873,17 @@ function openProjectContextMenu(event, project) {
   const separator = document.createElement("div");
   separator.className = "project-context-separator";
 
+  const github = document.createElement("button");
+  github.type = "button";
+  github.role = "menuitem";
+  github.className = "project-context-item";
+  github.disabled = running;
+  github.innerHTML = `<span>Publish to GitHub</span>${running ? "<strong>Running</strong>" : ""}`;
+  github.addEventListener("click", async () => {
+    closeProjectContextMenu();
+    await openGithubPublishFlow(project);
+  });
+
   const remove = document.createElement("button");
   remove.type = "button";
   remove.role = "menuitem";
@@ -1701,7 +1895,7 @@ function openProjectContextMenu(event, project) {
     await deleteProjectFromUi(project);
   });
 
-  el.projectContextMenu.append(autopilot, clearActivity, separator, remove);
+  el.projectContextMenu.append(autopilot, clearActivity, separator, github, remove);
   el.projectContextMenu.hidden = false;
   positionProjectContextMenu(event.clientX, event.clientY);
   autopilot.focus();
@@ -3222,6 +3416,24 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("resize", closeProjectContextMenu);
 window.addEventListener("beforeunload", () => state.eventSource?.close());
 el.sessionList.addEventListener("scroll", closeProjectContextMenu);
+el.closeGithubDialog?.addEventListener("click", closeGithubModal);
+el.githubDialog?.addEventListener("click", (event) => {
+  if (event.target === el.githubDialog) closeGithubModal();
+});
+el.githubDialog?.querySelector("[data-close-github]")?.addEventListener("click", closeGithubModal);
+el.generateGithubKeyButton?.addEventListener("click", handleGenerateGithubKey);
+el.copyGithubKeyButton?.addEventListener("click", handleCopyGithubKey);
+el.saveGithubTokenButton?.addEventListener("click", handleSaveGithubToken);
+el.testGithubSshButton?.addEventListener("click", handleTestGithubSsh);
+el.disconnectGithubButton?.addEventListener("click", handleDisconnectGithub);
+
+el.closeGithubPublishDialog?.addEventListener("click", closeGithubPublishModal);
+el.githubPublishDialog?.addEventListener("click", (event) => {
+  if (event.target === el.githubPublishDialog) closeGithubPublishModal();
+});
+el.githubPublishDialog?.querySelector("[data-close-github-publish]")?.addEventListener("click", closeGithubPublishModal);
+el.confirmGithubPublishButton?.addEventListener("click", handleConfirmGithubPublish);
+
 el.closeConnect.addEventListener("click", closeConnectModal);
 el.refreshConnections.addEventListener("click", refreshConnections);
 el.connectDialog.addEventListener("click", (event) => {

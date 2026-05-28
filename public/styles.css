@@ -1104,6 +1104,95 @@ input {
   color: var(--danger);
 }
 
+.github-modal { width: min(640px, calc(100vw - 28px)); }
+.github-publish-modal { width: min(520px, calc(100vw - 28px)); }
+
+.modal-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.modal-hint a { color: var(--accent); }
+
+.github-steps {
+  list-style: decimal inside;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 18px;
+}
+
+.github-steps > li {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.github-steps h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.github-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  resize: vertical;
+}
+
+.github-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#githubTokenInput {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+
+.github-status {
+  min-height: 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.github-status[data-kind="ok"] { color: #22c55e; }
+.github-status[data-kind="error"] { color: var(--danger); }
+
+.github-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.github-field input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
+
+.secondary.danger { color: var(--danger); }
+
 .tailscale-modal {
   width: min(520px, calc(100vw - 28px));
 }
