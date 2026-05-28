@@ -95,6 +95,12 @@ export function autopilotNeedsDecision(session) {
   return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;
 }
 
+export function autopilotCanResumeFromSummary(session) {
+  if (!session?.id || session.autopilotEnabled !== true) return false;
+  const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
+  return workflowState === "created" || workflowState === "completed";
+}
+
 export function normalizeAutopilotFeed(feed = [], { limit = 2 } = {}) {
   const max = Math.max(0, Math.min(10, Math.round(Number(limit) || 0)));
   if (!Array.isArray(feed) || max <= 0) return [];
@@ -159,33 +165,39 @@ export async function streamApi(path, body, handlers = {}, { fetchImpl = fetch }
   let buffer = "";
   let sawTerminalEvent = false;
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        handlers.trace?.({ content: "[client] ignored malformed stream line\n" });
-        continue;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          handlers.trace?.({ content: "[client] ignored malformed stream line\n" });
+          continue;
+        }
+        sawTerminalEvent = handleStreamEvent(event, handlers) || sawTerminalEvent;
       }
-      sawTerminalEvent = handleStreamEvent(event, handlers) || sawTerminalEvent;
     }
-  }
 
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    try {
-      const event = JSON.parse(buffer);
-      sawTerminalEvent = handleStreamEvent(event, handlers) || sawTerminalEvent;
-    } catch {
-      handlers.trace?.({ content: "[client] ignored malformed final stream line\n" });
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      try {
+        const event = JSON.parse(buffer);
+        sawTerminalEvent = handleStreamEvent(event, handlers) || sawTerminalEvent;
+      } catch {
+        handlers.trace?.({ content: "[client] ignored malformed final stream line\n" });
+      }
     }
+  } finally {
+    // Release the reader so the body stream can be cancelled and the underlying connection
+    // released even if the loop above threw (network error, handler exception).
+    try { reader.releaseLock(); } catch { /* already released */ }
   }
 
   if (!sawTerminalEvent) throw new Error("Stream ended before completion");

@@ -54,6 +54,16 @@ const autopilotRetryConfig = {
 const idleCheckIntervalMs = idleConfig.timeoutMs > 0 ? Math.max(250, Math.min(5000, Math.floor(idleConfig.timeoutMs / 4))) : 0;
 let idleCheckTimer = null;
 
+// url.searchParams.get returns strings; downstream code expects numeric limits and could compare
+// strict-equal against integers. Coerce + clamp here so query callers never reach domain code
+// with a string.
+function parseLimit(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.floor(n));
+}
+
 function sendEventClient(client, event) {
   if (client.res.destroyed || client.res.writableEnded) {
     eventClients.delete(client);
@@ -101,6 +111,9 @@ function subscribeEvents(req, res) {
     }
     res.write(": ping\n\n");
   }, 25000);
+  // unref so the heartbeat does not keep the event loop alive during graceful shutdown — the
+  // req.close listener still fires when the client goes away.
+  heartbeat.unref();
   req.on("close", () => {
     clearInterval(heartbeat);
     eventClients.delete(client);
@@ -574,11 +587,14 @@ async function handleStreamMessage(req, res, id) {
 async function handleJsonMessage(req, res, id) {
   const abortController = new AbortController();
   let completed = false;
+  // Load + register the run before subscribing to res.close. Otherwise a disconnect during the
+  // loadSession await would abort the signal before the run is registered, the child would be
+  // spawned with an already-aborted signal, and the active-run map would carry a doomed entry.
+  const session = await loadSession(id);
+  const activeRun = registerActiveRun(id, session, abortController, "json");
   res.on("close", () => {
     if (!completed) abortController.abort();
   });
-  const session = await loadSession(id);
-  const activeRun = registerActiveRun(id, session, abortController, "json");
   let usageStarted = false;
   try {
     const body = await readBody(req);
@@ -904,7 +920,7 @@ export async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/hooks/events") {
     return sendJson(res, 200, {
       events: await listHookEvents({
-        limit: url.searchParams.get("limit") || 100,
+        limit: parseLimit(url.searchParams.get("limit"), 100),
         project: url.searchParams.get("project") || "",
         sessionId: url.searchParams.get("sessionId") || "",
       }),
@@ -918,7 +934,7 @@ export async function handleApi(req, res, url) {
         scope: url.searchParams.get("scope") || "all",
         namespace: url.searchParams.get("namespace") || "all",
         query: url.searchParams.get("query") || "",
-        limit: url.searchParams.get("limit") || 25,
+        limit: parseLimit(url.searchParams.get("limit"), 25),
       }),
     });
   }

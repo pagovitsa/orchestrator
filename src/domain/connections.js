@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime, supervisors } from "../config/env.js";
 import { refreshUsageSnapshot } from "./usage.js";
@@ -249,7 +249,16 @@ async function saveDeepSeekKey(apiKey) {
   if (!key) throw Object.assign(new Error("DeepSeek API key is required"), { status: 400 });
   await mkdir(paths.secretsDir, { recursive: true });
   const filePath = path.join(paths.secretsDir, "deepseek-api-key");
-  await writeFile(filePath, `${key}\n`, { encoding: "utf8", mode: 0o600 });
+  // Atomic write: a crash mid-write would leave a truncated/empty key file. readSecret returns
+  // "" for empty contents and silently disables the key on next read.
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(tempPath, `${key}\n`, { encoding: "utf8", mode: 0o600 });
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
   process.env.DEEPSEEK_API_KEY = key;
   runtime.deepseekApiKey = key;
   await refreshUsageSnapshot("deepseek", { force: true });
@@ -383,10 +392,12 @@ export async function startConnection(id, body = {}) {
     failJob(job, error);
     job.child = null;
   });
-  child.on("close", (code) => {
-    job.exitCode = code;
+  child.on("close", (code, signal) => {
+    // Node passes code=null when the process was killed by a signal — surface that as a non-zero
+    // exit so the UI does not display "exited null" and the status correctly stays "failed".
+    job.exitCode = code === null ? -1 : code;
+    job.signal = signal || "";
     if (!["done", "cancelled"].includes(job.status)) job.status = code === 0 ? "done" : "failed";
-    if (job.status === "done" && job.exitCode === null) job.exitCode = 0;
     job.updatedAt = new Date().toISOString();
     job.child = null;
     if (job.status === "done") scheduleConnectedUsageRefresh(job.connectionId);

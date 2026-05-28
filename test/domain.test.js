@@ -32,7 +32,7 @@ import {
   rememberMemory,
 } from "../src/domain/memory.js";
 import { createTimelineEvent, mergeTimelineEvent } from "../src/domain/run-timeline.js";
-import { applySessionPatch, clearStaleAutopilotRuns, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
+import { applySessionPatch, clearStaleAutopilotRuns, createSession, loadSession, projectLabel, rememberPathForCwd, saveSession } from "../src/domain/sessions.js";
 import { containsSensitiveText, redactSensitiveStrings, redactSensitiveText } from "../src/domain/safety.js";
 import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../src/domain/idle-timeout.js";
 import { mcpToolCatalog, writeScopedPeerConfigs } from "../src/supervisors/mcp.js";
@@ -116,6 +116,27 @@ test("saveSession treats incoming messages as authoritative", async () => {
 
     const loaded = await loadSession(session.id);
     assert.deepEqual(loaded.messages.map((message) => message.content), ["keep"]);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("createSession serializes concurrent creates for the same project to a single id", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const [first, second, third] = await Promise.all([
+      createSession({ supervisor: "codex", cwd: "project-a" }),
+      createSession({ supervisor: "codex", cwd: "project-a" }),
+      createSession({ supervisor: "codex", cwd: "project-a" }),
+    ]);
+    assert.equal(first.id, second.id);
+    assert.equal(second.id, third.id);
+    const loaded = await loadSession(first.id);
+    assert.equal(loaded.id, first.id);
   } finally {
     paths.workspaceRoot = originalWorkspaceRoot;
     await rm(dir, { recursive: true, force: true });
@@ -781,6 +802,28 @@ test("usageSnapshot reports aggregate budget warnings", async () => {
   });
 });
 
+test("readStore recovers from a corrupt usage.json instead of throwing", async () => {
+  await withUsageDataDir(async (dir) => {
+    await writeFile(path.join(dir, "usage.json"), "{not valid json", "utf8");
+    await recordRunStart("codex");
+    const usage = await listUsage();
+    const codex = usage.find((item) => item.id === "codex");
+    assert.equal(codex.active, true);
+    const persisted = JSON.parse(await readFile(path.join(dir, "usage.json"), "utf8"));
+    assert.equal(persisted.schemaVersion, 1);
+  });
+});
+
+test("writeStore + Gemini token writes never leave a temp file behind on success", async () => {
+  await withUsageDataDir(async (dir) => {
+    await recordRunStart("claude");
+    await recordRunEnd("claude");
+    const entries = await readdir(dir);
+    const stragglers = entries.filter((name) => name.includes(".tmp"));
+    assert.deepEqual(stragglers, [], `unexpected temp files: ${stragglers.join(", ")}`);
+  });
+});
+
 test("clearStaleActiveRuns resets persisted active usage after restart", async () => {
   await withUsageDataDir(async () => {
     await recordRunStart("codex");
@@ -959,6 +1002,27 @@ test("decideAutopilotNext respects DeepSeek stop decisions", async () => {
 
     assert.equal(decision.action, "stop");
     assert.equal(decision.reason, "nothing left to do");
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext on a fresh session stops without hitting DeepSeek and explains why", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called when there is no assistant turn yet");
+  };
+  try {
+    const decision = await decideAutopilotNext({ supervisor: "codex", cwd: ".", messages: [] });
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "stop");
+    assert.equal(/error|stopped run/i.test(decision.reason), false);
+    assert.match(decision.reason, /assistant message/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;

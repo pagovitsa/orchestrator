@@ -93,26 +93,34 @@ function usageFilePath() {
   return path.join(paths.dataDir, "usage.json");
 }
 
-async function readStore() {
-  try {
-    return normalizeStore(JSON.parse(await readFile(usageFilePath(), "utf8")));
-  } catch (error) {
-    if (error.code === "ENOENT") return normalizeStore();
-    throw error;
-  }
-}
-
-async function writeStore(store) {
-  const file = usageFilePath();
+// Writes a file via a unique temp + atomic rename. Any failure removes the temp file. Used for
+// any JSON we cannot afford to leave half-written (usage store, refreshed OAuth credentials).
+async function writeFileAtomic(file, content) {
   await mkdir(path.dirname(file), { recursive: true });
   const tempPath = path.join(path.dirname(file), `${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
   try {
-    await writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await writeFile(tempPath, content, "utf8");
     await rename(tempPath, file);
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+async function readStore() {
+  try {
+    return normalizeStore(JSON.parse(await readFile(usageFilePath(), "utf8")));
+  } catch (error) {
+    if (error.code === "ENOENT") return normalizeStore();
+    // A corrupt store (truncated/partial write from a prior crash, manual edit, etc.) must not wedge
+    // every usage operation. Recover with an empty store; the next write rewrites it cleanly.
+    if (error instanceof SyntaxError) return normalizeStore();
+    throw error;
+  }
+}
+
+async function writeStore(store) {
+  await writeFileAtomic(usageFilePath(), `${JSON.stringify(store, null, 2)}\n`);
 }
 
 function withUsageLock(task) {
@@ -716,7 +724,9 @@ async function geminiAccessToken() {
     token_type: refreshed.token_type || credentials.token_type || "Bearer",
     expiry_date: Date.now() + Math.max(0, Number(refreshed.expires_in || 0)) * 1000,
   };
-  await writeFile(file, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  // Atomic write: a crash mid-write would otherwise leave truncated credentials that all later
+  // Gemini probes silently fail to parse.
+  await writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
   return next.access_token;
 }
 

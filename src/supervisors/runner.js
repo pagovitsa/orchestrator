@@ -335,6 +335,17 @@ function sanitizedProcessEnv(extra = {}) {
   return { ...env, ...extra };
 }
 
+// stdout/stderr are captured only for non-streaming callers and for the final error report. Long
+// supervisor runs can emit megabytes of NDJSON; keeping only the tail bounds memory while still
+// preserving enough context for failure diagnostics.
+const RUN_BUFFER_LIMIT = 64 * 1024;
+function appendCapped(current, text) {
+  const combined = current + text;
+  return combined.length > RUN_BUFFER_LIMIT
+    ? combined.slice(combined.length - RUN_BUFFER_LIMIT)
+    : combined;
+}
+
 function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, onTask, stdoutHandler, signal, browserContext }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
@@ -379,13 +390,15 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString("utf8");
-      stdout += text;
+      // Skip buffering when the caller is streaming via stdoutHandler — it already owns the data
+      // and we only need the buffer for the non-streaming cliResult() fallback.
+      if (!stdoutHandler) stdout = appendCapped(stdout, text);
       if (stdoutHandler) stdoutHandler(text);
       else onOutput?.({ stream: "stdout", content: text });
     });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString("utf8");
-      stderr += text;
+      stderr = appendCapped(stderr, text);
       stderrTrace.push(text);
     });
     child.stdin.on("error", (error) => {
@@ -620,21 +633,28 @@ async function callClaude(session, prompt, options = {}) {
   const parser = createClaudeStreamParser(options);
   const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, env: { MCP_TIMEOUT: "60000" }, stdoutHandler: parser.push.bind(parser), ...runOptions });
   parser.flush();
-  if (result.ok) return parser.answer() || cliResult(result);
+  // On success we only return what the parser extracted as the assistant's answer. Falling back to
+  // raw stdout would surface the underlying stream-json NDJSON to the user when Claude returns an
+  // empty content block — which is misleading, not informative.
+  if (result.ok) return parser.answer() || "";
   return cliResult(result);
 }
 
 // The flag that loads our generated profile config file varies by codex version (older builds drop
-// --profile-v2 and use --profile). Detect it once from `codex exec --help`.
+// --profile-v2 and use --profile). Detect it once from `codex exec --help`, and cache the
+// in-flight promise so two concurrent callers do not both spawn `codex exec --help`.
 let codexProfileFlag = null;
+let codexProfileFlagPromise = null;
 function detectCodexProfileFlag() {
   if (codexProfileFlag) return Promise.resolve(codexProfileFlag);
-  return new Promise((resolve) => {
+  if (codexProfileFlagPromise) return codexProfileFlagPromise;
+  codexProfileFlagPromise = new Promise((resolve) => {
     execFile("codex", ["exec", "--help"], { timeout: 5000 }, (_error, stdout = "", stderr = "") => {
       codexProfileFlag = /--profile-v2\b/.test(`${stdout}\n${stderr}`) ? "--profile-v2" : "--profile";
       resolve(codexProfileFlag);
     });
-  });
+  }).finally(() => { codexProfileFlagPromise = null; });
+  return codexProfileFlagPromise;
 }
 
 async function callCodex(session, prompt, options = {}) {
@@ -1145,16 +1165,23 @@ async function readDeepSeekStream(body, options = {}) {
     }
   };
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
-    for (const line of lines) processLine(line);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) processLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer) processLine(buffer);
+  } finally {
+    // Releasing the lock on error/abort lets the body stream be cancelled and the underlying
+    // socket closed instead of leaking until GC. cancel() is best-effort: it is already gone
+    // when the stream completed normally.
+    try { reader.releaseLock(); } catch { /* already released */ }
   }
-  buffer += decoder.decode();
-  if (buffer) processLine(buffer);
   return answer.trim();
 }
 

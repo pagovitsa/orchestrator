@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -190,6 +190,43 @@ test("autopilotNeedsDecision detects missed ready assistant turns", () => {
   assert.equal(autopilotNeedsDecision({ ...session, messages: [...session.messages, { role: "user", at: "2026-05-27T10:07:00.000Z" }] }), false);
   assert.equal(autopilotNeedsDecision({ ...session, autopilotState: { state: "running" } }), false);
   assert.equal(autopilotNeedsDecision({ ...session, messages: [{ ...session.messages.at(-1), streaming: true }] }), false);
+});
+
+test("autopilotCanResumeFromSummary only allows runnable enabled summaries", () => {
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: true,
+    autopilotState: { state: "created" },
+  }), true);
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: true,
+    autopilotState: { state: "completed" },
+  }), true);
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: true,
+    autopilotState: { state: "running" },
+  }), false);
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: true,
+    autopilotState: { state: "paused" },
+  }), false);
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: true,
+    autopilotState: { state: "stopped" },
+  }), false);
+  assert.equal(autopilotCanResumeFromSummary({
+    id: "session-a",
+    autopilotEnabled: false,
+    autopilotState: { state: "created" },
+  }), false);
+  assert.equal(autopilotCanResumeFromSummary({
+    autopilotEnabled: true,
+    autopilotState: { state: "created" },
+  }), false);
 });
 
 test("createSessionSendGate blocks duplicate sends until released", () => {

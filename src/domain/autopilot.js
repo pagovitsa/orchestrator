@@ -28,7 +28,9 @@ function recentTranscript(session, limit = RECENT_TRANSCRIPT_LIMIT) {
 }
 
 function hasRunError(message) {
-  if (!message) return true;
+  // Caller is responsible for guarding the no-assistant-message case; treating "no message" as
+  // "error" was wedging fresh sessions with a misleading reason.
+  if (!message) return false;
   if (message.error || message.stopped) return true;
   return /^\s*(error|command failed|uncaught|traceback)\b/i.test(String(message.content || ""));
 }
@@ -240,7 +242,10 @@ export async function decideAutopilotNextWithRetry(session, {
       lastError = error;
       throwIfAborted(signal);
       if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) throw error;
-      const delayMs = retry.backoffMs * (2 ** (attempt - 1));
+      // Full jitter: pick uniformly in [base/2, base]. Without jitter, multiple sessions backing
+      // off a shared 429 wake up simultaneously and hammer the endpoint together.
+      const base = retry.backoffMs * (2 ** (attempt - 1));
+      const delayMs = Math.round(base * (0.5 + Math.random() * 0.5));
       onRetry?.({
         attempt,
         nextAttempt: attempt + 1,
@@ -257,6 +262,9 @@ export async function decideAutopilotNextWithRetry(session, {
 
 export async function decideAutopilotNext(session, { signal } = {}) {
   const lastAssistant = latestAssistantMessage(session);
+  if (!lastAssistant) {
+    return { action: "stop", kind: "stop", reason: "No assistant message to evaluate yet" };
+  }
   if (hasRunError(lastAssistant)) {
     return { action: "stop", kind: "stop", reason: "Last assistant message is an error or stopped run" };
   }
@@ -295,13 +303,16 @@ export async function decideAutopilotNext(session, { signal } = {}) {
       : body;
     throw Object.assign(new Error(`DeepSeek autopilot HTTP ${response.status}: ${details}`), { status: response.status });
   }
-  const parsed = JSON.parse(body);
-  const content = parsed.choices?.[0]?.message?.content || "";
-  let decision;
+  // A 2xx with a non-JSON body (proxy error page, truncated response) would otherwise throw a
+  // bare SyntaxError that the retry classifier does not recognise; wrap it as an HTTP-style
+  // failure so the caller can surface it consistently.
+  let parsed;
   try {
-    decision = parseAutopilotDecision(content);
+    parsed = JSON.parse(body);
   } catch (error) {
-    throw error;
+    const snippet = body.length > MAX_ERROR_BODY_CHARS ? `${body.slice(0, MAX_ERROR_BODY_CHARS)}...` : body;
+    throw Object.assign(new Error(`DeepSeek autopilot returned non-JSON body: ${error.message} :: ${snippet}`), { status: 502 });
   }
-  return normalizeAutopilotDecision(decision);
+  const content = parsed.choices?.[0]?.message?.content || "";
+  return parseAutopilotDecision(content);
 }

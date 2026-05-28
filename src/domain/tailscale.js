@@ -178,10 +178,11 @@ export async function saveTailscaleSetup(body = {}) {
     "",
   ].join("\n");
 
-  await Promise.all([
-    writeFileAtomic(setupFile, `${JSON.stringify(publicConfig, null, 2)}\n`),
-    writeFileAtomic(envFile, envText),
-  ]);
+  // Sequential, env first: the env file is what the sidecar consumes at startup. If we write the
+  // setup JSON first and the env write then fails (disk full, permissions), the UI reports
+  // "configured" but the sidecar has no key. Writing env first keeps the visible config truthful.
+  await writeFileAtomic(envFile, envText);
+  await writeFileAtomic(setupFile, `${JSON.stringify(publicConfig, null, 2)}\n`);
 
   return tailscaleStatus();
 }

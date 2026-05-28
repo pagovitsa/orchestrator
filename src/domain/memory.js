@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertNoSensitiveText, containsSensitiveText } from "./safety.js";
 
@@ -97,29 +97,30 @@ async function writeStore(filePath, store) {
   await mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   store.updatedAt = nowIso();
-  await writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
+  try {
+    await writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
+// In-process promise-chain lock keyed by absolute file path. The previous file-based "wx" lock
+// could be orphaned by a crashed process and then block every subsequent memory write until
+// manual cleanup. Since the orchestrator is a single Node process, an in-memory queue is both
+// safer (no stale files) and simpler.
+const storeLocks = new Map();
 async function withStoreLock(filePath, task) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  const lockPath = `${filePath}.lock`;
-  const started = Date.now();
-  let handle = null;
-  for (;;) {
-    try {
-      handle = await open(lockPath, "wx");
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST" || Date.now() - started > 5000) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 35));
-    }
-  }
+  const previous = storeLocks.get(filePath) || Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const marker = run.catch(() => {});
+  storeLocks.set(filePath, marker);
   try {
-    return await task();
+    return await run;
   } finally {
-    await handle?.close().catch(() => {});
-    await rm(lockPath, { force: true }).catch(() => {});
+    if (storeLocks.get(filePath) === marker) storeLocks.delete(filePath);
   }
 }
 

@@ -143,13 +143,20 @@ async function handle(message) {
       return;
     }
     if (method === "tools/call") {
-      const payload = await callTool(params.name, params.arguments || {});
-      result(id, textResult(payload));
+      try {
+        const payload = await callTool(params.name, params.arguments || {});
+        result(id, textResult(payload));
+      } catch (err) {
+        // Tool execution failures are surfaced via result.isError so the calling model can read
+        // the error text and recover (per the MCP spec). Only protocol-level failures go through
+        // the JSON-RPC error channel below.
+        result(id, { ...textResult(err.message || String(err)), isError: true });
+      }
       return;
     }
     error(id, -32601, `Method not found: ${method}`);
   } catch (err) {
-    result(id, { ...textResult(err.message || String(err)), isError: true });
+    error(id, -32603, err.message || String(err));
   }
 }
 

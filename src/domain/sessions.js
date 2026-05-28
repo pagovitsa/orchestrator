@@ -97,27 +97,31 @@ export async function loadSession(id) {
   throw Object.assign(new Error("Project conversation not found"), { status: 404 });
 }
 
-export async function saveSession(session) {
-  return withSessionLock(session.cwd, async () => {
-    const cwd = session.cwd || ".";
-    if (!Array.isArray(session.messages)) {
-      throw Object.assign(new Error("session.messages must be an array"), { status: 400 });
-    }
-    const existing = await readRememberFile(cwd);
-    const normalized = normalizeProjectSession(session, cwd);
-    const saved = {
-      ...normalized,
-      id: existing?.id || normalized.id,
-      createdAt: existing?.createdAt || normalized.createdAt,
-      messages: normalized.messages,
-      updatedAt: new Date().toISOString(),
-    };
-    saved.project = projectLabel(cwd);
-    saved.title = saved.project;
+// Internal save that assumes the caller already holds withSessionLock(cwd). Used by saveSession
+// and by createSession to avoid re-entrant lock acquisition (which would deadlock the chain).
+async function saveSessionLocked(session) {
+  const cwd = session.cwd || ".";
+  if (!Array.isArray(session.messages)) {
+    throw Object.assign(new Error("session.messages must be an array"), { status: 400 });
+  }
+  const existing = await readRememberFile(cwd);
+  const normalized = normalizeProjectSession(session, cwd);
+  const saved = {
+    ...normalized,
+    id: existing?.id || normalized.id,
+    createdAt: existing?.createdAt || normalized.createdAt,
+    messages: normalized.messages,
+    updatedAt: new Date().toISOString(),
+  };
+  saved.project = projectLabel(cwd);
+  saved.title = saved.project;
 
-    await writeRememberSession(cwd, saved, session);
-    return session;
-  });
+  await writeRememberSession(cwd, saved, session);
+  return session;
+}
+
+export async function saveSession(session) {
+  return withSessionLock(session.cwd, () => saveSessionLocked(session));
 }
 
 export async function updateSessionForCwd(cwd, updater) {
@@ -202,32 +206,36 @@ async function listRememberedProjectCwds() {
 }
 
 export async function createSession(body = {}) {
-  const now = new Date().toISOString();
   const supervisor = supervisors[body.supervisor] ? body.supervisor : runtime.defaultSupervisor;
   const cwd = body.cwd || ".";
   requireScopedCwd(cwd);
 
-  const existing = await readRememberFile(cwd);
-  const session = existing || {
-    id: randomUUID(),
-    schemaVersion: 1,
-    title: projectLabel(cwd),
-    project: projectLabel(cwd),
-    supervisor,
-    cwd,
-    createdAt: now,
-    updatedAt: now,
-    messages: [],
-    autopilotEnabled: false,
-    autopilotState: { state: "created", updatedAt: now, reason: "" },
-  };
+  // Serialize concurrent creates for the same cwd so two parallel POSTs do not each see a
+  // missing file, mint distinct UUIDs, and race their writes — leaving one caller holding a
+  // session id that has already been overwritten on disk.
+  return withSessionLock(cwd, async () => {
+    const now = new Date().toISOString();
+    const existing = await readRememberFile(cwd);
+    const session = existing || {
+      id: randomUUID(),
+      schemaVersion: 1,
+      title: projectLabel(cwd),
+      project: projectLabel(cwd),
+      supervisor,
+      cwd,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+      autopilotEnabled: false,
+      autopilotState: { state: "created", updatedAt: now, reason: "" },
+    };
 
-  session.supervisor = supervisor;
-  session.cwd = cwd;
-  session.project = projectLabel(cwd);
-  session.title = session.project;
-  await saveSession(session);
-  return session;
+    session.supervisor = supervisor;
+    session.cwd = cwd;
+    session.project = projectLabel(cwd);
+    session.title = session.project;
+    return saveSessionLocked(session);
+  });
 }
 
 export function sessionHasMessages(session) {

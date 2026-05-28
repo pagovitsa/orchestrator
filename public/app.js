@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -25,7 +25,9 @@ const state = {
   activeModelTab: "connection",
   projectMenuProject: null,
   autopilotPhases: new Map(),
-  autopilotTimers: new Set(),
+  // sessionId -> timer handle; storing the handle (rather than a Set of ids) lets us cancel a
+  // scheduled run when the session/project is deleted before the 450 ms delay elapses.
+  autopilotTimers: new Map(),
   soundMuted: readBooleanPreference("orch.soundMuted", false),
   speechEnabled: readBooleanPreference("orch.speechEnabled", false),
   audioContext: null,
@@ -1593,11 +1595,35 @@ async function maybeRunAutopilot(session) {
 function scheduleAutopilot(session) {
   if (!session?.id || !projectAutopilotEnabled(session) || !autopilotNeedsDecision(session)) return;
   if (state.autopilotTimers.has(session.id)) return;
-  state.autopilotTimers.add(session.id);
-  setTimeout(() => {
+  const handle = setTimeout(() => {
     state.autopilotTimers.delete(session.id);
     maybeRunAutopilot(session);
   }, 450);
+  state.autopilotTimers.set(session.id, handle);
+}
+
+function cancelScheduledAutopilot(sessionId) {
+  const handle = state.autopilotTimers.get(sessionId);
+  if (handle !== undefined) {
+    clearTimeout(handle);
+    state.autopilotTimers.delete(sessionId);
+  }
+}
+
+async function resumeAutopilotSession(sessionSummary) {
+  if (!autopilotCanResumeFromSummary(sessionSummary)) return;
+  if (state.runs.has(sessionSummary.id) || state.autopilotTimers.has(sessionSummary.id)) return;
+  // Always fetch the canonical session by id. The summary in state.sessions lacks `messages` and
+  // `state.currentSession` would be a stale snapshot once we await — both can race with the user
+  // switching projects and feed the wrong object to scheduleAutopilot.
+  const { session } = await api(`/api/sessions/${sessionSummary.id}`);
+  scheduleAutopilot(session);
+}
+
+async function resumeAutopilotSessions() {
+  // Fan out resume probes in parallel so a workspace with N autopilot sessions does not pay N
+  // sequential round-trips at init. allSettled keeps one failure from masking the rest.
+  await Promise.allSettled(state.sessions.map((session) => resumeAutopilotSession(session)));
 }
 
 function closeProjectContextMenu() {
@@ -2234,7 +2260,12 @@ function resizeComposerInput() {
   const lineHeight = Number.parseFloat(style.lineHeight) || 24;
   const maxHeight = lineHeight * 10;
   const minHeight = lineHeight;
-  el.messageInput.style.height = `${minHeight}px`;
+  if (!el.messageInput.value) {
+    el.messageInput.style.height = `${minHeight}px`;
+    el.messageInput.style.overflowY = "hidden";
+    return;
+  }
+  el.messageInput.style.height = "auto";
   const nextHeight = Math.max(minHeight, Math.min(el.messageInput.scrollHeight, maxHeight));
   el.messageInput.style.height = `${Math.ceil(nextHeight)}px`;
   el.messageInput.style.overflowY = el.messageInput.scrollHeight > maxHeight + 1 ? "auto" : "hidden";
@@ -2532,7 +2563,10 @@ async function deleteProjectFromUi(project) {
     const body = await api(`/api/projects/${encodeURIComponent(projectName)}`, { method: "DELETE" });
     state.projects = body.projects || [];
     state.sessions = body.sessions || [];
-    if (project.id) state.autopilotPhases.delete(project.id);
+    if (project.id) {
+      state.autopilotPhases.delete(project.id);
+      cancelScheduledAutopilot(project.id);
+    }
     if (isCurrentProject(project)) {
       state.currentSession = null;
       renderMessages();
@@ -3115,7 +3149,10 @@ async function init() {
     syncComposerState();
     setWorkspaceStatus();
   }
+  // Open the SSE stream before kicking off resume probes so server-side events fired during the
+  // resume window (e.g. a run finishing as we reconnect) are not dropped.
   connectLiveEvents();
+  await resumeAutopilotSessions();
 }
 
 el.newChat.addEventListener("click", openNewChatModal);

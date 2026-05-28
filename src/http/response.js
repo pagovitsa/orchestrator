@@ -28,12 +28,21 @@ export function sendText(res, status, body) {
 export async function readBody(req) {
   const chunks = [];
   let total = 0;
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > runtime.maxPayloadBytes) {
-      throw Object.assign(new Error(`Request body exceeds ${formatBytes(runtime.maxPayloadBytes)}`), { status: 413 });
+  try {
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > runtime.maxPayloadBytes) {
+        // Aborting the request stream lets the kernel reject the rest of the upload instead of
+        // leaving the keep-alive connection waiting for us to read a multi-MB body we will
+        // never use.
+        req.destroy();
+        throw Object.assign(new Error(`Request body exceeds ${formatBytes(runtime.maxPayloadBytes)}`), { status: 413 });
+      }
+      chunks.push(chunk);
     }
-    chunks.push(chunk);
+  } catch (error) {
+    if (error?.status) throw error;
+    throw Object.assign(new Error("Failed to read request body"), { status: 400 });
   }
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString("utf8");

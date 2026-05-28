@@ -24,7 +24,11 @@ export async function serveStatic(_req, res, url) {
       "content-type": contentTypes[path.extname(filePath)] || "application/octet-stream",
       "referrer-policy": "no-referrer",
     });
-    createReadStream(filePath).pipe(res);
+    const stream = createReadStream(filePath);
+    // Without an explicit error handler an EIO/ENOENT mid-pipe would surface as an unhandled
+    // 'error' event and crash the process. Headers are already sent, so we can only tear down.
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
   } catch {
     sendText(res, 404, "Not found");
   }
