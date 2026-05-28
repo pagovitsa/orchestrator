@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -30,6 +31,26 @@ function sshCommand() {
   // Force git/ssh to use exactly our generated key, no agent, no other identities, no
   // host-key prompt. Quoting the path keeps spaces safe.
   return `ssh -i "${privateKeyPath()}" ${SSH_OPTS.join(" ")}`;
+}
+
+// Synchronous read for the supervisor spawn path. We avoid awaiting because runCommand builds
+// its env synchronously. Anything missing is just omitted from the env so the child process
+// keeps whatever already inherited from `process.env`.
+export function githubSupervisorEnvSync() {
+  const env = {};
+  if (existsSync(privateKeyPath())) {
+    env.GIT_SSH_COMMAND = sshCommand();
+  }
+  try {
+    if (existsSync(tokenPath())) {
+      const token = readFileSync(tokenPath(), "utf8").trim();
+      if (token) {
+        env.GITHUB_TOKEN = token;
+        env.GH_TOKEN = token;
+      }
+    }
+  } catch { /* token file unreadable — leave env unset */ }
+  return env;
 }
 
 async function fileExists(filePath) {

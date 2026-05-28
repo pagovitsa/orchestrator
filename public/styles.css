@@ -1104,6 +1104,72 @@ input {
   color: var(--danger);
 }
 
+.settings-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.settings-button.is-warning {
+  color: var(--danger);
+}
+
+.settings-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+
+.settings-menu[hidden] { display: none; }
+
+.settings-menu > button {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: 8px;
+  font: inherit;
+  text-align: left;
+}
+
+.settings-menu > button:hover,
+.settings-menu > button:focus-visible {
+  background: var(--bg);
+  outline: none;
+}
+
+.settings-menu-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.settings-menu-status {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.settings-menu-status[data-state="ok"] { color: #22c55e; }
+.settings-menu-status[data-state="warn"] { color: var(--danger); }
+
 .github-modal { width: min(640px, calc(100vw - 28px)); }
 .github-publish-modal { width: min(520px, calc(100vw - 28px)); }
 

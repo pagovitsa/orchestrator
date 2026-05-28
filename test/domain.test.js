@@ -54,6 +54,7 @@ import { normalizeProjectName } from "../src/domain/workspace.js";
 import {
   ensureKeypair,
   githubConnectionStatus,
+  githubSupervisorEnvSync,
   projectGithubStatus,
   publishProjectToGithub,
   readToken,
@@ -1483,5 +1484,23 @@ test("publishProjectToGithub creates a private repo, sets origin, commits and 'p
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+test("githubSupervisorEnvSync exposes SSH command + token after connect, and is empty without them", async () => {
+  await withGithubWorkspace(async () => {
+    assert.deepEqual(githubSupervisorEnvSync(), {});
+    await ensureKeypair();
+    let env = githubSupervisorEnvSync();
+    assert.match(env.GIT_SSH_COMMAND || "", /^ssh -i ".+id_ed25519"/);
+    assert.equal(env.GITHUB_TOKEN, undefined);
+
+    await saveToken("ghp_super");
+    env = githubSupervisorEnvSync();
+    assert.equal(env.GITHUB_TOKEN, "ghp_super");
+    assert.equal(env.GH_TOKEN, "ghp_super");
+
+    await clearGithubConnection();
+    assert.deepEqual(githubSupervisorEnvSync(), {});
   });
 });

@@ -8,6 +8,7 @@ import {
   rememberMemory,
   updateMemorySummary,
 } from "../domain/memory.js";
+import { githubSupervisorEnvSync } from "../domain/github.js";
 import { loadPrompt } from "../domain/prompts.js";
 import { createTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
@@ -332,7 +333,10 @@ function sanitizedProcessEnv(extra = {}) {
     VITE_HOST: runtime.devServerHost,
   };
   for (const key of ["DEEPSEEK_API_KEY", "CUSTOM_API_KEY", "ORCH_AUTH_PASSWORD"]) delete env[key];
-  return { ...env, ...extra };
+  // GitHub: hand the supervisor a working SSH command + token so it can `git push`, `git clone`,
+  // run `gh repo create`, etc., without the user having to wire credentials again per project.
+  // Read synchronously so the spawn path stays simple; missing config just omits the keys.
+  return { ...env, ...githubSupervisorEnvSync(), ...extra };
 }
 
 // stdout/stderr are captured only for non-streaming callers and for the final error report. Long
