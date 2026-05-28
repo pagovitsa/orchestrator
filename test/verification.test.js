@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { checksFromEnv, runHttpSmokeChecks, writeSmokeReport } from "../src/scripts/smoke-report.js";
 import { readBody } from "../src/http/response.js";
 import { runtime } from "../src/config/env.js";
-import { request } from "node:http";
+import { Agent, request } from "node:http";
 
 const execFileAsync = promisify(execFile);
 
@@ -169,9 +169,9 @@ test("runHttpSmokeChecks redacts credential URLs and limits response bodies", as
   }
 });
 
-test("readBody returns a 413-shaped error AND flushes a JSON response over keep-alive (no ECONNRESET)", async () => {
+test("readBody returns a 413 JSON over keep-alive while a chunked upload is in progress (no ECONNRESET)", async () => {
   const originalMax = runtime.maxPayloadBytes;
-  runtime.maxPayloadBytes = 128;
+  runtime.maxPayloadBytes = 256;
   const server = createServer(async (req, res) => {
     try {
       await readBody(req);
@@ -184,16 +184,19 @@ test("readBody returns a 413-shaped error AND flushes a JSON response over keep-
     }
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const agent = new Agent({ keepAlive: true });
   try {
     const { port } = server.address();
+    // Stream the body in small chunks so the server rejects mid-upload — the original regression
+    // (req.destroy / for-await return) surfaced as a client-side ECONNRESET in that window.
     const responseBody = await new Promise((resolve, reject) => {
-      const big = Buffer.alloc(2048, "x");
       const req = request({
         method: "POST",
         host: "127.0.0.1",
         port,
         path: "/",
-        headers: { "content-type": "application/json", "content-length": big.length },
+        agent,
+        headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
       }, (res) => {
         let body = "";
         res.setEncoding("utf8");
@@ -201,12 +204,19 @@ test("readBody returns a 413-shaped error AND flushes a JSON response over keep-
         res.on("end", () => resolve({ status: res.statusCode, body }));
       });
       req.on("error", reject);
-      req.write(big);
-      req.end();
+      // Push enough chunks past the 256-byte limit; the third write is what trips it.
+      let writes = 0;
+      const next = () => {
+        if (writes >= 8) { req.end(); return; }
+        writes += 1;
+        req.write(Buffer.alloc(128, "x"), () => setTimeout(next, 5));
+      };
+      next();
     });
     assert.equal(responseBody.status, 413);
     assert.match(responseBody.body, /exceeds/);
   } finally {
+    agent.destroy();
     runtime.maxPayloadBytes = originalMax;
     await new Promise((resolve) => server.close(resolve));
   }

@@ -237,6 +237,39 @@ test("memory keeps user facts global across project files", async () => {
   }
 });
 
+test("memory writes recover from a stale steal-lock left by a crashed stealer", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
+  try {
+    const files = {
+      globalFile: path.join(dir, "user.json"),
+      projectFile: path.join(dir, "project.json"),
+    };
+    await mkdir(path.dirname(files.projectFile), { recursive: true });
+    const lockPath = `${files.projectFile}.lock`;
+    const stealPath = `${lockPath}.steal`;
+    let deadPid = 999999;
+    for (let candidate = 999999; candidate > 1000; candidate -= 1) {
+      try { process.kill(candidate, 0); } catch (error) {
+        if (error.code === "ESRCH") { deadPid = candidate; break; }
+      }
+    }
+    // Both the main lock AND the steal lock are stale (crashed stealer scenario). Without the
+    // .steal recovery path, acquireFileLock would spin until the 10s outer timeout.
+    await writeFile(lockPath, String(deadPid), "utf8");
+    await writeFile(stealPath, String(deadPid), "utf8");
+    const { utimes } = await import("node:fs/promises");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lockPath, old, old);
+    await utimes(stealPath, old, old);
+
+    const started = Date.now();
+    await rememberMemory(files, { scope: "project", kind: "fact", text: "we use redis" });
+    assert.ok(Date.now() - started < 5_000, `stale .steal recovery took too long: ${Date.now() - started}ms`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("memory writes recover from a stale lock left by a dead process", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
   try {

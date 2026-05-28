@@ -144,17 +144,24 @@ async function lockIsStale(lockPath) {
 // Steal sequence (rm + recreate) must be serialised across processes — otherwise two stealers
 // can both observe a stale lock, A creates a fresh lock, B's delayed rm wipes A's lock, and
 // both think they own it. We gate the rm+recreate behind a separate `.steal` lock that itself
-// uses `wx` for atomicity, and re-verify staleness under that lock.
+// uses `wx` for atomicity, encodes the holder PID, and is also stale-recoverable so a crashed
+// stealer cannot permanently wedge writers.
 async function takeoverStaleLock(lockPath) {
   const stealPath = `${lockPath}.steal`;
   let stealHandle;
   try {
     stealHandle = await open(stealPath, "wx");
   } catch (error) {
-    if (error.code === "EEXIST") return false; // another stealer is mid-takeover; retry caller
-    throw error;
+    if (error.code !== "EEXIST") throw error;
+    // If a previous stealer crashed, its `.steal` file would otherwise wedge every future writer.
+    // Recognise it the same way as the main lock and clear it before retrying.
+    if (await lockIsStale(stealPath)) {
+      await rm(stealPath, { force: true }).catch(() => {});
+    }
+    return false; // caller retries — backoff handled by the outer acquire loop
   }
   try {
+    await stealHandle.writeFile(String(process.pid), "utf8");
     if (await lockIsStale(lockPath)) {
       await rm(lockPath, { force: true }).catch(() => {});
     }
@@ -177,8 +184,10 @@ async function acquireFileLock(lockPath) {
       if (handle) await handle.close().catch(() => {});
       if (error.code !== "EEXIST") throw error;
       if (await lockIsStale(lockPath)) {
-        await takeoverStaleLock(lockPath);
-        continue;
+        const tookOver = await takeoverStaleLock(lockPath);
+        if (tookOver) continue;
+        // Another process is mid-takeover (or its `.steal` file just got cleared). Fall through
+        // to the normal backoff so the outer timeout still applies and we don't busy-spin.
       }
       if (Date.now() - started > 10_000) throw error;
       await new Promise((resolve) => setTimeout(resolve, 35));
