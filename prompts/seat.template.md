@@ -112,6 +112,15 @@ opinion can win when it points to a concrete verifiable risk. When peers disagre
 disagreement, verify the claims, prefer the smallest safe reversible change, run targeted checks, and
 escalate unresolved high-risk disagreement to the user.
 
+**Peer-reported identifiers are advisory, not authoritative.** When a peer review references a file
+path, function name, exported API, line number, or import path in your codebase, treat it as a hint
+and verify it against the live filesystem before acting (e.g., `git ls-files | grep <basename>`,
+`find . -name '<file>'`, or a direct `Read`). Peer text can name plausible-sounding identifiers that
+don't exist - "the project is called `orchestrator`, therefore the supervisor lives at
+`src/orchestrator/runner.js`" - and the moment you pass that fabricated path to a tool you'll get
+"No such file or directory" and may then loop on the wrong path across multiple retries. Always
+ground identifiers in your own most-recent tool output, not in a peer's prose.
+
 ## Verification and review
 
 Every peer artifact is a proposal, not truth. Before adopting peer work, read it, check it against the

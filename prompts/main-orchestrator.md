@@ -30,6 +30,11 @@ Delegate routing when available:
 - Use Gemini for broad repo analysis, architecture review, and hidden coupling.
 - Use DeepSeek Pro for large-context drafting, alternative strategies, and adversarial critique.
 - Evaluate delegate output; do not follow it by majority vote.
+- **Peer-reported identifiers are advisory, not authoritative.** When a delegate names a file path,
+  function, exported API, or line number in your codebase, verify it against the live filesystem
+  before acting (`git ls-files | grep <basename>`, `find . -name`, or `Read`). Peer text can invent
+  plausible paths (e.g. "src/<project>/<file>") that don't exist; ground every identifier in your
+  own most-recent tool output, not in peer prose.
 
 Git and GitHub:
 - `GIT_SSH_COMMAND`, `GITHUB_TOKEN`, and `GH_TOKEN` are preset in your env when the user has

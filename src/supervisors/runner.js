@@ -652,6 +652,13 @@ async function callClaude(session, prompt, options = {}) {
   if (process.env.CLAUDE_MODEL) args.push("--model", process.env.CLAUDE_MODEL);
   if (runtime.allowWrite) args.push("--dangerously-skip-permissions", "--permission-mode", "bypassPermissions");
   else args.push("--permission-mode", "plan");
+  // Disable Claude Code's per-cwd session persistence. The orchestrator owns the conversation
+  // history (replays the full `SESSION HISTORY:` block in every prompt), so Claude Code resuming
+  // a prior --print invocation in the same project dir only causes trouble: it tries to merge our
+  // refreshed text-prompt into a persisted internal session that already contains extended-thinking
+  // blocks, and the next API call hits `messages.<N>.content.<M>: thinking blocks cannot be
+  // modified`. Each turn must start a fresh internal session.
+  args.push("--no-session-persistence");
   args.push("-");
   const parser = createClaudeStreamParser(options);
   const result = await runCommand("claude", args, { cwd: scoped.scopedCwd, input: prompt, env: { MCP_TIMEOUT: "60000" }, stdoutHandler: parser.push.bind(parser), ...runOptions });

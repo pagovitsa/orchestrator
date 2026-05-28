@@ -434,11 +434,12 @@ async function handleStreamMessage(req, res, id) {
   const abortController = new AbortController();
   let completed = false;
   const activeRun = registerActiveRun(id, session, abortController, "stream");
-  // Abort the child process if the browser disconnects mid-stream. Without this the supervisor
-  // CLI runs to completion against a dead response and the per-session run slot stays held.
-  res.on("close", () => {
-    if (!completed) abortController.abort();
-  });
+  // Intentionally NOT aborting on res.close (browser disconnect / refresh / tab switch). Runs are
+  // designed to survive — broadcastRunEvent keeps fanning events to /api/events SSE subscribers,
+  // and subscribeEvents replays the in-flight draft when the browser reconnects. The active-run
+  // slot is released by the finally block once the supervisor finishes (or by /stop, /idle-timeout,
+  // or the autopilot decision timeout). Aborting on close would defeat that design and cause
+  // Autopilot to fall over every time the user hits refresh.
 
   const body = await readBody(req).catch((error) => {
     clearActiveRun(id, abortController);
@@ -614,9 +615,8 @@ async function handleJsonMessage(req, res, id) {
   // spawned with an already-aborted signal, and the active-run map would carry a doomed entry.
   const session = await loadSession(id);
   const activeRun = registerActiveRun(id, session, abortController, "json");
-  res.on("close", () => {
-    if (!completed) abortController.abort();
-  });
+  // See handleStreamMessage: do not abort on browser disconnect. The run survives independently;
+  // /api/events SSE replays it when the browser comes back. Stop is the explicit kill switch.
   let usageStarted = false;
   try {
     const body = await readBody(req);
