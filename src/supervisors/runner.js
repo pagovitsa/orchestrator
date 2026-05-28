@@ -356,6 +356,23 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
     const startedAt = Date.now();
     emitTrace(traceOptions, `$ ${commandText}`);
     emitTrace(traceOptions, `[cwd] ${cwd}`);
+    // If the caller's signal is already aborted (e.g. the HTTP client disconnected during
+    // session load), do not spawn at all — AbortSignal listeners added after the abort event
+    // never fire, so the child would otherwise run to completion unkillably.
+    if (signal?.aborted) {
+      emitTimeline(timelineOptions, {
+        id: taskId,
+        kind: "command",
+        status: "cancelled",
+        title: commandText,
+        detail: `[cwd] ${cwd}\n[cancelled] before spawn`,
+        endedAt: new Date().toISOString(),
+        durationMs: 0,
+        meta: { cwd, command },
+      });
+      resolve({ ok: false, stdout: "", stderr: "cancelled before spawn", code: -1, timedOut: false });
+      return;
+    }
     emitTimeline(timelineOptions, {
       id: taskId,
       kind: "command",
@@ -390,9 +407,10 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
 
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString("utf8");
-      // Skip buffering when the caller is streaming via stdoutHandler — it already owns the data
-      // and we only need the buffer for the non-streaming cliResult() fallback.
-      if (!stdoutHandler) stdout = appendCapped(stdout, text);
+      // Always keep a capped tail. Even when stdoutHandler streams the data, cliResult() falls
+      // back to result.stdout when a CLI exits non-zero — and that is exactly when we need the
+      // tail for diagnostics.
+      stdout = appendCapped(stdout, text);
       if (stdoutHandler) stdoutHandler(text);
       else onOutput?.({ stream: "stdout", content: text });
     });

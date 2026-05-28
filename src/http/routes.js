@@ -420,7 +420,13 @@ async function appendUserMessage(session, body) {
 async function handleStreamMessage(req, res, id) {
   const session = await loadSession(id);
   const abortController = new AbortController();
+  let completed = false;
   const activeRun = registerActiveRun(id, session, abortController, "stream");
+  // Abort the child process if the browser disconnects mid-stream. Without this the supervisor
+  // CLI runs to completion against a dead response and the per-session run slot stays held.
+  res.on("close", () => {
+    if (!completed) abortController.abort();
+  });
 
   const body = await readBody(req).catch((error) => {
     clearActiveRun(id, abortController);
@@ -544,6 +550,7 @@ async function handleStreamMessage(req, res, id) {
       detail: `${answer?.length || transcript.length || 0} chars`,
     });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
+    completed = true;
   } catch (error) {
     const stopped = abortController.signal.aborted;
     const details = stopped ? runStopReason(abortController.signal) : errorDetail(error);

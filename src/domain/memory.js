@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertNoSensitiveText, containsSensitiveText } from "./safety.js";
 
@@ -106,15 +106,77 @@ async function writeStore(filePath, store) {
   }
 }
 
-// In-process promise-chain lock keyed by absolute file path. The previous file-based "wx" lock
-// could be orphaned by a crashed process and then block every subsequent memory write until
-// manual cleanup. Since the orchestrator is a single Node process, an in-memory queue is both
-// safer (no stale files) and simpler.
+// In-process promise-chain lock. The orchestrator AND each MCP `memory-server.js` child process
+// can write to the same memory files concurrently, so a pure in-memory queue is not enough — we
+// also need a file lock to serialise cross-process writers. The file lock encodes the holder's
+// PID so a crashed holder does not wedge subsequent writes; a new writer detects the dead PID
+// via `process.kill(pid, 0)` and steals the lock.
+const STALE_LOCK_AGE_MS = 30_000;
 const storeLocks = new Map();
+
+function pidAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    // EPERM means the process exists but we cannot signal it — treat as alive to be safe.
+    return error.code === "EPERM";
+  }
+}
+
+async function lockIsStale(lockPath) {
+  let raw = "";
+  try { raw = await readFile(lockPath, "utf8"); } catch { return false; }
+  const pid = Number.parseInt(raw.trim(), 10);
+  if (pid === process.pid) return true;
+  if (pidAlive(pid)) return false;
+  // PID is dead. Belt-and-suspenders age check guards against the OS recycling the PID number
+  // since the lock was written.
+  try {
+    const info = await stat(lockPath);
+    if (Date.now() - info.mtimeMs < STALE_LOCK_AGE_MS) return false;
+  } catch { /* file gone, treat as not stale (someone else cleared it) */ return false; }
+  return true;
+}
+
+async function acquireFileLock(lockPath) {
+  const started = Date.now();
+  for (;;) {
+    let handle = null;
+    try {
+      handle = await open(lockPath, "wx");
+      await handle.writeFile(String(process.pid), "utf8");
+      return handle;
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      if (error.code !== "EEXIST") throw error;
+      if (await lockIsStale(lockPath)) {
+        await rm(lockPath, { force: true }).catch(() => {});
+        continue;
+      }
+      if (Date.now() - started > 10_000) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 35));
+    }
+  }
+}
+
 async function withStoreLock(filePath, task) {
   await mkdir(path.dirname(filePath), { recursive: true });
+  // First serialise in-process callers via the promise chain so we don't churn the filesystem
+  // lock; then acquire the cross-process file lock for the actual critical section.
   const previous = storeLocks.get(filePath) || Promise.resolve();
-  const run = previous.catch(() => {}).then(task);
+  const run = previous.catch(() => {}).then(async () => {
+    const lockPath = `${filePath}.lock`;
+    const handle = await acquireFileLock(lockPath);
+    try {
+      return await task();
+    } finally {
+      await handle.close().catch(() => {});
+      await rm(lockPath, { force: true }).catch(() => {});
+    }
+  });
   const marker = run.catch(() => {});
   storeLocks.set(filePath, marker);
   try {

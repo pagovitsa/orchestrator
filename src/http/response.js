@@ -32,10 +32,11 @@ export async function readBody(req) {
     for await (const chunk of req) {
       total += chunk.length;
       if (total > runtime.maxPayloadBytes) {
-        // Aborting the request stream lets the kernel reject the rest of the upload instead of
-        // leaving the keep-alive connection waiting for us to read a multi-MB body we will
-        // never use.
-        req.destroy();
+        // Pause the stream (so we stop accepting more bytes) but do NOT destroy: that would
+        // reset the connection before the 413 JSON response is flushed, surfacing as an
+        // ECONNRESET to the client. The caller's catch sends the response and Node closes the
+        // socket after res.end.
+        req.pause();
         throw Object.assign(new Error(`Request body exceeds ${formatBytes(runtime.maxPayloadBytes)}`), { status: 413 });
       }
       chunks.push(chunk);

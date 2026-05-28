@@ -1526,6 +1526,9 @@ async function setProjectAutopilot(project, enabled) {
     syncComposerState();
     setStatus(`${key} autopilot ${enabled ? "on" : "paused"}`);
     if (enabled && state.currentSession?.id === project.id) scheduleAutopilot(state.currentSession);
+    // Disabling autopilot must drop any in-flight scheduled decision; otherwise the 450 ms timer
+    // fires and the server returns 409 "Autopilot is paused".
+    if (!enabled) cancelScheduledAutopilot(project.id);
   } catch (error) {
     setStatus(`Autopilot toggle error: ${error.message}`);
   }

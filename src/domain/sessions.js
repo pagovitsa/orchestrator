@@ -48,8 +48,15 @@ async function readRememberFile(cwd) {
   }
 }
 
+function sessionLockKey(cwd) {
+  // resolveCwd canonicalises the cwd against the workspace root so aliases like "project-a" and
+  // "./project-a" hash to the same lock key. Falling back to the raw input keeps test fixtures
+  // that pre-set paths.workspaceRoot from blowing up on validation.
+  try { return resolveCwd(cwd || "."); } catch { return cwd || "."; }
+}
+
 async function withSessionLock(cwd, task) {
-  const key = cwd || ".";
+  const key = sessionLockKey(cwd);
   const previous = sessionLocks.get(key) || Promise.resolve();
   const run = previous.catch(() => {}).then(task);
   const marker = run.catch(() => {});

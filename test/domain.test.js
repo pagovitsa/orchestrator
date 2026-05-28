@@ -143,6 +143,23 @@ test("createSession serializes concurrent creates for the same project to a sing
   }
 });
 
+test("createSession shares a lock across cwd aliases that resolve to the same project", async () => {
+  const originalWorkspaceRoot = paths.workspaceRoot;
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  try {
+    paths.workspaceRoot = dir;
+    await mkdir(path.join(dir, "project-a"), { recursive: true });
+    const [first, second] = await Promise.all([
+      createSession({ supervisor: "codex", cwd: "project-a" }),
+      createSession({ supervisor: "codex", cwd: "./project-a" }),
+    ]);
+    assert.equal(first.id, second.id);
+  } finally {
+    paths.workspaceRoot = originalWorkspaceRoot;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("saveSession refuses partial session objects without messages", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
   const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
@@ -215,6 +232,43 @@ test("memory keeps user facts global across project files", async () => {
     assert.equal(projectBMemory.user.memories[0].namespace, "profile");
     assert.deepEqual(projectBMemory.user.memories[0].tags, ["identity", "name"]);
     assert.equal(projectBMemory.project.memories.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("memory writes recover from a stale lock left by a dead process", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-memory-"));
+  try {
+    const files = {
+      globalFile: path.join(dir, "user.json"),
+      projectFile: path.join(dir, "project.json"),
+    };
+    // Simulate a crashed prior writer: drop a lock file naming a PID we can confirm is dead.
+    await mkdir(path.dirname(files.projectFile), { recursive: true });
+    const lockPath = `${files.projectFile}.lock`;
+    let deadPid = 999999;
+    for (let candidate = 999999; candidate > 1000; candidate -= 1) {
+      try { process.kill(candidate, 0); } catch (error) {
+        if (error.code === "ESRCH") { deadPid = candidate; break; }
+      }
+    }
+    await writeFile(lockPath, String(deadPid), "utf8");
+    const oldTime = new Date(Date.now() - 60_000);
+    const { utimes } = await import("node:fs/promises");
+    await utimes(lockPath, oldTime, oldTime);
+
+    // Write should steal the stale lock and succeed within the normal timeout, not hang/retry forever.
+    const started = Date.now();
+    await rememberMemory(files, {
+      scope: "project",
+      kind: "fact",
+      text: "we use postgres for production",
+    });
+    assert.ok(Date.now() - started < 5_000, `recovery took too long: ${Date.now() - started}ms`);
+
+    const memory = await readMemory(files, { scope: "project" });
+    assert.equal(memory.project.memories[0].text, "we use postgres for production");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1177,6 +1231,27 @@ test("decideAutopilotNextWithRetry retries transient errors and reloads session"
   assert.equal(result.attempts, 2);
   assert.equal(result.session, reloaded);
   assert.equal(result.decision.content, "next");
+});
+
+test("decideAutopilotNextWithRetry retry backoff applies full jitter in [base/2, base]", async () => {
+  const originalRandom = Math.random;
+  try {
+    // With Math.random() = 0 we expect exactly base/2; with 1 we expect base. Anything outside
+    // [base/2, base] means the jitter formula slipped.
+    for (const [randomValue, expected] of [[0, 100], [0.5, 150], [1, 200]]) {
+      Math.random = () => randomValue;
+      const captured = [];
+      await assert.rejects(decideAutopilotNextWithRetry({ id: "s1" }, {
+        config: { attempts: 2, backoffMs: 200 },
+        onRetry: (event) => captured.push(event.delayMs),
+        decide: async () => { throw Object.assign(new Error("blip"), { status: 503 }); },
+      }), /blip/);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0], expected, `random=${randomValue} produced ${captured[0]} (want ${expected})`);
+    }
+  } finally {
+    Math.random = originalRandom;
+  }
 });
 
 test("decideAutopilotNextWithRetry does not retry non-transient errors", async () => {
