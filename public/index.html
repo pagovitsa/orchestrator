@@ -302,7 +302,37 @@
         </div>
 
         <div id="modelDialogTabs" class="prompt-tabs" role="tablist" aria-label="Model detail tabs"></div>
-        <div id="modelConnectionPanel" class="model-tab-panel connection-list"></div>
+        <div id="modelConnectionPanel" class="model-tab-panel">
+          <div class="wizard" data-wizard="model-connect">
+            <div class="wizard-head">
+              <span class="wizard-step-count" id="modelConnectStepCount">Step 1 of 3</span>
+            </div>
+            <div class="wizard-progress"><div class="wizard-progress-bar" id="modelConnectProgressBar"></div></div>
+            <section class="wizard-step" data-step="intro">
+              <h3 id="modelConnectIntroTitle">About</h3>
+              <p class="modal-hint" id="modelConnectIntroDetail"></p>
+              <div id="modelConnectIntroLinks" class="connection-link-row"></div>
+              <div id="modelConnectIntroStatus" class="modal-hint" aria-live="polite"></div>
+            </section>
+            <section class="wizard-step" data-step="setup" hidden>
+              <h3 id="modelConnectSetupTitle">Set up</h3>
+              <p class="modal-hint" id="modelConnectSetupHint"></p>
+              <div id="modelConnectSetupBody"></div>
+              <div id="modelConnectJobOutput" class="connection-job-wrap" hidden></div>
+            </section>
+            <section class="wizard-step" data-step="done" hidden>
+              <h3>Connected</h3>
+              <p class="modal-hint" id="modelConnectDoneSummary"></p>
+            </section>
+            <div class="modal-actions wizard-actions">
+              <button id="modelConnectDisconnect" class="secondary danger" type="button">Disconnect</button>
+              <button id="modelConnectBack" class="secondary" type="button" data-wizard-back>Back</button>
+              <span class="modal-spacer"></span>
+              <button id="modelConnectNext" class="primary" type="button" data-wizard-next>Next</button>
+              <button id="modelConnectFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
+            </div>
+          </div>
+        </div>
         <div id="modelPromptPanel" class="model-tab-panel model-prompt-panel" hidden>
           <textarea id="modelPromptEditor" class="prompt-editor" spellcheck="false" placeholder="Prompt"></textarea>
           <div id="modelPromptStatus" class="modal-error" role="alert"></div>

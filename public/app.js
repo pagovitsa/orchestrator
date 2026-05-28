@@ -158,6 +158,21 @@ const el = {
   githubFinish: document.getElementById("githubFinish"),
   githubDoneSummary: document.getElementById("githubDoneSummary"),
   githubSshResult: document.getElementById("githubSshResult"),
+  modelConnectStepCount: document.getElementById("modelConnectStepCount"),
+  modelConnectProgressBar: document.getElementById("modelConnectProgressBar"),
+  modelConnectIntroTitle: document.getElementById("modelConnectIntroTitle"),
+  modelConnectIntroDetail: document.getElementById("modelConnectIntroDetail"),
+  modelConnectIntroLinks: document.getElementById("modelConnectIntroLinks"),
+  modelConnectIntroStatus: document.getElementById("modelConnectIntroStatus"),
+  modelConnectSetupTitle: document.getElementById("modelConnectSetupTitle"),
+  modelConnectSetupHint: document.getElementById("modelConnectSetupHint"),
+  modelConnectSetupBody: document.getElementById("modelConnectSetupBody"),
+  modelConnectJobOutput: document.getElementById("modelConnectJobOutput"),
+  modelConnectDoneSummary: document.getElementById("modelConnectDoneSummary"),
+  modelConnectBack: document.getElementById("modelConnectBack"),
+  modelConnectNext: document.getElementById("modelConnectNext"),
+  modelConnectFinish: document.getElementById("modelConnectFinish"),
+  modelConnectDisconnect: document.getElementById("modelConnectDisconnect"),
   tailscaleDialog: document.getElementById("tailscaleDialog"),
   tailscaleForm: document.getElementById("tailscaleForm"),
   closeTailscale: document.getElementById("closeTailscale"),
@@ -1157,8 +1172,10 @@ function closeConnectModal() {
 
 async function refreshConnections() {
   el.connectionList.textContent = "Checking...";
-  if (el.modelDialog.open && state.activeModelTab === "connection") {
-    el.modelConnectionPanel.textContent = "Checking...";
+  // The modelConnectionPanel now hosts the wizard chrome — don't clobber it with a text
+  // placeholder. The intro step's status line carries the same "checking" hint.
+  if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroStatus) {
+    el.modelConnectIntroStatus.textContent = "Checking connection status...";
   }
   try {
     const body = await api("/api/connections");
@@ -1174,8 +1191,8 @@ async function refreshConnections() {
     updateModalState();
   } catch (error) {
     el.connectionList.textContent = `Error: ${error.message}`;
-    if (el.modelDialog.open && state.activeModelTab === "connection") {
-      el.modelConnectionPanel.textContent = `Error: ${error.message}`;
+    if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroStatus) {
+      el.modelConnectIntroStatus.textContent = `Error: ${error.message}`;
     }
   }
 }
@@ -1370,15 +1387,100 @@ function renderModelDialogTabs() {
   }
 }
 
+const MODEL_CONNECT_STEPS = [
+  { id: "intro" },
+  { id: "setup" },
+  { id: "done" },
+];
+
+let modelConnectWizard = null;
+
+function ensureModelConnectWizard() {
+  if (modelConnectWizard) return modelConnectWizard;
+  const wizardEl = el.modelConnectionPanel?.querySelector('[data-wizard="model-connect"]');
+  if (!wizardEl) return null;
+  modelConnectWizard = makeWizard({
+    wizardEl,
+    steps: MODEL_CONNECT_STEPS,
+    refs: {
+      stepCount: el.modelConnectStepCount,
+      progressBar: el.modelConnectProgressBar,
+      back: el.modelConnectBack,
+      next: el.modelConnectNext,
+      finish: el.modelConnectFinish,
+    },
+    ready: () => true,
+    onEnter: (id) => {
+      const connection = modelDialogConnection();
+      if (!connection) return;
+      // Setup step shows action UI; Done step hides Next.
+      if (id === "done") {
+        el.modelConnectDoneSummary.textContent =
+          `${connection.label} is connected${connection.detail ? ` — ${connection.detail}` : ""}.`;
+      }
+    },
+    onFinish: () => closeModelModal(),
+  });
+  return modelConnectWizard;
+}
+
 function renderModelConnectionPanel({ captureScroll = true } = {}) {
   if (captureScroll) captureConnectionOutputScrolls();
-  el.modelConnectionPanel.innerHTML = "";
   const connection = modelDialogConnection();
   if (!connection) {
-    el.modelConnectionPanel.textContent = "Connection status unavailable.";
+    el.modelConnectIntroDetail.textContent = "Connection status unavailable.";
     return;
   }
-  el.modelConnectionPanel.appendChild(createConnectionItem(connection));
+
+  // Step 1 — intro
+  el.modelConnectIntroTitle.textContent = connection.label;
+  el.modelConnectIntroDetail.textContent = connection.detail || (connection.connected ? "Connected." : "Not connected yet.");
+  el.modelConnectIntroLinks.innerHTML = "";
+  if (connection.links?.length) {
+    el.modelConnectIntroLinks.append(...[...connection.links].map((item) => {
+      const a = document.createElement("a");
+      a.className = "secondary connection-open-link";
+      a.href = item.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = item.label || "Open link";
+      return a;
+    }));
+  }
+  el.modelConnectIntroStatus.textContent = connection.connected ? "Status: connected." : "Status: not connected.";
+  el.modelConnectDisconnect.disabled = !connection.connected;
+  el.modelConnectDisconnect.onclick = () => { void disconnectConnection(connection.id); };
+
+  // Step 2 — setup body, varies by action type.
+  el.modelConnectSetupTitle.textContent = connection.action === "api-key" ? "Paste your API key" : "Connect via CLI";
+  el.modelConnectSetupHint.textContent = connection.action === "api-key"
+    ? "Saved only on this server. Use any token with provider-side access."
+    : "We'll start the CLI's login flow. Follow the URL and prompts the CLI prints; paste any code it asks for.";
+  el.modelConnectSetupBody.innerHTML = "";
+  el.modelConnectSetupBody.appendChild(createConnectionActions(connection));
+
+  // Inline job output, when present, lives inside the setup step.
+  const job = state.connectionJobs[connection.id] || connection.job;
+  if (job) {
+    el.modelConnectJobOutput.hidden = false;
+    el.modelConnectJobOutput.innerHTML = "";
+    el.modelConnectJobOutput.appendChild(createConnectionJobPanel(job, connection.id));
+  } else {
+    el.modelConnectJobOutput.hidden = true;
+    el.modelConnectJobOutput.innerHTML = "";
+  }
+
+  // Step 3 — done summary.
+  el.modelConnectDoneSummary.textContent =
+    `${connection.label} is connected${connection.detail ? ` — ${connection.detail}` : ""}.`;
+
+  // Open wizard at the right step for the current state.
+  const wiz = ensureModelConnectWizard();
+  if (!wiz) return;
+  const wantId = connection.connected ? "done" : (job ? "setup" : (wiz.currentId || "intro"));
+  if (wiz.currentId !== wantId) wiz.setStep(wantId);
+  else wiz.setStep(wiz.currentId);
+  restoreFocusedConnectionInput();
 }
 
 function renderModelPromptPanel() {
