@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, formatResetCountdown, messageClassNames, messageStateLabel, nextUsageResetMs, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -802,6 +802,17 @@ function renderModelStatus(connections = state.connections) {
     dot.setAttribute("aria-hidden", "true");
 
     chip.append(createUsageRing(connection, usage), createUsagePopover(usage), dot);
+
+    // Show the soonest quota-reset countdown right under the chip so the user can plan around
+    // it without hovering for the tooltip.
+    const resetMs = nextUsageResetMs(usage);
+    if (resetMs) {
+      const reset = document.createElement("span");
+      reset.className = "model-chip-reset";
+      reset.textContent = formatResetCountdown(resetMs);
+      reset.title = `${connection.label} quota resets in ${formatResetCountdown(resetMs)}`;
+      chip.append(reset);
+    }
     chip.addEventListener("click", () => openModelModal(connection.id));
     el.status.appendChild(chip);
   }

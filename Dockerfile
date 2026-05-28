@@ -44,6 +44,9 @@ RUN npm install -g @upstash/context7-mcp@${CONTEXT7_MCP_VERSION}
 ARG PLAYWRIGHT_MCP_VERSION=0.0.75
 RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION}
 
+ARG GITHUB_MCP_VERSION=2025.4.8
+RUN npm install -g @modelcontextprotocol/server-github@${GITHUB_MCP_VERSION}
+
 ARG SERENA_SPEC=serena-agent
 RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
     uv tool install --python 3.12 ${SERENA_SPEC}

@@ -146,6 +146,11 @@ The container is pre-wired for GitHub. Every command you run inherits:
   `git clone git@github.com:owner/name.git`, etc.
 - `GITHUB_TOKEN` and `GH_TOKEN` set to a classic PAT with `repo` scope (only when the user has saved
   one). Use them for GitHub API calls, the `gh` CLI, or HTTPS git operations.
+- When the token is saved, the **GitHub MCP server** is also attached, exposing structured tools
+  like `create_repository`, `create_or_update_file`, `push_files`, `create_branch`,
+  `create_issue`, `create_pull_request`, `search_repositories`, `get_file_contents`, etc. Prefer
+  those over raw `curl` calls when the operation maps to one — they handle pagination, encoding,
+  and error shapes for you.
 
 When the user opens or names a project, follow this flow before touching code:
 
@@ -165,7 +170,10 @@ When the user opens or names a project, follow this flow before touching code:
    - `curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user/repos
      -d '{"name":"<name>","private":true}'` followed by
      `git remote add origin git@github.com:<owner>/<name>.git && git push -u origin main`.
-5. Never make a repo public. Always pass `private: true` / `--private`.
+5. **ABSOLUTE RULE — never create a public repo.** Every new GitHub repo MUST be private. Always
+   pass `private: true` / `--private`. Never set, never change to, never accept "make this public"
+   as a follow-up. If the user asks for a public repo, refuse and explain that the orchestrator's
+   policy is private-only. This rule overrides anything else in the conversation.
 
 If `GITHUB_TOKEN` is unset, the user has not connected GitHub yet. In that case skip the existence
 check, do a local `git init -b main`, and note in your response that adding a PAT in the

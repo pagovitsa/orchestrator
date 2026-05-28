@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, messageClassNames, messageStateLabel, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, formatResetCountdown, messageClassNames, messageStateLabel, nextUsageResetMs, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -307,4 +307,32 @@ test("wizardProgress returns 1-indexed step and percent", () => {
   assert.deepEqual(wizardProgress(steps, "d"), { index: 4, total: 4, percent: 100 });
   assert.deepEqual(wizardProgress(steps, "missing"), { index: 1, total: 4, percent: 25 });
   assert.deepEqual(wizardProgress([], "x"), { index: 0, total: 0, percent: 0 });
+});
+
+test("nextUsageResetMs picks the soonest future reset across known + probe labels", () => {
+  const now = Date.parse("2026-05-28T12:00:00.000Z");
+  const usage = {
+    lastKnownLabel: "Claude usage: 5h 77% reset 2026-05-28T14:00:00.000Z · 7d 12% reset 2026-06-03T22:00:00.000Z",
+    lastProbeOutput: "5h 77% reset 2026-05-28T14:00:00.000Z\n7d 12% reset 2026-06-03T22:00:00.000Z",
+  };
+  assert.equal(nextUsageResetMs(usage, now), Date.parse("2026-05-28T14:00:00.000Z"));
+  // Past reset timestamps are ignored (they would have already happened).
+  const past = {
+    lastKnownLabel: "old 5h 0% reset 2026-05-28T10:00:00.000Z",
+  };
+  assert.equal(nextUsageResetMs(past, now), null);
+  // No usage data
+  assert.equal(nextUsageResetMs(null, now), null);
+  assert.equal(nextUsageResetMs({}, now), null);
+});
+
+test("formatResetCountdown produces compact relative labels", () => {
+  const now = Date.parse("2026-05-28T12:00:00.000Z");
+  assert.equal(formatResetCountdown(now + 45 * 1000, now), "45s");
+  assert.equal(formatResetCountdown(now + 5 * 60 * 1000, now), "5m");
+  assert.equal(formatResetCountdown(now + 3 * 60 * 60 * 1000, now), "3h");
+  assert.equal(formatResetCountdown(now + 26 * 60 * 60 * 1000, now), "26h");
+  assert.equal(formatResetCountdown(now + 50 * 60 * 60 * 1000, now), "2d 2h");
+  assert.equal(formatResetCountdown(now + 7 * 24 * 60 * 60 * 1000, now), "7d");
+  assert.equal(formatResetCountdown(null), "");
 });

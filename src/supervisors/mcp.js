@@ -2,6 +2,7 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { disabledTools, paths, runtime, supervisorPeers, supervisors } from "../config/env.js";
 import { tomlArray, tomlString } from "../utils/format.js";
+import { githubSupervisorEnvSync } from "../domain/github.js";
 import { requireScopedCwd } from "../domain/workspace.js";
 
 const sharedToolCatalog = {
@@ -28,6 +29,12 @@ const sharedToolCatalog = {
     namespace: "browser",
     label: "Playwright browser",
     description: "Browser automation for UI verification.",
+  },
+  github: {
+    group: "github",
+    namespace: "github",
+    label: "GitHub MCP",
+    description: "Repos, issues, PRs, file ops, search — gated on a saved Personal Access Token.",
   },
 };
 
@@ -180,6 +187,19 @@ export function sharedToolServers(scopedCwd, supervisor) {
       env,
     },
   };
+  // The official GitHub MCP server (`@modelcontextprotocol/server-github`) reads its credential
+  // from `GITHUB_PERSONAL_ACCESS_TOKEN`. Map our stored token onto that env var and gate the
+  // whole server on token presence — without it the child crashes on startup which would
+  // surface as a noisy supervisor trace.
+  const githubEnv = githubSupervisorEnvSync();
+  if (githubEnv.GITHUB_TOKEN) {
+    available.github = {
+      command: "mcp-server-github",
+      args: [],
+      cwd: scopedCwd,
+      env: { ...env, GITHUB_PERSONAL_ACCESS_TOKEN: githubEnv.GITHUB_TOKEN },
+    };
+  }
   return Object.fromEntries(
     runtime.enabledTools.filter((tool) => available[tool]).map((tool) => [tool, available[tool]]),
   );

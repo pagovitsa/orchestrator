@@ -97,6 +97,24 @@ label,
   overflow: visible;
 }
 
+.model-chip-reset {
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+  line-height: 1.2;
+}
+
 .model-chip {
   position: relative;
   display: grid;
@@ -109,6 +127,7 @@ label,
   background: transparent;
   color: var(--muted);
   padding: 0;
+  margin-bottom: 12px;
   cursor: pointer;
   overflow: visible;
 }

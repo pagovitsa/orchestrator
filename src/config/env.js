@@ -94,7 +94,7 @@ export const runtime = {
   authPassword: process.env.ORCH_AUTH_PASSWORD || readAuthPasswordSecret(),
   bindHost: process.env.ORCH_BIND_HOST || "",
   allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
-  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory,playwright"),
+  enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory,playwright,github"),
   playwrightExecutablePath: process.env.ORCH_PLAYWRIGHT_EXECUTABLE_PATH || "",
   playwrightHeadless: envFlag("ORCH_PLAYWRIGHT_HEADLESS", false),
   playwrightNoSandbox: envFlag("ORCH_PLAYWRIGHT_NO_SANDBOX", false),

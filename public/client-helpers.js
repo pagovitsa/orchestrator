@@ -160,6 +160,37 @@ export function extractErrorReason(content, { error = true } = {}) {
   return compressReason(lines.slice(-ERROR_REASON_MAX_LINES).join("\n"));
 }
 
+// Pulls the soonest "reset YYYY-MM-DD..." timestamp out of a usage record's text fields and
+// formats it as a compact countdown ("3h", "2d 4h", "12m"). Returns "" when no reset is known.
+const RESET_TIMESTAMP_PATTERN = /reset\s+(\d{4}-\d{2}-\d{2}T[\d:.+-]+Z?)/gi;
+
+export function nextUsageResetMs(usage, nowMs = Date.now()) {
+  if (!usage) return null;
+  let soonest = null;
+  for (const field of ["lastKnownLabel", "lastProbeOutput"]) {
+    const text = String(usage[field] || "");
+    if (!text) continue;
+    for (const match of text.matchAll(RESET_TIMESTAMP_PATTERN)) {
+      const ms = Date.parse(match[1]);
+      if (!Number.isFinite(ms) || ms <= nowMs) continue;
+      if (soonest === null || ms < soonest) soonest = ms;
+    }
+  }
+  return soonest;
+}
+
+export function formatResetCountdown(targetMs, nowMs = Date.now()) {
+  if (!Number.isFinite(targetMs)) return "";
+  const seconds = Math.max(0, Math.round((targetMs - nowMs) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  const hours = Math.round(seconds / 3600);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.floor(seconds / 86400);
+  const remHours = Math.round((seconds - days * 86400) / 3600);
+  return remHours ? `${days}d ${remHours}h` : `${days}d`;
+}
+
 // Computes which steps in a wizard are blocked / next active. Steps are objects with at least
 // an `id`. `ready(id)` returns whether the step's prerequisite is met (e.g. a key has been
 // generated for the "add" step). Auto-advances past already-completed steps.

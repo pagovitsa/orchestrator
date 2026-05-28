@@ -292,6 +292,14 @@ export async function publishProjectToGithub(projectName, { repoName: requestedN
     }
     throw error;
   }
+  // Absolute private-only policy. If GitHub ever returns the repo flagged public (org default,
+  // API change, race), flip it back immediately. We never leave a published Orch project public.
+  if (repo.private !== true) {
+    const patched = await githubRequest(token, "PATCH", `/repos/${repo.full_name}`, { private: true })
+      .catch((error) => { throw Object.assign(new Error(`Repo created but could not be flipped to private: ${error.message}. Aborting publish.`), { status: 500 }); });
+    repo = patched;
+    steps.push("forced repo to private (orchestrator policy)");
+  }
 
   // 3. Wire the remote (overwrite any stale URL) and push using the SSH command we built.
   const sshRemoteUrl = `git@github.com:${repo.full_name}.git`;
