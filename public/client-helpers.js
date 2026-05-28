@@ -78,6 +78,10 @@ export function autopilotNeedsDecision(session) {
   if (!session?.autopilotEnabled || !Array.isArray(session.messages)) return false;
   const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
   if (!["created", "completed"].includes(workflowState)) return false;
+  const enabledAt = Date.parse(session.autopilotState?.updatedAt || "");
+  const enabledAfterHistoryReset = workflowState === "created"
+    && /autopilot enabled/i.test(String(session.autopilotState?.reason || ""))
+    && Number.isFinite(enabledAt);
   const lastMessage = session.messages.at(-1);
   if (lastMessage?.role !== "assistant" || lastMessage.streaming || lastMessage.error || lastMessage.stopped) return false;
   const lastAssistantAt = Date.parse(lastMessage.at || "");
@@ -87,9 +91,12 @@ export function autopilotNeedsDecision(session) {
     String(lastHistory?.action || "").toLowerCase() === "stop"
     && Number.isFinite(lastHistoryAt)
     && (!Number.isFinite(lastAssistantAt) || lastHistoryAt >= lastAssistantAt)
+    && (!enabledAfterHistoryReset || lastHistoryAt >= enabledAt)
   ) return false;
   const decisionTimes = Array.isArray(session.autopilotHistory)
-    ? session.autopilotHistory.map((entry) => Date.parse(entry?.at || "")).filter(Number.isFinite)
+    ? session.autopilotHistory
+      .map((entry) => Date.parse(entry?.at || ""))
+      .filter((time) => Number.isFinite(time) && (!enabledAfterHistoryReset || time >= enabledAt))
     : [];
   const lastDecisionAt = decisionTimes.length ? Math.max(...decisionTimes) : 0;
   return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;

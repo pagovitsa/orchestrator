@@ -1948,24 +1948,35 @@ function renderSessions() {
   for (const session of rows) {
     const running = projectIsRunning(session);
     const autopilotOn = projectAutopilotEnabled(session);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = [
+    const row = document.createElement("div");
+    row.className = [
       "session",
       isCurrentProject(session) ? "active" : "",
       running ? "running" : "",
       autopilotOn ? "autopilot-on" : "",
     ].filter(Boolean).join(" ");
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
 
-    if (autopilotOn) {
-      const autopilotIcon = document.createElement("span");
-      autopilotIcon.className = "session-autopilot-icon";
-      const label = state.autopilotPhases.get(session.id) || autopilotStateLabel(session.autopilotState, autopilotOn);
-      autopilotIcon.title = `Autopilot ${label}`;
-      autopilotIcon.setAttribute("aria-label", `Autopilot ${label}`);
-      autopilotIcon.innerHTML = iconSvg(icons.autopilot);
-      button.appendChild(autopilotIcon);
-    }
+    const autopilotIcon = document.createElement("button");
+    autopilotIcon.type = "button";
+    autopilotIcon.className = "session-autopilot-icon";
+    const label = state.autopilotPhases.get(session.id) || autopilotStateLabel(session.autopilotState, autopilotOn);
+    const displayLabel = autopilotOn ? label : "off";
+    autopilotIcon.dataset.state = displayLabel;
+    autopilotIcon.setAttribute("aria-pressed", String(autopilotOn));
+    autopilotIcon.title = session.id
+      ? `Autopilot ${displayLabel}. Click to turn ${autopilotOn ? "off" : "on"}.`
+      : "Open the project before enabling Autopilot.";
+    autopilotIcon.setAttribute("aria-label", session.id ? `Autopilot ${displayLabel}` : "Autopilot unavailable");
+    autopilotIcon.disabled = !session.id;
+    autopilotIcon.innerHTML = iconSvg(icons.autopilot);
+    autopilotIcon.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void setProjectAutopilot(session, !autopilotOn);
+    });
+    row.appendChild(autopilotIcon);
 
     const title = document.createElement("div");
     title.className = "session-title";
@@ -1982,7 +1993,7 @@ function renderSessions() {
     const autopilotLabel = autopilotOn ? ` - autopilot ${state.autopilotPhases.get(session.id) || autopilotStateLabel(session.autopilotState, autopilotOn)}` : "";
     meta.textContent = `${session.supervisor || "unknown"} - ${session.messageCount || 0} msgs${autopilotLabel}`;
 
-    button.append(title, meta);
+    row.append(title, meta);
     const feed = normalizeAutopilotFeed(session.autopilotFeed, { limit: configuredAutopilotFeedLimit() });
     if (feed.length) {
       const activity = document.createElement("div");
@@ -1991,13 +2002,19 @@ function renderSessions() {
       activity.title = feed
         .map((entry) => [autopilotFeedEntryLabel(entry), entry.reason].filter(Boolean).join(": "))
         .join("\n");
-      button.appendChild(activity);
+      row.appendChild(activity);
     }
-    button.addEventListener("click", () => openProjectSession(session));
-    button.addEventListener("contextmenu", (event) => openProjectContextMenu(event, session));
-    button.addEventListener("keydown", (event) => {
+    row.addEventListener("click", () => openProjectSession(session));
+    row.addEventListener("contextmenu", (event) => openProjectContextMenu(event, session));
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openProjectSession(session);
+        return;
+      }
       if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-      const rect = button.getBoundingClientRect();
+      const rect = row.getBoundingClientRect();
       openProjectContextMenu({
         preventDefault: () => event.preventDefault(),
         stopPropagation: () => event.stopPropagation(),
@@ -2006,7 +2023,7 @@ function renderSessions() {
       }, session);
     });
 
-    el.sessionList.appendChild(button);
+    el.sessionList.appendChild(row);
   }
 }
 
@@ -3412,11 +3429,12 @@ function finishLiveRun(event) {
 
 function handleLiveAutopilot(event) {
   const project = event.project || state.currentSession?.cwd || "project";
+  let liveSession = null;
   if (event.session) {
-    const session = cloneLiveSession(event.session);
-    upsertSessionSummary(session);
+    liveSession = cloneLiveSession(event.session);
+    upsertSessionSummary(liveSession);
     if (isViewing(event.sessionId)) {
-      state.currentSession = session;
+      state.currentSession = liveSession;
       renderMessages();
       syncComposerState();
     }
@@ -3455,6 +3473,7 @@ function handleLiveAutopilot(event) {
   if (event.phase === "state") {
     state.autopilotPhases.delete(event.sessionId);
     renderSessions();
+    if (liveSession) scheduleAutopilot(liveSession);
     return;
   }
   if (event.phase === "decision") {
