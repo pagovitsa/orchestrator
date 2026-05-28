@@ -141,6 +141,30 @@ async function lockIsStale(lockPath) {
   return true;
 }
 
+// Steal sequence (rm + recreate) must be serialised across processes — otherwise two stealers
+// can both observe a stale lock, A creates a fresh lock, B's delayed rm wipes A's lock, and
+// both think they own it. We gate the rm+recreate behind a separate `.steal` lock that itself
+// uses `wx` for atomicity, and re-verify staleness under that lock.
+async function takeoverStaleLock(lockPath) {
+  const stealPath = `${lockPath}.steal`;
+  let stealHandle;
+  try {
+    stealHandle = await open(stealPath, "wx");
+  } catch (error) {
+    if (error.code === "EEXIST") return false; // another stealer is mid-takeover; retry caller
+    throw error;
+  }
+  try {
+    if (await lockIsStale(lockPath)) {
+      await rm(lockPath, { force: true }).catch(() => {});
+    }
+  } finally {
+    await stealHandle.close().catch(() => {});
+    await rm(stealPath, { force: true }).catch(() => {});
+  }
+  return true;
+}
+
 async function acquireFileLock(lockPath) {
   const started = Date.now();
   for (;;) {
@@ -153,7 +177,7 @@ async function acquireFileLock(lockPath) {
       if (handle) await handle.close().catch(() => {});
       if (error.code !== "EEXIST") throw error;
       if (await lockIsStale(lockPath)) {
-        await rm(lockPath, { force: true }).catch(() => {});
+        await takeoverStaleLock(lockPath);
         continue;
       }
       if (Date.now() - started > 10_000) throw error;

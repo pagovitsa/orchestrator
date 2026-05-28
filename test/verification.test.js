@@ -7,6 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { checksFromEnv, runHttpSmokeChecks, writeSmokeReport } from "../src/scripts/smoke-report.js";
+import { readBody } from "../src/http/response.js";
+import { runtime } from "../src/config/env.js";
+import { request } from "node:http";
 
 const execFileAsync = promisify(execFile);
 
@@ -163,6 +166,49 @@ test("runHttpSmokeChecks redacts credential URLs and limits response bodies", as
     assert.equal(report.checks[0].bodyTruncated, true);
   } finally {
     await server.close();
+  }
+});
+
+test("readBody returns a 413-shaped error AND flushes a JSON response over keep-alive (no ECONNRESET)", async () => {
+  const originalMax = runtime.maxPayloadBytes;
+  runtime.maxPayloadBytes = 128;
+  const server = createServer(async (req, res) => {
+    try {
+      await readBody(req);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    } catch (error) {
+      const status = error?.status || 500;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: error.message || String(error) }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address();
+    const responseBody = await new Promise((resolve, reject) => {
+      const big = Buffer.alloc(2048, "x");
+      const req = request({
+        method: "POST",
+        host: "127.0.0.1",
+        port,
+        path: "/",
+        headers: { "content-type": "application/json", "content-length": big.length },
+      }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => { body += c; });
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+      });
+      req.on("error", reject);
+      req.write(big);
+      req.end();
+    });
+    assert.equal(responseBody.status, 413);
+    assert.match(responseBody.body, /exceeds/);
+  } finally {
+    runtime.maxPayloadBytes = originalMax;
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

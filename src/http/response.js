@@ -28,15 +28,15 @@ export function sendText(res, status, body) {
 export async function readBody(req) {
   const chunks = [];
   let total = 0;
+  // The default `for await (const chunk of req)` iterator destroys the readable on early exit
+  // (Node's async-iterator return-on-throw semantics). That destroy resets the underlying socket
+  // before our 413 JSON response can be flushed, so we opt out and rely on the caller's
+  // sendErrorJson path to finish the response cleanly.
+  const iter = req.iterator({ destroyOnReturn: false });
   try {
-    for await (const chunk of req) {
+    for await (const chunk of iter) {
       total += chunk.length;
       if (total > runtime.maxPayloadBytes) {
-        // Pause the stream (so we stop accepting more bytes) but do NOT destroy: that would
-        // reset the connection before the 413 JSON response is flushed, surfacing as an
-        // ECONNRESET to the client. The caller's catch sends the response and Node closes the
-        // socket after res.end.
-        req.pause();
         throw Object.assign(new Error(`Request body exceeds ${formatBytes(runtime.maxPayloadBytes)}`), { status: 413 });
       }
       chunks.push(chunk);

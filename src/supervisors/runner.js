@@ -354,18 +354,17 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
     const taskId = nextTimelineId("cmd");
     const commandText = formatCommand(command, args);
     const startedAt = Date.now();
-    emitTrace(traceOptions, `$ ${commandText}`);
-    emitTrace(traceOptions, `[cwd] ${cwd}`);
     // If the caller's signal is already aborted (e.g. the HTTP client disconnected during
     // session load), do not spawn at all — AbortSignal listeners added after the abort event
-    // never fire, so the child would otherwise run to completion unkillably.
+    // never fire, so the child would otherwise run to completion unkillably. Check before any
+    // running/trace emission so the cancellation is the only visible event.
     if (signal?.aborted) {
       emitTimeline(timelineOptions, {
         id: taskId,
         kind: "command",
         status: "cancelled",
         title: commandText,
-        detail: `[cwd] ${cwd}\n[cancelled] before spawn`,
+        detail: `[cancelled] before spawn`,
         endedAt: new Date().toISOString(),
         durationMs: 0,
         meta: { cwd, command },
@@ -373,6 +372,8 @@ function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, on
       resolve({ ok: false, stdout: "", stderr: "cancelled before spawn", code: -1, timedOut: false });
       return;
     }
+    emitTrace(traceOptions, `$ ${commandText}`);
+    emitTrace(traceOptions, `[cwd] ${cwd}`);
     emitTimeline(timelineOptions, {
       id: taskId,
       kind: "command",

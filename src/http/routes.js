@@ -524,6 +524,10 @@ async function handleStreamMessage(req, res, id) {
       onUsage: captureUsage(session.supervisor),
       signal: abortController.signal,
     });
+    // The supervisor process is done; from here on we are persisting/emitting. A late client
+    // disconnect during those awaits should not abort an in-flight child (there is none) nor
+    // get reclassified as `stopped`. Lock in the success status now.
+    completed = true;
     const finalAnswer = redactSensitiveText(answer || transcript.trim() || "(empty response)");
     session.messages.push({
       role: "assistant",
@@ -550,9 +554,8 @@ async function handleStreamMessage(req, res, id) {
       detail: `${answer?.length || transcript.length || 0} chars`,
     });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
-    completed = true;
   } catch (error) {
-    const stopped = abortController.signal.aborted;
+    const stopped = abortController.signal.aborted && !completed;
     const details = stopped ? runStopReason(abortController.signal) : errorDetail(error);
     session.messages.push({
       role: "assistant",
