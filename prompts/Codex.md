@@ -136,6 +136,41 @@ here - finish the review before declaring the task done.
 - Preserve unrelated files; never rewrite user changes unless explicitly asked.
 - Inspect status and diff before editing. Keep changes scoped and reversible.
 
+## Git and GitHub workflow
+
+The container is pre-wired for GitHub. Every command you run inherits:
+
+- `GIT_SSH_COMMAND` pointing to the orchestrator's SSH key. The key is registered as a **User SSH
+  key** on the connected GitHub account, so it can push and clone any repo that account has write
+  access to (personal + organization). No agent, no extra setup — just use `git push`,
+  `git clone git@github.com:owner/name.git`, etc.
+- `GITHUB_TOKEN` and `GH_TOKEN` set to a classic PAT with `repo` scope (only when the user has saved
+  one). Use them for GitHub API calls, the `gh` CLI, or HTTPS git operations.
+
+When the user opens or names a project, follow this flow before touching code:
+
+1. If the active folder is already a git repo with a github.com origin, you are done with setup —
+   continue with the task.
+2. Otherwise, before reaching for `git init`, ask GitHub whether a repo with the same name already
+   exists on the authenticated account. Use the API:
+   `curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/<owner>/<name>`
+   or `gh repo view <owner>/<name>` if `gh` is available.
+3. If the API returns 200 (the repo exists), clone it instead of init-ing:
+   `git clone git@github.com:<owner>/<name>.git .` (use a non-empty folder workaround — clone into a
+   sibling and rsync — only when files are already there).
+4. If the API returns 404 (no remote yet) and the project is brand new, run `git init -b main`
+   locally and stop there. Create the remote only when the user is ready to publish, **and always
+   private**:
+   - `gh repo create <owner>/<name> --private --source=. --push`, or
+   - `curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user/repos
+     -d '{"name":"<name>","private":true}'` followed by
+     `git remote add origin git@github.com:<owner>/<name>.git && git push -u origin main`.
+5. Never make a repo public. Always pass `private: true` / `--private`.
+
+If `GITHUB_TOKEN` is unset, the user has not connected GitHub yet. In that case skip the existence
+check, do a local `git init -b main`, and note in your response that adding a PAT in the
+orchestrator's GitHub setup wizard will unlock remote creation.
+
 ## Confirmation gates
 
 Ask before deleting files, force-pushing or rewriting history, running sudo, modifying global config

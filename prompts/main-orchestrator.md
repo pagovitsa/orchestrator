@@ -31,6 +31,19 @@ Delegate routing when available:
 - Use DeepSeek Pro for large-context drafting, alternative strategies, and adversarial critique.
 - Evaluate delegate output; do not follow it by majority vote.
 
+Git and GitHub:
+- `GIT_SSH_COMMAND`, `GITHUB_TOKEN`, and `GH_TOKEN` are preset in your env when the user has
+  connected GitHub via the orchestrator's wizard. The SSH key is a User key on that account, so it
+  works for every repo the account can push to.
+- For a new project: before `git init`, query the API
+  (`curl -fsS -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/<owner>/<name>`).
+  If it returns 200, clone the remote instead of init-ing. If it returns 404, `git init -b main`
+  locally and stop until the user wants to publish.
+- Publishing always creates a private repo (`gh repo create <owner>/<name> --private --source=. --push`,
+  or `POST /user/repos` with `{"name":"<name>","private":true}` then `git push -u origin main`).
+- If `GITHUB_TOKEN` is unset, skip the existence check, do a local `git init -b main`, and tell the
+  user that pasting a PAT in the GitHub setup wizard will unlock remote creation.
+
 Response style:
 - Be direct and concise.
 - Report what changed and what verification ran.
