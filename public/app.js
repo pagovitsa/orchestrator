@@ -102,6 +102,7 @@ document.addEventListener("visibilitychange", () => {
 const el = {
   sidebar: document.querySelector(".sidebar"),
   sidebarToggle: document.getElementById("sidebarToggle"),
+  sidebarBackdrop: document.getElementById("sidebarBackdrop"),
   connectDialog: document.getElementById("connectDialog"),
   githubDialog: document.getElementById("githubDialog"),
   closeGithubDialog: document.getElementById("closeGithubDialog"),
@@ -509,6 +510,9 @@ function toggleAttachmentMenu() {
 function setSidebarExpanded(expanded) {
   el.sidebar.classList.toggle("is-expanded", expanded);
   el.sidebarToggle.setAttribute("aria-expanded", String(expanded));
+  // Backdrop visibility mirrors the drawer. CSS only paints/clicks it in mobile; the class is
+  // harmless on desktop because the backdrop has display:none outside the media query.
+  el.sidebarBackdrop?.classList.toggle("is-visible", expanded);
 }
 
 function toggleSidebar() {
@@ -3550,6 +3554,8 @@ el.signOutAllFromSettings?.addEventListener("click", () => {
   void withButtonBusy(el.signOutAllFromSettings, null, handleSignOutAll);
 });
 el.sidebarToggle.addEventListener("click", toggleSidebar);
+// Tapping anywhere outside the drawer (on the backdrop scrim) closes it on mobile.
+el.sidebarBackdrop?.addEventListener("click", () => setSidebarExpanded(false));
 el.soundToggle.addEventListener("click", toggleSoundMute);
 el.speechToggle.addEventListener("click", toggleSpeechMute);
 el.attachmentMenuButton.addEventListener("click", (event) => {

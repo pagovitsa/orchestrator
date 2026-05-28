@@ -1756,63 +1756,90 @@ textarea:disabled {
   opacity: 0.58;
 }
 
+/* On desktop the sidebar is always visible and we don't need a drawer scrim. Hiding the backdrop
+   here also keeps it from becoming a body-grid item that would steal <main>'s column and push the
+   chat list to a new row. The mobile media query below re-enables it with full styling. */
+.sidebar-backdrop {
+  display: none;
+}
+
 @media (max-width: 760px) {
   body {
-    /* Sidebar is a vertical strip on the LEFT in mobile, not a banner on top. The strip is wide
-       enough to hold the icon buttons; it widens when expanded to reveal sessions. */
-    grid-template-columns: 64px minmax(0, 1fr);
+    /* No reserved column for the sidebar — it becomes a slide-in drawer. Main takes the full
+       viewport width; only the floating menu icon sits at the top-left when the drawer is closed. */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: 1fr;
   }
 
   .sidebar {
-    position: sticky;
+    /* Fixed-position drawer. We animate `left` rather than `transform` so the toggle inside it
+       (position:fixed) escapes the parent's containing block — `transform` on the sidebar would
+       trap it. The drawer is offscreen by default and slides in when .is-expanded. */
+    position: fixed;
     top: 0;
-    left: 0;
-    z-index: 30;
-    gap: 10px;
-    width: 64px;
-    max-width: 64px;
+    left: calc(-1 * min(86vw, 320px));
+    width: min(86vw, 320px);
+    max-width: min(86vw, 320px);
     min-width: 0;
     height: 100vh;
     height: 100dvh;
     min-height: 0;
-    overflow: hidden;
-    padding: 12px 8px;
+    z-index: 50;
+    overflow: auto;
+    padding: 14px;
+    padding-top: 60px; /* leave room for the floating toggle button at the top-left */
     border-right: 1px solid var(--line);
     border-bottom: 0;
-    transition: width 180ms ease, max-width 180ms ease;
+    transition: left 200ms ease;
   }
+  .sidebar.is-expanded { left: 0; }
 
-  .sidebar.is-expanded {
-    width: min(80vw, 280px);
-    max-width: min(80vw, 280px);
-    overflow: auto;
-  }
-
-  /* The icon buttons stack vertically; the toggle stays at the top of the column so the user can
-     always find it on the left edge of the screen. */
-  .brand {
-    width: 100%;
-  }
-  .brand-actions {
-    flex-direction: column;
-    width: 100%;
-    align-items: center;
-    gap: 6px;
-  }
-
+  /* The menu icon is the only thing visible when the drawer is closed. It floats fixed at the
+     top-left of the viewport and stays clickable in both states (z-index above the sidebar so it
+     overlays the drawer's own header area when open). The other brand-actions icons (new chat,
+     settings, sound, speech) live inside the drawer and only appear when it's open. */
   .sidebar-toggle {
     display: grid;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 60;
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   }
 
-  .sidebar:not(.is-expanded) .sessions,
-  .sidebar:not(.is-expanded) .sidebar-status {
-    display: none;
+  .brand { width: 100%; }
+  .brand-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    width: 100%;
   }
 
-  .sessions {
-    max-height: none;
+  /* Backdrop: full-viewport scrim behind the drawer. Visible only when the drawer is open. */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 40;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease;
   }
+  .sidebar-backdrop.is-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .sessions { max-height: none; }
 
   .sidebar-status {
     margin-top: auto;

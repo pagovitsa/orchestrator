@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { paths } from "../config/env.js";
@@ -162,11 +162,28 @@ async function gitInProject(projectPath, args, env = {}) {
   });
 }
 
+// True only when `projectPath` is the toplevel of its own git repo. `git rev-parse
+// --is-inside-work-tree` would return true for any subdirectory of an enclosing repo, so
+// using it here meant a project sitting inside a parent repo (e.g. `/workspace` itself was
+// a checkout, or someone cloned into the project folder) would be treated as already-initialized.
+// publishProjectToGithub would then skip `git init`, set `origin`, and push the PARENT repo
+// instead of the project. We compare canonicalized toplevel vs projectPath so symlinks/trailing
+// slashes can't lie about equality. If projectPath sits inside a parent repo, this returns false
+// and the caller's `git init` will create a nested .git/ scoped to the project — subsequent
+// `git -C projectPath …` calls then find the nested repo, never the parent.
 async function isRepo(projectPath) {
   try {
-    await execFileAsync("git", ["-C", projectPath, "rev-parse", "--is-inside-work-tree"]);
-    return true;
-  } catch { return false; }
+    const { stdout } = await execFileAsync("git", ["-C", projectPath, "rev-parse", "--show-toplevel"]);
+    const top = stdout.trim();
+    if (!top) return false;
+    const [topReal, projectReal] = await Promise.all([
+      realpath(top).catch(() => top),
+      realpath(projectPath).catch(() => projectPath),
+    ]);
+    return topReal === projectReal;
+  } catch {
+    return false;
+  }
 }
 
 async function gitRemoteUrl(projectPath, remote = "origin") {
