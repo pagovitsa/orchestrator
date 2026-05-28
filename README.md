@@ -86,62 +86,68 @@ The app root is this repository. Runtime state is deliberately outside git:
 
 ## Security Model
 
-The default configuration is local-first and conservative:
+The Orchestrator does **not** ship with HTTP Basic auth. By design, the only supported way to expose
+it beyond loopback is to put it on a Tailscale tailnet (or behind another network-layer ACL). The
+tailnet is the authentication boundary — every device on your tailnet is authenticated by Tailscale,
+so wrapping the UI in a second username/password adds friction without buying real security.
 
-- The UI binds to loopback with `ORCH_BIND_HOST=127.0.0.1`.
-- If you bind beyond loopback or use host network mode, `ORCH_AUTH_PASSWORD` is required or the server refuses to start.
-- Preview ports are not auth-protected. Keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` unless those ports are meant to be reachable.
+What we still enforce:
+
+- The UI binds to loopback by default (`ORCH_BIND_HOST=127.0.0.1`). Cross-origin browser writes are
+  rejected via Origin/Host alignment.
+- Preview ports are unauthenticated. Keep `ORCH_PREVIEW_BIND_HOST=127.0.0.1` unless those ports are
+  meant to be reachable over the tailnet.
 - `.env` and `.env.*` are ignored by git. Commit `.env.example`, never real credentials.
-- The app refuses or redacts obvious credential-shaped text before saving memory, sessions, uploads, timeline metadata, and smoke reports.
-- Public tunnels such as ngrok, localtunnel, cloudflared, serveo, bore, and `ssh -R` are not part of the normal workflow. Use Docker port binding, LAN/firewall checks, or the Tailscale sidecar.
+- The app refuses or redacts obvious credential-shaped text before saving memory, sessions,
+  uploads, timeline metadata, and smoke reports.
+- Public tunnels (ngrok, localtunnel, cloudflared, serveo, bore, `ssh -R`) are not part of the
+  workflow. Use Docker port binding, LAN/firewall rules, or the Tailscale sidecar.
 
-For LAN access without Tailscale:
+If you want LAN-only access without Tailscale, set `ORCH_BIND_HOST=0.0.0.0` and constrain access at
+the firewall / your router. Do not put the unauthenticated UI on the open internet.
 
-```env
-ORCH_AUTH_PASSWORD=choose-a-real-password
-ORCH_BIND_HOST=0.0.0.0
-```
-
-Then recreate the container:
-
-```bash
-docker compose up -d --build
-```
+The settings menu (gear icon in the sidebar) carries a **Sign out everything** action that revokes
+every CLI auth volume (Claude / Codex / Gemini), deletes the DeepSeek API key, the GitHub keypair +
+token, and the saved Tailscale setup — useful when handing the device off or for routine cleanup.
 
 ## Tailscale HTTPS
 
-The compose stack includes a separate `tailscale/tailscale` sidecar. It does not use the host machine's Tailscale login or state.
+The compose stack includes a separate `tailscale/tailscale` sidecar. It does not use the host
+machine's Tailscale login or state. Configure it from the UI (settings gear -> Tailscale).
 
-You can configure it from the UI with the Tailscale button in the sidebar, or preseed `.env`:
+The wizard asks for **one field** — a Tailscale key. The hostname is always `orch-ui`, and the
+HTTPS host (`orch-ui.<tailnet>.ts.net`) is auto-detected after the sidecar registers.
 
-```env
-ORCH_TAILSCALE_AUTHKEY=tskey-auth-...
-ORCH_TAILSCALE_HOSTNAME=orch-ui
-ORCH_TAILSCALE_HTTPS_HOST=https://orch-ui.your-tailnet.ts.net
-ORCH_TAILSCALE_SERVE=1
-ORCH_TAILSCALE_SERVE_RESET=1
-ORCH_TAILSCALE_UI_HTTPS_PORT=443
-```
+You can paste either of:
+
+- **API access token** (`tskey-api-...`) — **recommended**. Generate at
+  [login.tailscale.com/admin/settings/keys](https://login.tailscale.com/admin/settings/keys)
+  -> "Generate access token". On save, the orchestrator deletes any stale `orch-ui*` devices on
+  your tailnet via the Tailscale API and mints a fresh reusable auth key for the sidecar. You'll
+  never get bumped to `orch-ui-2` again.
+- **Auth key** (`tskey-auth-...`) — works for registration only. No API access, so if a stale
+  `orch-ui` device is still on the tailnet you'll need to delete it once at
+  [login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines) before the new
+  container can claim the name. A reusable + ephemeral key keeps things clean afterwards.
 
 Your tailnet must have MagicDNS and HTTPS certificates enabled for Tailscale Serve HTTPS.
 
-Use the HTTPS host without the raw UI port:
+After the sidecar registers, use the HTTPS host without the raw UI port:
 
 ```text
-https://orch-ui.your-tailnet.ts.net/
+https://orch-ui.<your-tailnet>.ts.net/
 ```
 
 Preview HTTPS URLs include the preview port:
 
 ```text
-https://orch-ui.your-tailnet.ts.net:5173/
+https://orch-ui.<your-tailnet>.ts.net:5173/
 ```
 
-If you change `.env`, recreate the stack:
-
-```bash
-docker compose up -d --build
-```
+The sidecar watches `/data/tailscale/setup.env`: when you save a new key in the UI it
+restarts `containerboot` in place, so you do **not** need to `docker compose restart` after
+changing the key. The status file at `/data/tailscale/status.json` carries the live FQDN that
+the UI reads back.
 
 ## Project Web Previews
 
@@ -214,7 +220,7 @@ ORCH_PLAYWRIGHT_HEADLESS=1
 ORCH_PLAYWRIGHT_NO_SANDBOX=1
 ```
 
-Because browser automation can reach network URLs, keep the UI behind loopback, Tailscale, or Basic auth.
+Because browser automation can reach network URLs, keep the UI behind loopback or Tailscale.
 
 ## Credentials
 
@@ -260,7 +266,6 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 | Variable | Purpose |
 | --- | --- |
 | `ORCH_HOST_PROJECTS` | Host folder mounted to `/workspace`. |
-| `ORCH_AUTH_USER`, `ORCH_AUTH_PASSWORD` | HTTP Basic auth for the UI. |
 | `ORCH_BIND_HOST`, `ORCH_BIND_HOST_IPV6` | Host interfaces for the published UI port. |
 | `ORCH_PREVIEW_BIND_HOST` | Host interface for unauthenticated preview ports. |
 | `ORCH_UI_PORT` | Host UI port, default `8787`. |
@@ -307,7 +312,7 @@ On Linux you can run the UI in host network mode:
 docker compose -f docker-compose.yml -f docker-compose.host.yml up -d --build
 ```
 
-This removes Docker port publishing and binds directly on the host network. It is convenient for LAN previews, but less isolated and more likely to conflict with host services. Keep `ORCH_AUTH_PASSWORD` set when using it.
+This removes Docker port publishing and binds directly on the host network. It is convenient for LAN previews, but less isolated and more likely to conflict with host services. Constrain access at the firewall or join the tailnet — there is no HTTP basic auth fallback.
 
 ## File Attachments
 
@@ -333,14 +338,6 @@ Run a smoke check against a running UI:
 
 ```bash
 ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ npm run smoke
-```
-
-For an authenticated UI:
-
-```bash
-ORCH_SMOKE_BASE_URL=http://127.0.0.1:8787/ \
-ORCH_SMOKE_AUTH=orchestrator:<password> \
-npm run smoke
 ```
 
 Smoke reports are written under ignored `verification/` and redact credentials.

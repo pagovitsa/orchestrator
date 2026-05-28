@@ -43,6 +43,13 @@
                 <span>GitHub</span>
                 <strong id="settingsGithubStatus" class="settings-menu-status"></strong>
               </button>
+              <button id="signOutAllFromSettings" type="button" role="menuitem" class="settings-menu-danger">
+                <span class="settings-menu-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M16 17l5-5-5-5"></path><path d="M21 12H9"></path><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path></svg>
+                </span>
+                <span>Sign out everything</span>
+                <strong id="signOutAllStatus" class="settings-menu-status"></strong>
+              </button>
             </div>
           </div>
           <button id="soundToggle" class="icon-button sidebar-action preference-toggle" type="button" title="Sounds on" aria-label="Mute sounds" aria-pressed="false">
@@ -135,126 +142,63 @@
     </dialog>
 
     <dialog id="tailscaleDialog" class="modal tailscale-modal">
-      <form id="tailscaleForm" class="modal-panel wizard tailscale-panel" data-wizard="tailscale">
+      <form id="tailscaleForm" class="modal-panel tailscale-panel">
         <div class="modal-head">
-          <div class="wizard-head">
-            <h2>Tailscale setup</h2>
-            <span class="wizard-step-count" id="tailscaleStepCount">Step 1 of 4</span>
-          </div>
+          <h2>Tailscale setup</h2>
           <button id="closeTailscale" class="icon-button" type="button" aria-label="Close">x</button>
         </div>
 
-        <div class="wizard-progress"><div class="wizard-progress-bar" id="tailscaleProgressBar"></div></div>
+        <div class="tailscale-state">
+          <span class="tailscale-state-dot" id="tailscaleStateDot"></span>
+          <span id="tailscaleStateText">Not configured</span>
+        </div>
 
-        <section class="wizard-step" data-step="status">
-          <h3>Where are we?</h3>
-          <p class="modal-hint">We'll wire the sidecar so the UI is reachable on your tailnet at <code>https://&lt;hostname&gt;.&lt;tailnet&gt;.ts.net/</code>.</p>
-          <div class="tailscale-state">
-            <span id="tailscaleStateDot" class="tailscale-state-dot"></span>
-            <span id="tailscaleStateText">Not configured</span>
-          </div>
-        </section>
-
-        <section class="wizard-step" data-step="authkey" hidden>
-          <h3>Tailscale auth key</h3>
-          <p class="modal-hint">Generate one at <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">login.tailscale.com/admin/settings/keys</a>. Reusable + ephemeral both work. Stored only on this server.</p>
-          <div class="modal-field">
-            <label for="tailscaleAuthKey">Auth key</label>
-            <input id="tailscaleAuthKey" type="password" autocomplete="off" placeholder="tskey-auth-...">
-          </div>
-        </section>
-
-        <section class="wizard-step" data-step="identity" hidden>
-          <h3>Device + HTTPS host</h3>
-          <p class="modal-hint">Pick a short device name. The HTTPS host is what the browser uses — usually <code>https://&lt;device&gt;.&lt;your-tailnet&gt;.ts.net</code>.</p>
-          <div class="modal-field">
-            <label for="tailscaleHostname">Device name</label>
-            <input id="tailscaleHostname" autocomplete="off" maxlength="63" placeholder="orch-ui">
-          </div>
-          <div class="modal-field">
-            <label for="tailscaleHttpsHost">HTTPS host</label>
-            <input id="tailscaleHttpsHost" autocomplete="off" placeholder="https://orch-ui.example.ts.net">
-          </div>
-        </section>
-
-        <section class="wizard-step" data-step="done" hidden>
-          <h3>All set</h3>
-          <p class="modal-hint">Tailscale is configured. The sidecar will keep the connection warm.</p>
-          <div class="tailscale-state">
-            <span class="tailscale-state-dot configured"></span>
-            <span id="tailscaleDoneSummary">Ready</span>
-          </div>
-        </section>
+        <p class="modal-hint" id="tailscaleSetupHint">
+          The sidecar starts Tailscale and opens a browser tab where you can authorize this device on
+          your tailnet. The hostname is always <code>orch-ui</code>.
+        </p>
 
         <div id="tailscaleStatus" class="modal-error" role="alert"></div>
 
-        <div class="modal-actions wizard-actions">
-          <button id="tailscaleBack" class="secondary" type="button" data-wizard-back>Back</button>
-          <span class="modal-spacer"></span>
+        <div class="modal-actions">
           <button id="skipTailscale" class="secondary" type="button">Skip</button>
-          <button id="tailscaleNext" class="primary" type="button" data-wizard-next>Next</button>
-          <button id="saveTailscale" class="primary" type="submit" hidden>Save</button>
-          <button id="tailscaleFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
+          <span class="modal-spacer"></span>
+          <button id="saveTailscale" class="primary" type="submit">Start setup</button>
         </div>
       </form>
     </dialog>
 
     <dialog id="githubDialog" class="modal github-modal">
-      <div class="modal-panel wizard" data-wizard="github">
+      <div class="modal-panel github-panel">
         <div class="modal-head">
-          <div class="wizard-head">
-            <h2>GitHub setup</h2>
-            <span class="wizard-step-count" id="githubStepCount">Step 1 of 4</span>
-          </div>
+          <h2>GitHub setup</h2>
           <button id="closeGithubDialog" class="icon-button" type="button" aria-label="Close">x</button>
         </div>
 
-        <div class="wizard-progress"><div class="wizard-progress-bar" id="githubProgressBar"></div></div>
-
-        <section class="wizard-step" data-step="key">
-          <h3>1. Generate the orchestrator SSH key</h3>
-          <p class="modal-hint">An ed25519 keypair lives only on this server (under <code>/data/secrets/github/</code>). The supervisors use it for every <code>git push</code> and <code>git clone</code>.</p>
-          <button id="generateGithubKeyButton" class="primary" type="button">Generate / load key</button>
-        </section>
-
-        <section class="wizard-step" data-step="add" hidden>
-          <h3>2. Add the public key to your GitHub account</h3>
-          <p class="modal-hint">Open <a href="https://github.com/settings/ssh/new" target="_blank" rel="noopener">github.com/settings/ssh/new</a>, paste the key below, save with any title (e.g. "Orch UI").</p>
-          <textarea id="githubPublicKey" class="github-key" readonly rows="3"></textarea>
+        <div class="github-field">
+          <label for="githubPublicKey">SSH public key</label>
+          <textarea id="githubPublicKey" class="github-key" readonly rows="3" placeholder="Click 'Generate key' to create one."></textarea>
           <div class="github-row">
-            <button id="copyGithubKeyButton" class="secondary" type="button">Copy key</button>
+            <button id="generateGithubKeyButton" class="secondary" type="button">Generate key</button>
+            <button id="copyGithubKeyButton" class="secondary" type="button" disabled>Copy key</button>
+            <button id="testGithubSshButton" class="secondary" type="button">Test SSH</button>
           </div>
-        </section>
-
-        <section class="wizard-step" data-step="test" hidden>
-          <h3>3. Verify SSH access</h3>
-          <p class="modal-hint">We'll run <code>ssh -T git@github.com</code> with the key — GitHub answers with <code>Hi &lt;login&gt;!</code> on success.</p>
-          <button id="testGithubSshButton" class="primary" type="button">Run SSH test</button>
           <div id="githubSshResult" class="github-status" aria-live="polite"></div>
-        </section>
+        </div>
 
-        <section class="wizard-step" data-step="token" hidden>
-          <h3>4. Paste a Personal Access Token</h3>
-          <p class="modal-hint">Needed for <strong>creating new repos</strong> via the API (push works with SSH alone). Create one at <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=Orch%20UI" target="_blank" rel="noopener">github.com/settings/tokens</a> with <code>repo</code> scope. Stored only here.</p>
+        <div class="github-field">
+          <label for="githubTokenInput">Personal Access Token</label>
           <input id="githubTokenInput" type="password" placeholder="ghp_..." autocomplete="off">
           <div class="github-row">
-            <button id="saveGithubTokenButton" class="primary" type="button">Save token</button>
+            <button id="saveGithubTokenButton" class="secondary" type="button">Save token</button>
           </div>
-        </section>
-
-        <section class="wizard-step" data-step="done" hidden>
-          <h3>All set</h3>
-          <p class="modal-hint" id="githubDoneSummary">Supervisors now have <code>GIT_SSH_COMMAND</code>, <code>GITHUB_TOKEN</code>, and <code>GH_TOKEN</code> in their environment.</p>
-        </section>
+        </div>
 
         <div id="githubStatus" class="github-status" aria-live="polite"></div>
 
-        <div class="modal-actions wizard-actions">
-          <button id="disconnectGithubButton" class="secondary danger" type="button">Disconnect</button>
-          <button id="githubBack" class="secondary" type="button" data-wizard-back>Back</button>
+        <div class="modal-actions">
           <span class="modal-spacer"></span>
-          <button id="githubNext" class="primary" type="button" data-wizard-next>Next</button>
-          <button id="githubFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
+          <button id="githubFinish" class="primary" type="button">Done</button>
         </div>
       </div>
     </dialog>
@@ -303,33 +247,16 @@
 
         <div id="modelDialogTabs" class="prompt-tabs" role="tablist" aria-label="Model detail tabs"></div>
         <div id="modelConnectionPanel" class="model-tab-panel">
-          <div class="wizard" data-wizard="model-connect">
-            <div class="wizard-head">
-              <span class="wizard-step-count" id="modelConnectStepCount">Step 1 of 3</span>
+          <div class="model-connect-panel">
+            <div class="model-connect-head">
+              <span id="modelConnectStatusDot" class="model-connect-dot"></span>
+              <span id="modelConnectIntroDetail" class="model-connect-detail"></span>
             </div>
-            <div class="wizard-progress"><div class="wizard-progress-bar" id="modelConnectProgressBar"></div></div>
-            <section class="wizard-step" data-step="intro">
-              <h3 id="modelConnectIntroTitle">About</h3>
-              <p class="modal-hint" id="modelConnectIntroDetail"></p>
-              <div id="modelConnectIntroLinks" class="connection-link-row"></div>
-              <div id="modelConnectIntroStatus" class="modal-hint" aria-live="polite"></div>
-            </section>
-            <section class="wizard-step" data-step="setup" hidden>
-              <h3 id="modelConnectSetupTitle">Set up</h3>
-              <p class="modal-hint" id="modelConnectSetupHint"></p>
-              <div id="modelConnectSetupBody"></div>
-              <div id="modelConnectJobOutput" class="connection-job-wrap" hidden></div>
-            </section>
-            <section class="wizard-step" data-step="done" hidden>
-              <h3>Connected</h3>
-              <p class="modal-hint" id="modelConnectDoneSummary"></p>
-            </section>
-            <div class="modal-actions wizard-actions">
-              <button id="modelConnectDisconnect" class="secondary danger" type="button">Disconnect</button>
-              <button id="modelConnectBack" class="secondary" type="button" data-wizard-back>Back</button>
+            <div id="modelConnectSetupBody" class="model-connect-body"></div>
+            <div id="modelConnectJobOutput" class="connection-job-wrap" hidden></div>
+            <div class="modal-actions">
               <span class="modal-spacer"></span>
-              <button id="modelConnectNext" class="primary" type="button" data-wizard-next>Next</button>
-              <button id="modelConnectFinish" class="primary" type="button" data-wizard-finish hidden>Done</button>
+              <button id="modelConnectFinish" class="primary" type="button">Done</button>
             </div>
           </div>
         </div>

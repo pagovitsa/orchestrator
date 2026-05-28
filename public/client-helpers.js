@@ -160,19 +160,52 @@ export function extractErrorReason(content, { error = true } = {}) {
   return compressReason(lines.slice(-ERROR_REASON_MAX_LINES).join("\n"));
 }
 
-// Pulls the soonest "reset YYYY-MM-DD..." timestamp out of a usage record's text fields and
-// formats it as a compact countdown ("3h", "2d 4h", "12m"). Returns "" when no reset is known.
+// Returns the reset timestamp (ms) for the usage window the UI is *displaying*. The model status
+// chip shows whichever of {currentPercent, weeklyPercent, sonnetWeeklyPercent} is highest — the
+// countdown next to the chip must point at that same window, not the soonest reset overall.
+// Falls back to scanning lastKnownLabel/lastProbeOutput when structured fields aren't populated
+// (older usage stores, modes without explicit windows).
 const RESET_TIMESTAMP_PATTERN = /reset\s+(\d{4}-\d{2}-\d{2}T[\d:.+-]+Z?)/gi;
+
+function parseResetMs(value, nowMs) {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || ms <= nowMs) return null;
+  return ms;
+}
 
 export function nextUsageResetMs(usage, nowMs = Date.now()) {
   if (!usage) return null;
+
+  // Pick the window that actually drives the displayed percent. We compare numerically so an
+  // explicit 0 still wins over null. Highest non-null percent wins; ties prefer the longer window.
+  const windows = [
+    { key: "currentPercent", reset: "currentResetAt" },
+    { key: "weeklyPercent", reset: "weeklyResetAt" },
+    { key: "sonnetWeeklyPercent", reset: "sonnetWeeklyResetAt" },
+  ];
+  let winner = null;
+  for (const w of windows) {
+    const percent = usage[w.key];
+    if (typeof percent !== "number" || !Number.isFinite(percent)) continue;
+    if (!winner || percent > winner.percent) winner = { ...w, percent };
+  }
+  if (winner) {
+    const ms = parseResetMs(usage[winner.reset], nowMs);
+    if (ms !== null) return ms;
+    // No reset stamp on the picked window: don't fall back to a soonest-other-window because that
+    // would mislead the user — return null so the UI hides the countdown.
+    return null;
+  }
+
+  // Legacy fallback: scrape labels/probe output for "reset <iso>" timestamps.
   let soonest = null;
   for (const field of ["lastKnownLabel", "lastProbeOutput"]) {
     const text = String(usage[field] || "");
     if (!text) continue;
     for (const match of text.matchAll(RESET_TIMESTAMP_PATTERN)) {
-      const ms = Date.parse(match[1]);
-      if (!Number.isFinite(ms) || ms <= nowMs) continue;
+      const ms = parseResetMs(match[1], nowMs);
+      if (ms === null) continue;
       if (soonest === null || ms < soonest) soonest = ms;
     }
   }

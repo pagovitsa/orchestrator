@@ -49,23 +49,8 @@ function readSecret(name) {
     return readFileSync(path.join(paths.secretsDir, name), "utf8").trim();
   } catch (error) {
     if (error.code === "ENOENT") return "";
-    throw error; // fail closed: an unreadable secret must not silently disable auth
+    throw error; // fail closed: an unreadable secret must not silently disable behavior that depends on it
   }
-}
-
-// Like readSecret but fails closed when the file exists yet is empty (a misconfigured password must
-// not silently disable auth).
-function readAuthPasswordSecret() {
-  let raw;
-  try {
-    raw = readFileSync(path.join(paths.secretsDir, "auth-password"), "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  }
-  const value = raw.trim();
-  if (!value) throw new Error("auth-password secret file exists but is empty");
-  return value;
 }
 
 export const runtime = {
@@ -90,8 +75,6 @@ export const runtime = {
   previewPorts: process.env.ORCH_PREVIEW_PORTS || "3000-3020,5173-5190,8000-8020,8080-8090",
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || readSecret("deepseek-api-key"),
   pathEnv: process.env.PATH || "/home/node/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
-  authUser: process.env.ORCH_AUTH_USER || "orchestrator",
-  authPassword: process.env.ORCH_AUTH_PASSWORD || readAuthPasswordSecret(),
   bindHost: process.env.ORCH_BIND_HOST || "",
   allowedHosts: envList("ORCH_ALLOWED_HOSTS"),
   enabledTools: envList("ORCH_ENABLED_TOOLS", "serena,context7,memory,playwright,github"),

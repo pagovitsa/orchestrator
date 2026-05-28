@@ -55,6 +55,9 @@ function defaultModelUsage(id) {
     currentPercent: null,
     weeklyPercent: null,
     sonnetWeeklyPercent: null,
+    currentResetAt: "",
+    weeklyResetAt: "",
+    sonnetWeeklyResetAt: "",
     lastTokens: null,
     lastCostUsd: null,
     lastProbeAt: "",
@@ -317,6 +320,9 @@ export function parseClaudeUsagePayload(payload = {}) {
   const currentPercent = clampPercent(payload.five_hour?.utilization);
   const weeklyPercent = clampPercent(payload.seven_day?.utilization);
   const sonnetWeeklyPercent = clampPercent(payload.seven_day_sonnet?.utilization);
+  const currentResetAt = isoResetLabel(payload.five_hour?.resets_at);
+  const weeklyResetAt = isoResetLabel(payload.seven_day?.resets_at);
+  const sonnetWeeklyResetAt = isoResetLabel(payload.seven_day_sonnet?.resets_at);
   const percent = maxPercent(currentPercent, weeklyPercent, sonnetWeeklyPercent);
   const parts = [
     claudeUsageWindowLabel("5h", payload.five_hour),
@@ -341,6 +347,9 @@ export function parseClaudeUsagePayload(payload = {}) {
     currentPercent,
     weeklyPercent,
     sonnetWeeklyPercent,
+    currentResetAt,
+    weeklyResetAt,
+    sonnetWeeklyResetAt,
     label: parts.length ? `Claude usage: ${parts.join(" · ")}` : "Claude usage unavailable",
   };
 }
@@ -367,6 +376,8 @@ function codexSnapshotSignal(snapshot = {}) {
   const weeklyPercent = clampPercent(snapshot.secondary?.usedPercent);
   const percent = maxPercent(currentPercent, weeklyPercent);
   if (percent === null) return null;
+  const currentResetAt = unixResetLabel(snapshot.primary?.resetsAt);
+  const weeklyResetAt = unixResetLabel(snapshot.secondary?.resetsAt);
   const labelParts = [
     snapshot.limitName || snapshot.limitId || "codex",
     snapshot.planType ? `plan ${snapshot.planType}` : "",
@@ -377,6 +388,8 @@ function codexSnapshotSignal(snapshot = {}) {
     percent,
     currentPercent,
     weeklyPercent,
+    currentResetAt,
+    weeklyResetAt,
     label: `Codex rate limits: ${labelParts.join(" · ")}`,
     output: labelParts.join("\n"),
   };
@@ -391,6 +404,8 @@ export function parseCodexRateLimitPayload(payload = {}) {
       percent: null,
       currentPercent: null,
       weeklyPercent: null,
+      currentResetAt: "",
+      weeklyResetAt: "",
       label: "Codex rate limits unavailable",
       output: "Codex app-server returned no rate limit buckets",
     };
@@ -804,7 +819,7 @@ export async function recordRunStart(supervisor) {
 
 export async function recordRunEnd(supervisor, { error = "", stopped = false } = {}) {
   if (!supervisors[supervisor]) return;
-  return withUsageLock(async () => {
+  await withUsageLock(async () => {
     const store = await readStore();
     const model = store.models[supervisor];
     model.active = false;
@@ -814,6 +829,16 @@ export async function recordRunEnd(supervisor, { error = "", stopped = false } =
     model.lastError = stopped ? "Stopped" : String(error || "");
     await writeStore(store);
   });
+  // A run just finished -> the provider's reported usage will have moved. Kick a probe so the
+  // chip in the UI reflects the new state without waiting for the 5-minute background poll.
+  // Short delay lets any provider-side bookkeeping settle first; unref so we never hold the
+  // process open.
+  const timer = setTimeout(() => {
+    refreshUsageSnapshot(supervisor, { force: true }).catch((err) => {
+      console.error(`[usage] post-run probe for ${supervisor} failed:`, err.message || err);
+    });
+  }, 1500);
+  timer.unref();
 }
 
 export async function clearStaleActiveRuns(reason = "Cleared after server restart") {
@@ -855,6 +880,9 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     if (currentPercent !== null) model.currentPercent = currentPercent;
     if (weeklyPercent !== null) model.weeklyPercent = weeklyPercent;
     if (sonnetWeeklyPercent !== null) model.sonnetWeeklyPercent = sonnetWeeklyPercent;
+    if (typeof signal.currentResetAt === "string") model.currentResetAt = signal.currentResetAt;
+    if (typeof signal.weeklyResetAt === "string") model.weeklyResetAt = signal.weeklyResetAt;
+    if (typeof signal.sonnetWeeklyResetAt === "string") model.sonnetWeeklyResetAt = signal.sonnetWeeklyResetAt;
     addUsageDeltas(model, { tokens, costUsd });
     await writeStore(store);
   });
@@ -885,6 +913,9 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.currentPercent = currentPercent;
       model.weeklyPercent = weeklyPercent;
       model.sonnetWeeklyPercent = sonnetWeeklyPercent;
+      model.currentResetAt = typeof signal.currentResetAt === "string" ? signal.currentResetAt : "";
+      model.weeklyResetAt = typeof signal.weeklyResetAt === "string" ? signal.weeklyResetAt : "";
+      model.sonnetWeeklyResetAt = typeof signal.sonnetWeeklyResetAt === "string" ? signal.sonnetWeeklyResetAt : "";
     } else if (!signal.error || signal.clearKnown) {
       model.lastKnownPercent = null;
       model.lastKnownLabel = "";
@@ -892,6 +923,9 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.currentPercent = null;
       model.weeklyPercent = null;
       model.sonnetWeeklyPercent = null;
+      model.currentResetAt = "";
+      model.weeklyResetAt = "";
+      model.sonnetWeeklyResetAt = "";
     }
     if (tokens !== null) model.lastTokens = Math.max(0, Math.round(tokens));
 
@@ -1079,6 +1113,9 @@ export async function listUsage() {
       currentPercent: Number.isFinite(model.currentPercent) ? model.currentPercent : null,
       weeklyPercent: Number.isFinite(model.weeklyPercent) ? model.weeklyPercent : null,
       sonnetWeeklyPercent: Number.isFinite(model.sonnetWeeklyPercent) ? model.sonnetWeeklyPercent : null,
+      currentResetAt: model.currentResetAt || "",
+      weeklyResetAt: model.weeklyResetAt || "",
+      sonnetWeeklyResetAt: model.sonnetWeeklyResetAt || "",
       lastTokens: Number.isFinite(model.lastTokens) && model.lastTokens > 0 ? model.lastTokens : null,
       lastCostUsd: Number.isFinite(model.lastCostUsd) ? model.lastCostUsd : null,
       lastProbeAt: model.lastProbeAt || "",

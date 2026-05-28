@@ -33,7 +33,7 @@ jobs:
         env:
           ORCH_WORKSPACE_ROOT: ${{ runner.temp }}/orch-workspace
         run: |
-          mkdir -p "$ORCH_WORKSPACE_ROOT/οrchestrator"
+          mkdir -p "$ORCH_WORKSPACE_ROOT/orchestrator"
           npm test
 
       - name: Smoke
@@ -42,9 +42,6 @@ jobs:
           ORCH_UI_PORT: "8787"
           ORCH_LISTEN_HOST: "127.0.0.1"
           ORCH_BIND_HOST: "127.0.0.1"
-          # CI-only loopback auth for smoke checks; do not reuse for deployed environments.
-          ORCH_AUTH_PASSWORD: "ci-smoke-password"
-          ORCH_SMOKE_AUTH: "orchestrator:ci-smoke-password"
           ORCH_DATA_DIR: ${{ runner.temp }}/orch-data
           ORCH_MCP_CONFIG_DIR: ${{ runner.temp }}/orch-data/orch-mcp
           ORCH_WORKSPACE_ROOT: ${{ runner.temp }}/orch-workspace
@@ -59,7 +56,7 @@ jobs:
 
           ready=0
           for _ in {1..30}; do
-            if curl -fsS -u "$ORCH_SMOKE_AUTH" "$ORCH_SMOKE_BASE_URL" >/dev/null; then
+            if curl -fsS "$ORCH_SMOKE_BASE_URL" >/dev/null; then
               ready=1
               break
             fi

@@ -18,13 +18,14 @@ import { emitHookEvent, listHookEvents } from "../domain/hooks.js";
 import { extractUserMemoriesFromText, readMemory, rememberMemory } from "../domain/memory.js";
 import { mergeTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
-import { saveTailscaleSetup, tailscaleStatus } from "../domain/tailscale.js";
-import { recordRunEnd, recordRunStart, recordUsageSignal, usageSnapshot } from "../domain/usage.js";
+import { clearTailscaleSetup, saveTailscaleSetup, tailscaleStatus } from "../domain/tailscale.js";
+import { recordRunEnd, recordRunStart, recordUsageSignal, refreshUsageSnapshot, refreshUsageSnapshots, usageSnapshot } from "../domain/usage.js";
 import { appendAutopilotHistory, autopilotMemoryArgs, clearAutopilotHistory, decideAutopilotNextWithRetry } from "../domain/autopilot.js";
 import { transitionWorkflowStatus, workflowCanRun } from "../domain/workflow-state.js";
 import { idleTimeoutDecision, normalizeIdleTimeoutConfig } from "../domain/idle-timeout.js";
 import {
   connectionStatus,
+  disconnectAllConnections,
   disconnectConnection,
   getConnectionJob,
   requireConnectedSupervisor,
@@ -748,14 +749,49 @@ export async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/connections") {
     return sendJson(res, 200, { connections: await connectionStatus() });
   }
+  if (req.method === "POST" && url.pathname === "/api/connections/sign-out-all") {
+    await disconnectAllConnections();
+    await clearGithubConnection();
+    await clearTailscaleSetup();
+    return sendJson(res, 200, {
+      connections: await connectionStatus(),
+      github: await githubConnectionStatus(),
+      tailscale: await tailscaleStatus(),
+    });
+  }
   if (req.method === "GET" && url.pathname === "/api/usage") {
     return sendJson(res, 200, await usageSnapshot());
+  }
+  if (req.method === "POST" && url.pathname === "/api/usage/refresh") {
+    // Trigger fresh provider probes. With ?supervisor=<id> refreshes one model, otherwise all.
+    // Returns the snapshot immediately; the probes finish in the background and the next GET
+    // /api/usage (a few seconds later) reflects the new values.
+    const target = url.searchParams.get("supervisor");
+    if (target && supervisors[target]) {
+      refreshUsageSnapshot(target, { force: true }).catch((error) => {
+        console.error(`[usage] manual probe ${target} failed:`, error.message || error);
+      });
+    } else {
+      refreshUsageSnapshots().catch((error) => {
+        console.error("[usage] manual refresh failed:", error.message || error);
+      });
+    }
+    return sendJson(res, 202, { ...(await usageSnapshot()), refreshing: true });
   }
   if (req.method === "GET" && url.pathname === "/api/tailscale") {
     return sendJson(res, 200, { tailscale: await tailscaleStatus() });
   }
   if (req.method === "POST" && url.pathname === "/api/tailscale") {
-    return sendJson(res, 200, { tailscale: await saveTailscaleSetup(await readBody(req)) });
+    console.error("[route] POST /api/tailscale received");
+    try {
+      const body = await readBody(req);
+      const result = await saveTailscaleSetup(body);
+      console.error("[route] POST /api/tailscale OK");
+      return sendJson(res, 200, { tailscale: result });
+    } catch (error) {
+      console.error(`[route] POST /api/tailscale FAILED: ${error.message} (status=${error.status || 500})`);
+      throw error;
+    }
   }
   const connectionStartMatch = url.pathname.match(/^\/api\/connections\/([a-z0-9-]+)\/start$/);
   if (connectionStartMatch && req.method === "POST") {
@@ -852,6 +888,22 @@ export async function handleApi(req, res, url) {
       at: new Date().toISOString(),
     });
     return sendJson(res, 200, { session });
+  }
+  const sessionSupervisorMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/supervisor$/);
+  if (sessionSupervisorMatch && req.method === "POST") {
+    if (activeRuns.has(sessionSupervisorMatch[1])) {
+      throw Object.assign(new Error("Stop the running model before switching supervisor"), { status: 409 });
+    }
+    const body = await readBody(req);
+    const next = String(body?.supervisor || "").trim();
+    if (!supervisors[next]) throw Object.assign(new Error(`Unknown supervisor: ${next}`), { status: 400 });
+    await requireConnectedSupervisor(next);
+    const existing = await loadSession(sessionSupervisorMatch[1]);
+    if (existing.supervisor !== next) {
+      existing.supervisor = next;
+      await saveSession(existing);
+    }
+    return sendJson(res, 200, { session: existing });
   }
   const autopilotHistoryMatch = url.pathname.match(/^\/api\/sessions\/([a-f0-9-]{36})\/autopilot-history$/);
   if (autopilotHistoryMatch && req.method === "DELETE") {

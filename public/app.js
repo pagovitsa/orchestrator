@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, formatResetCountdown, messageClassNames, messageStateLabel, nextUsageResetMs, nextWizardStep, normalizeAutopilotFeed, prevWizardStep, readAttachments, shouldCollapseTerminalContent, streamApi, wizardProgress } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotCanResumeFromSummary, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, extractErrorReason, formatResetCountdown, messageClassNames, messageStateLabel, nextUsageResetMs, normalizeAutopilotFeed, readAttachments, shouldCollapseTerminalContent, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -13,6 +13,8 @@ const state = {
   connectionInputs: {},
   connectionOutputScroll: {},
   focusedConnectionInput: null,
+  // <jobId>:<url> we've already auto-opened, so polling re-renders don't keep popping new tabs.
+  openedJobSignInUrls: new Set(),
   usage: [],
   usageBudget: null,
   tailscale: null,
@@ -109,7 +111,6 @@ const el = {
   githubTokenInput: document.getElementById("githubTokenInput"),
   saveGithubTokenButton: document.getElementById("saveGithubTokenButton"),
   testGithubSshButton: document.getElementById("testGithubSshButton"),
-  disconnectGithubButton: document.getElementById("disconnectGithubButton"),
   githubStatus: document.getElementById("githubStatus"),
   closeConnect: document.getElementById("closeConnect"),
   refreshConnections: document.getElementById("refreshConnections"),
@@ -143,46 +144,25 @@ const el = {
   settingsMenu: document.getElementById("settingsMenu"),
   openTailscaleFromSettings: document.getElementById("openTailscaleFromSettings"),
   openGithubFromSettings: document.getElementById("openGithubFromSettings"),
+  signOutAllFromSettings: document.getElementById("signOutAllFromSettings"),
+  signOutAllStatus: document.getElementById("signOutAllStatus"),
   settingsTailscaleStatus: document.getElementById("settingsTailscaleStatus"),
   settingsGithubStatus: document.getElementById("settingsGithubStatus"),
-  tailscaleStepCount: document.getElementById("tailscaleStepCount"),
-  tailscaleProgressBar: document.getElementById("tailscaleProgressBar"),
-  tailscaleBack: document.getElementById("tailscaleBack"),
-  tailscaleNext: document.getElementById("tailscaleNext"),
-  tailscaleFinish: document.getElementById("tailscaleFinish"),
-  tailscaleDoneSummary: document.getElementById("tailscaleDoneSummary"),
-  githubStepCount: document.getElementById("githubStepCount"),
-  githubProgressBar: document.getElementById("githubProgressBar"),
-  githubBack: document.getElementById("githubBack"),
-  githubNext: document.getElementById("githubNext"),
   githubFinish: document.getElementById("githubFinish"),
-  githubDoneSummary: document.getElementById("githubDoneSummary"),
   githubSshResult: document.getElementById("githubSshResult"),
-  modelConnectStepCount: document.getElementById("modelConnectStepCount"),
-  modelConnectProgressBar: document.getElementById("modelConnectProgressBar"),
-  modelConnectIntroTitle: document.getElementById("modelConnectIntroTitle"),
+  modelConnectStatusDot: document.getElementById("modelConnectStatusDot"),
   modelConnectIntroDetail: document.getElementById("modelConnectIntroDetail"),
-  modelConnectIntroLinks: document.getElementById("modelConnectIntroLinks"),
-  modelConnectIntroStatus: document.getElementById("modelConnectIntroStatus"),
-  modelConnectSetupTitle: document.getElementById("modelConnectSetupTitle"),
-  modelConnectSetupHint: document.getElementById("modelConnectSetupHint"),
   modelConnectSetupBody: document.getElementById("modelConnectSetupBody"),
   modelConnectJobOutput: document.getElementById("modelConnectJobOutput"),
-  modelConnectDoneSummary: document.getElementById("modelConnectDoneSummary"),
-  modelConnectBack: document.getElementById("modelConnectBack"),
-  modelConnectNext: document.getElementById("modelConnectNext"),
   modelConnectFinish: document.getElementById("modelConnectFinish"),
-  modelConnectDisconnect: document.getElementById("modelConnectDisconnect"),
   tailscaleDialog: document.getElementById("tailscaleDialog"),
   tailscaleForm: document.getElementById("tailscaleForm"),
   closeTailscale: document.getElementById("closeTailscale"),
   skipTailscale: document.getElementById("skipTailscale"),
   saveTailscale: document.getElementById("saveTailscale"),
-  tailscaleAuthKey: document.getElementById("tailscaleAuthKey"),
-  tailscaleHostname: document.getElementById("tailscaleHostname"),
-  tailscaleHttpsHost: document.getElementById("tailscaleHttpsHost"),
   tailscaleStateDot: document.getElementById("tailscaleStateDot"),
   tailscaleStateText: document.getElementById("tailscaleStateText"),
+  tailscaleSetupHint: document.getElementById("tailscaleSetupHint"),
   tailscaleStatus: document.getElementById("tailscaleStatus"),
   soundToggle: document.getElementById("soundToggle"),
   speechToggle: document.getElementById("speechToggle"),
@@ -237,6 +217,26 @@ function formatDate(value) {
   if (!value) return "";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : dateTimeFormatter.format(date);
+}
+
+// Disables `button` and swaps its label while `action()` runs. Guards against double-clicks
+// on every wizard primary that triggers a background HTTP call (GitHub key gen / token save /
+// SSH test, model Connect, Tailscale Save+test, etc). The button's previous text and disabled
+// state are restored even on error; if the panel re-renders mid-action (e.g. a connect kicks
+// a fresh job poll), the original button node is no longer in the DOM and the reset is a no-op.
+async function withButtonBusy(button, busyLabel, action) {
+  if (!button) return action();
+  if (button.disabled) return undefined;
+  const prevText = button.textContent;
+  const prevDisabled = button.disabled;
+  button.disabled = true;
+  if (busyLabel) button.textContent = busyLabel;
+  try {
+    return await action();
+  } finally {
+    button.disabled = prevDisabled;
+    if (busyLabel) button.textContent = prevText;
+  }
 }
 
 function formatBytes(bytes) {
@@ -1007,65 +1007,13 @@ function renderGithubModalState(status) {
     el.githubPublicKey.value = "";
     el.copyGithubKeyButton.disabled = true;
   }
-  el.disconnectGithubButton.disabled = !(status?.hasKeypair || status?.hasToken);
   el.githubTokenInput.placeholder = status?.hasToken ? "Token already saved (paste to replace)" : "ghp_...";
-}
-
-const GITHUB_STEPS = [
-  { id: "key" },
-  { id: "add" },
-  { id: "test" },
-  { id: "token" },
-  { id: "done" },
-];
-
-let githubWizard = null;
-
-function ensureGithubWizard() {
-  if (githubWizard) return githubWizard;
-  if (!el.githubDialog) return null;
-  githubWizard = makeWizard({
-    wizardEl: el.githubDialog.querySelector('[data-wizard="github"]'),
-    steps: GITHUB_STEPS,
-    refs: {
-      stepCount: el.githubStepCount,
-      progressBar: el.githubProgressBar,
-      back: el.githubBack,
-      next: el.githubNext,
-      finish: el.githubFinish,
-    },
-    ready: (id) => {
-      const status = state.githubStatus || {};
-      if (id === "key") return true;
-      if (id === "add") return status.hasKeypair === true;
-      if (id === "test") return status.hasKeypair === true;
-      if (id === "token") return status.hasKeypair === true;
-      if (id === "done") return true;
-      return true;
-    },
-    onEnter: (id) => {
-      // Per-step focus so keyboard users can flow through.
-      if (id === "add") el.githubPublicKey?.select?.();
-      if (id === "test") {
-        if (el.githubSshResult) el.githubSshResult.textContent = "";
-      }
-      if (id === "token") el.githubTokenInput?.focus();
-      if (id === "done") {
-        const status = state.githubStatus || {};
-        const parts = [];
-        parts.push(`SSH key ${status.hasKeypair ? "ready" : "missing"}`);
-        parts.push(`Token ${status.hasToken ? "saved" : "not saved"}`);
-        el.githubDoneSummary.textContent = `Supervisors now run with: ${parts.join(", ")}.`;
-      }
-    },
-    onFinish: () => closeGithubModal(),
-  });
-  return githubWizard;
 }
 
 async function openGithubModal() {
   if (!el.githubDialog) return;
   setGithubStatus("");
+  if (el.githubSshResult) el.githubSshResult.textContent = "";
   el.githubDialog.showModal();
   try {
     const body = await api("/api/connections/github");
@@ -1075,14 +1023,6 @@ async function openGithubModal() {
     state.githubStatus = {};
     setGithubStatus(`Status error: ${error.message}`, "error");
   }
-  const wiz = ensureGithubWizard();
-  const status = state.githubStatus || {};
-  // Resume the wizard at the first incomplete step so a returning user lands on the actionable
-  // next thing instead of always step 1.
-  let resumeAt = "key";
-  if (status.hasKeypair && status.hasToken) resumeAt = "done";
-  else if (status.hasKeypair) resumeAt = "test";
-  wiz?.open(resumeAt);
 }
 
 function closeGithubModal() {
@@ -1095,8 +1035,8 @@ async function handleGenerateGithubKey() {
     const body = await api("/api/connections/github/keypair", { method: "POST" });
     state.githubStatus = body.github;
     renderGithubModalState(body.github);
-    setGithubStatus(body.github.created ? "Keypair generated." : "Existing keypair loaded.", "ok");
-    githubWizard?.setStep("add");
+    setGithubStatus(body.github.created ? "Keypair generated. Paste the key into GitHub, then run Test SSH." : "Existing keypair loaded.", "ok");
+    void refreshGithubConnectionStatus();
   } catch (error) {
     setGithubStatus(`Generate error: ${error.message}`, "error");
   }
@@ -1106,10 +1046,10 @@ async function handleCopyGithubKey() {
   if (!el.githubPublicKey?.value) return;
   try {
     await navigator.clipboard.writeText(el.githubPublicKey.value);
-    setGithubStatus("Public key copied. Add it at github.com/settings/ssh/new", "ok");
+    setGithubStatus("Public key copied.", "ok");
   } catch {
     el.githubPublicKey.select();
-    setGithubStatus("Copy failed — selected the key for manual copy", "info");
+    setGithubStatus("Copy failed - selected the key for manual copy", "info");
   }
 }
 
@@ -1126,7 +1066,6 @@ async function handleSaveGithubToken() {
     renderGithubModalState(body.github);
     el.githubTokenInput.value = "";
     setGithubStatus(`Token verified for ${body.github.viewer?.login || "GitHub user"}.`, "ok");
-    githubWizard?.setStep("done");
     void refreshGithubConnectionStatus();
   } catch (error) {
     setGithubStatus(`Token error: ${error.message}`, "error");
@@ -1154,28 +1093,41 @@ async function handleTestGithubSsh() {
   }
 }
 
-async function handleDisconnectGithub() {
-  if (!window.confirm("Remove the stored GitHub token and SSH key from this server?")) return;
-  setGithubStatus("Disconnecting...");
-  try {
-    const body = await api("/api/connections/github", { method: "DELETE" });
-    renderGithubModalState(body.github);
-    setGithubStatus("Disconnected. Generate a new key to reconnect.", "info");
-  } catch (error) {
-    setGithubStatus(`Disconnect error: ${error.message}`, "error");
-  }
-}
-
 function closeConnectModal() {
   el.connectDialog.close();
 }
 
+async function handleSignOutAll() {
+  if (!window.confirm("Sign out and revoke every model, GitHub, and Tailscale auth on this server?")) return;
+  if (el.signOutAllStatus) {
+    el.signOutAllStatus.textContent = "Signing out...";
+    el.signOutAllStatus.dataset.state = "warn";
+  }
+  try {
+    await api("/api/connections/sign-out-all", { method: "POST" });
+    setStatus("Signed out everywhere");
+    await Promise.allSettled([
+      refreshModelStatus(),
+      refreshGithubConnectionStatus(),
+      refreshTailscaleStatus(),
+    ]);
+    if (el.signOutAllStatus) {
+      el.signOutAllStatus.textContent = "";
+      el.signOutAllStatus.dataset.state = "";
+    }
+  } catch (error) {
+    setStatus(`Sign-out error: ${error.message}`);
+    if (el.signOutAllStatus) {
+      el.signOutAllStatus.textContent = "Error";
+      el.signOutAllStatus.dataset.state = "warn";
+    }
+  }
+}
+
 async function refreshConnections() {
   el.connectionList.textContent = "Checking...";
-  // The modelConnectionPanel now hosts the wizard chrome — don't clobber it with a text
-  // placeholder. The intro step's status line carries the same "checking" hint.
-  if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroStatus) {
-    el.modelConnectIntroStatus.textContent = "Checking connection status...";
+  if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroDetail) {
+    el.modelConnectIntroDetail.textContent = "Checking connection status...";
   }
   try {
     const body = await api("/api/connections");
@@ -1191,8 +1143,8 @@ async function refreshConnections() {
     updateModalState();
   } catch (error) {
     el.connectionList.textContent = `Error: ${error.message}`;
-    if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroStatus) {
-      el.modelConnectIntroStatus.textContent = `Error: ${error.message}`;
+    if (el.modelDialog.open && state.activeModelTab === "connection" && el.modelConnectIntroDetail) {
+      el.modelConnectIntroDetail.textContent = `Error: ${error.message}`;
     }
   }
 }
@@ -1234,6 +1186,19 @@ function scheduleUsageRefreshBurst() {
   }
 }
 
+// Tells the server to kick a fresh provider probe (or per-supervisor probe) right now, then
+// polls our cached snapshot a few times so the chip catches up as the probe writes back. Used on
+// first page load and when a model run completes.
+function triggerUsageProbe(supervisor = "") {
+  const url = supervisor
+    ? `/api/usage/refresh?supervisor=${encodeURIComponent(supervisor)}`
+    : "/api/usage/refresh";
+  // Fire-and-forget; the probe runs in the background server-side, the burst polls bring fresh
+  // numbers to the UI as they land.
+  api(url, { method: "POST" }).catch(() => { /* silent: chip stays on cached data */ });
+  scheduleUsageRefreshBurst();
+}
+
 function renderConnections({ captureScroll = true } = {}) {
   if (captureScroll) captureConnectionOutputScrolls();
   const activeInput = document.activeElement?.dataset?.connectionInput;
@@ -1271,7 +1236,6 @@ function createConnectionItem(connection) {
 
   head.append(name, badge);
   item.append(head, detail);
-  if (connection.links?.length) item.append(createConnectionLinkRow(connection.links));
   item.append(createConnectionActions(connection));
 
   const job = state.connectionJobs[connection.id] || connection.job;
@@ -1301,11 +1265,6 @@ function createConnectionActions(connection) {
   actions.className = "connection-actions";
 
   if (connection.action === "api-key") {
-    actions.addEventListener("submit", (event) => {
-      event.preventDefault();
-      startConnection(connection.id);
-    });
-
     const input = document.createElement("input");
     input.type = "password";
     input.autocomplete = "off";
@@ -1318,8 +1277,11 @@ function createConnectionActions(connection) {
     button.className = "primary";
     button.textContent = connection.connected ? "Update key" : "Save key";
 
-    const disconnect = createDisconnectButton(connection);
-    actions.append(input, button, disconnect);
+    actions.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void withButtonBusy(button, "Saving...", () => startConnection(connection.id));
+    });
+    actions.append(input, button);
     return actions;
   }
 
@@ -1330,33 +1292,11 @@ function createConnectionActions(connection) {
   button.className = "primary";
   button.disabled = running;
   button.textContent = running ? "Connecting..." : (connection.connected ? "Reconnect" : "Connect");
-  button.addEventListener("click", () => startConnection(connection.id));
-  actions.append(button, createDisconnectButton(connection));
+  button.addEventListener("click", () => {
+    void withButtonBusy(button, "Connecting...", () => startConnection(connection.id));
+  });
+  actions.append(button);
   return actions;
-}
-
-function createDisconnectButton(connection) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary";
-  button.textContent = "Disconnect";
-  button.addEventListener("click", () => disconnectConnection(connection.id));
-  return button;
-}
-
-function createConnectionLinkRow(links) {
-  const row = document.createElement("div");
-  row.className = "connection-link-row";
-  for (const item of links) {
-    const link = document.createElement("a");
-    link.className = "secondary connection-open-link";
-    link.href = item.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = item.label || "Open link";
-    row.appendChild(link);
-  }
-  return row;
 }
 
 function modelDialogConnection() {
@@ -1387,43 +1327,6 @@ function renderModelDialogTabs() {
   }
 }
 
-const MODEL_CONNECT_STEPS = [
-  { id: "intro" },
-  { id: "setup" },
-  { id: "done" },
-];
-
-let modelConnectWizard = null;
-
-function ensureModelConnectWizard() {
-  if (modelConnectWizard) return modelConnectWizard;
-  const wizardEl = el.modelConnectionPanel?.querySelector('[data-wizard="model-connect"]');
-  if (!wizardEl) return null;
-  modelConnectWizard = makeWizard({
-    wizardEl,
-    steps: MODEL_CONNECT_STEPS,
-    refs: {
-      stepCount: el.modelConnectStepCount,
-      progressBar: el.modelConnectProgressBar,
-      back: el.modelConnectBack,
-      next: el.modelConnectNext,
-      finish: el.modelConnectFinish,
-    },
-    ready: () => true,
-    onEnter: (id) => {
-      const connection = modelDialogConnection();
-      if (!connection) return;
-      // Setup step shows action UI; Done step hides Next.
-      if (id === "done") {
-        el.modelConnectDoneSummary.textContent =
-          `${connection.label} is connected${connection.detail ? ` — ${connection.detail}` : ""}.`;
-      }
-    },
-    onFinish: () => closeModelModal(),
-  });
-  return modelConnectWizard;
-}
-
 function renderModelConnectionPanel({ captureScroll = true } = {}) {
   if (captureScroll) captureConnectionOutputScrolls();
   const connection = modelDialogConnection();
@@ -1432,35 +1335,22 @@ function renderModelConnectionPanel({ captureScroll = true } = {}) {
     return;
   }
 
-  // Step 1 — intro
-  el.modelConnectIntroTitle.textContent = connection.label;
-  el.modelConnectIntroDetail.textContent = connection.detail || (connection.connected ? "Connected." : "Not connected yet.");
-  el.modelConnectIntroLinks.innerHTML = "";
-  if (connection.links?.length) {
-    el.modelConnectIntroLinks.append(...[...connection.links].map((item) => {
-      const a = document.createElement("a");
-      a.className = "secondary connection-open-link";
-      a.href = item.url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.textContent = item.label || "Open link";
-      return a;
-    }));
-  }
-  el.modelConnectIntroStatus.textContent = connection.connected ? "Status: connected." : "Status: not connected.";
-  el.modelConnectDisconnect.disabled = !connection.connected;
-  el.modelConnectDisconnect.onclick = () => { void disconnectConnection(connection.id); };
+  const job = state.connectionJobs[connection.id] || connection.job;
+  const running = job?.status === "running";
 
-  // Step 2 — setup body, varies by action type.
-  el.modelConnectSetupTitle.textContent = connection.action === "api-key" ? "Paste your API key" : "Connect via CLI";
-  el.modelConnectSetupHint.textContent = connection.action === "api-key"
-    ? "Saved only on this server. Use any token with provider-side access."
-    : "We'll start the CLI's login flow. Follow the URL and prompts the CLI prints; paste any code it asks for.";
+  if (el.modelConnectStatusDot) {
+    el.modelConnectStatusDot.dataset.state = connection.connected ? "ok" : (running ? "pending" : "off");
+  }
+
+  let detailText;
+  if (connection.connected) detailText = `Connected${connection.detail ? ` - ${connection.detail}` : ""}.`;
+  else if (running) detailText = "Waiting for login...";
+  else detailText = connection.detail || "Not connected yet.";
+  el.modelConnectIntroDetail.textContent = detailText;
+
   el.modelConnectSetupBody.innerHTML = "";
   el.modelConnectSetupBody.appendChild(createConnectionActions(connection));
 
-  // Inline job output, when present, lives inside the setup step.
-  const job = state.connectionJobs[connection.id] || connection.job;
   if (job) {
     el.modelConnectJobOutput.hidden = false;
     el.modelConnectJobOutput.innerHTML = "";
@@ -1470,16 +1360,6 @@ function renderModelConnectionPanel({ captureScroll = true } = {}) {
     el.modelConnectJobOutput.innerHTML = "";
   }
 
-  // Step 3 — done summary.
-  el.modelConnectDoneSummary.textContent =
-    `${connection.label} is connected${connection.detail ? ` — ${connection.detail}` : ""}.`;
-
-  // Open wizard at the right step for the current state.
-  const wiz = ensureModelConnectWizard();
-  if (!wiz) return;
-  const wantId = connection.connected ? "done" : (job ? "setup" : (wiz.currentId || "intro"));
-  if (wiz.currentId !== wantId) wiz.setStep(wantId);
-  else wiz.setStep(wiz.currentId);
   restoreFocusedConnectionInput();
 }
 
@@ -1535,47 +1415,6 @@ function closeModelModal() {
   el.modelDialog.close();
 }
 
-function cleanUrl(raw) {
-  return String(raw || "").replace(/[)\].,;:]+$/g, "");
-}
-
-function extractUrls(text) {
-  const urls = [];
-  const seen = new Set();
-  const pattern = /https?:\/\/[^\s<>"'`]+/g;
-  for (const match of String(text || "").matchAll(pattern)) {
-    const url = cleanUrl(match[0]);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    urls.push(url);
-  }
-  return urls;
-}
-
-function appendTextWithLinks(container, text) {
-  const value = String(text || "");
-  const pattern = /https?:\/\/[^\s<>"'`]+/g;
-  let index = 0;
-  for (const match of value.matchAll(pattern)) {
-    const raw = match[0];
-    const url = cleanUrl(raw);
-    const start = match.index;
-    const end = start + url.length;
-
-    if (start > index) container.appendChild(document.createTextNode(value.slice(index, start)));
-    if (url) {
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.target = "_blank";
-      anchor.rel = "noopener noreferrer";
-      anchor.textContent = url;
-      container.appendChild(anchor);
-    }
-    index = end;
-  }
-  if (index < value.length) container.appendChild(document.createTextNode(value.slice(index)));
-}
-
 function rememberConnectionOutputScroll(output, connectionId) {
   if (!connectionId || !output) return;
   state.connectionOutputScroll[connectionId] = {
@@ -1603,6 +1442,26 @@ function restoreConnectionOutputScroll(output, connectionId) {
   });
 }
 
+function extractExternalSignInUrls(text) {
+  const seen = new Set();
+  const urls = [];
+  const pattern = /https?:\/\/[^\s<>"'`]+/g;
+  for (const match of String(text || "").matchAll(pattern)) {
+    const url = match[0].replace(/[)\].,;:]+$/g, "");
+    if (!url || seen.has(url)) continue;
+    let parsed;
+    try { parsed = new URL(url); } catch { continue; }
+    const host = parsed.hostname.toLowerCase();
+    // Skip loopback callback URLs the CLI also prints (codex's localhost:1455, etc) — we only want
+    // the real provider sign-in page.
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") continue;
+    if (!/^https?:$/.test(parsed.protocol)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
 function createConnectionJobPanel(job, connectionId) {
   const panel = document.createElement("div");
   panel.className = "connection-job";
@@ -1612,24 +1471,34 @@ function createConnectionJobPanel(job, connectionId) {
   status.textContent = job.status === "running" ? "Waiting for login..." : job.status;
   panel.appendChild(status);
 
-  if (job.output) {
-    const urls = extractUrls(job.output);
-    if (urls.length) {
-      panel.appendChild(createConnectionLinkRow(urls.map((url, index) => ({
-        label: urls.length === 1 ? "Open link" : `Open link ${index + 1}`,
-        url,
-      }))));
-    }
+  // Without the output panel a failed job would be silent — surface the error in a short line.
+  if (job.status === "failed" && job.error) {
+    const err = document.createElement("div");
+    err.className = "connection-job-status failed";
+    err.textContent = String(job.error).split("\n")[0].slice(0, 240);
+    panel.appendChild(err);
+  }
 
-    const output = document.createElement("div");
-    output.className = "connection-output";
-    output.dataset.connectionOutput = connectionId;
-    appendTextWithLinks(output, job.output.trim() || job.output);
-    restoreConnectionOutputScroll(output, connectionId);
-    output.addEventListener("scroll", () => {
-      rememberConnectionOutputScroll(output, connectionId);
-    });
-    panel.appendChild(output);
+  // Auto-pop the provider sign-in URL the first time the CLI prints it, and offer a button as a
+  // popup-blocker fallback. We never render the raw output blob in the wizard.
+  const signInUrls = extractExternalSignInUrls(job.output);
+  if (signInUrls.length) {
+    for (const url of signInUrls) {
+      const key = `${job.id}:${url}`;
+      if (state.openedJobSignInUrls.has(key)) continue;
+      state.openedJobSignInUrls.add(key);
+      try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* popup blocked — fallback button below covers it */ }
+    }
+    if (job.status === "running") {
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "secondary";
+      openButton.textContent = "Open sign-in page";
+      openButton.addEventListener("click", () => {
+        window.open(signInUrls[0], "_blank", "noopener,noreferrer");
+      });
+      panel.appendChild(openButton);
+    }
   }
 
   if (job.status === "running") {
@@ -1654,11 +1523,16 @@ function createConnectionJobPanel(job, connectionId) {
         state.connectionInputs[connectionId] = input.value;
       });
     });
+    // Mouse-down on the Send button would normally steal focus before the click fires; we want
+    // the input to keep focus through the click so the user can keep typing without re-clicking it.
+    const submitFromInput = () => {
+      state.focusedConnectionInput = connectionId;
+      sendConnectionInput(job.id, input.value, connectionId);
+    };
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        sendConnectionInput(job.id, input.value, connectionId);
-        input.value = "";
+        submitFromInput();
       }
     });
 
@@ -1666,11 +1540,8 @@ function createConnectionJobPanel(job, connectionId) {
     button.type = "button";
     button.className = "secondary";
     button.textContent = "Send";
-    button.addEventListener("click", () => {
-      sendConnectionInput(job.id, input.value, connectionId);
-      input.value = "";
-      state.connectionInputs[connectionId] = "";
-    });
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+    button.addEventListener("click", submitFromInput);
 
     inputRow.append(input, button);
     panel.appendChild(inputRow);
@@ -1712,29 +1583,10 @@ async function startConnection(id) {
   }
 }
 
-async function disconnectConnection(id) {
-  const previous = state.connections.find((item) => item.id === id);
-  const previousDetail = previous?.detail;
-  try {
-    const body = await api(`/api/connections/${id}/disconnect`, { method: "POST" });
-    state.connectionInputs[id] = "";
-    state.focusedConnectionInput = null;
-    delete state.connectionJobs[id];
-    state.connections = body.connections || state.connections;
-    renderModelStatus();
-    renderSupervisors();
-    renderConnectionViews();
-    updateModalState();
-    await refreshUsage();
-  } catch (error) {
-    if (previous) previous.detail = `Error: ${error.message}`;
-    renderConnectionViews();
-    if (previous) previous.detail = previousDetail;
-  }
-}
-
 async function sendConnectionInput(jobId, input, connectionId) {
   if (!input.trim()) return;
+  // Keep focus on the input through the re-render so the user can keep typing.
+  state.focusedConnectionInput = connectionId;
   try {
     const body = await api(`/api/connections/jobs/${jobId}/input`, {
       method: "POST",
@@ -1742,7 +1594,6 @@ async function sendConnectionInput(jobId, input, connectionId) {
     });
     state.connectionJobs[connectionId] = body.job;
     state.connectionInputs[connectionId] = "";
-    if (state.focusedConnectionInput === connectionId) state.focusedConnectionInput = null;
     renderConnectionViews();
   } catch (error) {
     const job = state.connectionJobs[connectionId];
@@ -1756,8 +1607,19 @@ function pollConnectionJob(jobId, connectionId) {
   const tick = async () => {
     try {
       const body = await api(`/api/connections/jobs/${jobId}`);
+      const prev = state.connectionJobs[connectionId];
       state.connectionJobs[connectionId] = body.job;
-      renderConnectionViews();
+      // We no longer render the raw CLI output blob in the wizard, so output-only deltas
+      // shouldn't kick a re-render that would destroy the user's code/answer input mid-paste.
+      // Re-render only when the user-visible state actually changes: status flip, new error,
+      // or the very first time a sign-in URL appears (so we can pop the tab).
+      const prevHadUrl = prev ? extractExternalSignInUrls(prev.output).length > 0 : false;
+      const nextHasUrl = extractExternalSignInUrls(body.job.output).length > 0;
+      const visibleChanged = !prev
+        || prev.status !== body.job.status
+        || prev.error !== body.job.error
+        || (!prevHadUrl && nextHasUrl);
+      if (visibleChanged) renderConnectionViews();
       if (body.job.status === "running") {
         state.connectionPollers[jobId] = setTimeout(tick, 1500);
         return;
@@ -1995,16 +1857,32 @@ function openProjectContextMenu(event, project) {
     void setProjectAutopilot(project, !autopilotOn);
   });
 
-  const clearActivity = document.createElement("button");
-  clearActivity.type = "button";
-  clearActivity.role = "menuitem";
-  clearActivity.className = "project-context-item";
-  clearActivity.disabled = !hasAutopilotFeed || running;
-  clearActivity.innerHTML = `<span>Clear activity</span>${running ? "<strong>Running</strong>" : hasAutopilotFeed ? "" : "<strong>Empty</strong>"}`;
-  clearActivity.addEventListener("click", async () => {
-    closeProjectContextMenu();
-    await clearAutopilotHistoryFromUi(project);
-  });
+  const supervisorSeparator = document.createElement("div");
+  supervisorSeparator.className = "project-context-separator";
+
+  const supervisorHeader = document.createElement("div");
+  supervisorHeader.className = "project-context-header";
+  supervisorHeader.textContent = "Supervisor";
+
+  const supervisorItems = [];
+  for (const supervisor of Object.values(state.config?.supervisors || {})) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.role = "menuitemradio";
+    item.className = "project-context-item";
+    const isCurrent = supervisor.id === project.supervisor;
+    item.setAttribute("aria-checked", String(isCurrent));
+    const connected = isSupervisorConnected(supervisor.id);
+    item.disabled = running || (!isCurrent && !connected) || !project.id;
+    const status = isCurrent ? "Current" : connected ? "" : "Not connected";
+    item.innerHTML = `<span>${supervisor.label}</span>${status ? `<strong>${status}</strong>` : ""}`;
+    item.addEventListener("click", async () => {
+      closeProjectContextMenu();
+      if (isCurrent) return;
+      await setProjectSupervisor(project, supervisor.id);
+    });
+    supervisorItems.push(item);
+  }
 
   const separator = document.createElement("div");
   separator.className = "project-context-separator";
@@ -2020,10 +1898,37 @@ function openProjectContextMenu(event, project) {
     await deleteProjectFromUi(project);
   });
 
-  el.projectContextMenu.append(autopilot, clearActivity, separator, remove);
+  el.projectContextMenu.append(autopilot, supervisorSeparator, supervisorHeader, ...supervisorItems, separator, remove);
   el.projectContextMenu.hidden = false;
   positionProjectContextMenu(event.clientX, event.clientY);
   autopilot.focus();
+}
+
+async function setProjectSupervisor(project, supervisorId) {
+  if (!project?.id) {
+    setStatus("Open the chat once before switching supervisor");
+    return;
+  }
+  if (!isSupervisorConnected(supervisorId)) {
+    setStatus(`${state.config?.supervisors?.[supervisorId]?.label || supervisorId} is not connected`);
+    return;
+  }
+  try {
+    const body = await api(`/api/sessions/${project.id}/supervisor`, {
+      method: "POST",
+      body: JSON.stringify({ supervisor: supervisorId }),
+    });
+    const session = body.session;
+    if (session) {
+      upsertSessionSummary(session);
+      if (isViewing(session.id)) state.currentSession = session;
+    }
+    renderSessions();
+    syncComposerState();
+    setStatus(`Supervisor switched to ${state.config?.supervisors?.[supervisorId]?.label || supervisorId}`);
+  } catch (error) {
+    setStatus(`Supervisor change error: ${error.message}`);
+  }
 }
 
 function renderSessions() {
@@ -2665,16 +2570,14 @@ function tailscaleConfigured() {
   return Boolean(state.tailscale?.configured);
 }
 
-function normalizedTailscaleHttpsHost(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-}
-
 function tailscaleStateLabel(tailscale = state.tailscale) {
   if (!tailscale) return "Checking";
   if (tailscale.state === "ready") return `Ready - ${tailscale.httpsHost || tailscale.hostname}`;
+  if (tailscale.state === "needs-login") return "Needs login - open the auth URL";
+  if (tailscale.state === "needs-relogin") return "Tailnet identity lost - paste a fresh key";
+  if (tailscale.state === "restarting") return "Restarting with new key...";
   if (tailscale.configured) return `Saved - ${tailscale.httpsHost || tailscale.hostname}`;
+  if (tailscale.state === "starting") return "Registering with Tailscale...";
   if (tailscale.state === "waiting") return "Waiting for setup";
   if (tailscale.state === "error") return tailscale.detail || "Needs attention";
   return "Not configured";
@@ -2729,94 +2632,82 @@ function toggleSettingsMenu() {
   }
 }
 
-// ---------------- generic mini-wizard runtime ----------------
-function showWizardStep(wizardEl, stepId) {
-  const sections = wizardEl.querySelectorAll(".wizard-step");
-  for (const section of sections) {
-    section.hidden = section.dataset.step !== stepId;
-  }
-}
-
-function updateWizardChrome(wizardEl, steps, stepId, refs) {
-  const { index, total, percent } = wizardProgress(steps, stepId);
-  if (refs.stepCount) refs.stepCount.textContent = `Step ${index} of ${total}`;
-  if (refs.progressBar) refs.progressBar.style.width = `${percent}%`;
-  const isFirst = stepId === steps[0]?.id;
-  const isLast = stepId === steps[steps.length - 1]?.id;
-  if (refs.back) refs.back.disabled = isFirst;
-  if (refs.next) refs.next.hidden = isLast;
-  if (refs.finish) refs.finish.hidden = !isLast;
-  if (refs.save) refs.save.hidden = !refs.saveOnStep || refs.saveOnStep !== stepId;
-}
-
-function makeWizard({ wizardEl, steps, ready, refs, onEnter, onNext, onFinish }) {
-  const state = { currentId: steps[0]?.id || null };
-
-  function setStep(id) {
-    state.currentId = id;
-    showWizardStep(wizardEl, id);
-    updateWizardChrome(wizardEl, steps, id, refs);
-    onEnter?.(id);
-  }
-
-  async function advance() {
-    const stepId = state.currentId;
-    let allowed = true;
-    if (onNext) allowed = (await onNext(stepId)) !== false;
-    if (!allowed) return;
-    const next = nextWizardStep(steps, stepId, ready);
-    if (next) setStep(next);
-  }
-
-  function back() {
-    const prev = prevWizardStep(steps, state.currentId);
-    if (prev) setStep(prev);
-  }
-
-  function open(initialId) {
-    setStep(initialId || nextWizardStep(steps, "__start__", ready) || steps[0].id);
-  }
-
-  refs.next?.addEventListener("click", advance);
-  refs.back?.addEventListener("click", back);
-  refs.finish?.addEventListener("click", async () => {
-    if (onFinish) await onFinish();
-  });
-
-  return { open, setStep, back, advance, get currentId() { return state.currentId; } };
-}
-
 function renderTailscaleDialog() {
   const tailscale = state.tailscale || {};
   const configured = tailscaleConfigured();
   const errored = tailscale.state === "error";
-  el.tailscaleHostname.value = el.tailscaleHostname.value || tailscale.hostname || "orch-ui";
-  el.tailscaleHttpsHost.value = el.tailscaleHttpsHost.value || tailscale.httpsHost || "";
-  el.tailscaleAuthKey.placeholder = tailscale.authKeyConfigured ? "Saved" : "tskey-auth-...";
   el.tailscaleStateText.textContent = tailscaleStateLabel(tailscale);
   el.tailscaleStateText.parentElement.classList.toggle("configured", configured);
   el.tailscaleStateText.parentElement.classList.toggle("error", errored);
+
+  // Adapt the hint + button label to whatever state the sidecar is in. The button always submits
+  // the form (no key input anymore) and the server writes a fresh setup.env + logout sentinel,
+  // which the sidecar consumes to logout/wipe/restart into a clean browser-auth flow.
+  let hint;
+  let buttonText;
+  if (tailscale.state === "ready") {
+    hint = "Tailscale is connected. Click Re-register to wipe the persisted identity and start over.";
+    buttonText = "Re-register";
+  } else if (tailscale.state === "needs-login" || tailscale.state === "needs-relogin") {
+    hint = "The sidecar is waiting for browser authorization. If a tab didn't open, use the Open auth page button below.";
+    buttonText = "Reset & try again";
+  } else if (tailscale.state === "starting" || tailscale.state === "restarting") {
+    hint = "Sidecar starting; registration usually takes 10-30s.";
+    buttonText = "Start setup";
+  } else {
+    hint = "Click Start setup. The sidecar opens a Tailscale browser tab where you authorize this device. The hostname is always orch-ui.";
+    buttonText = "Start setup";
+  }
+  if (el.tailscaleSetupHint) el.tailscaleSetupHint.textContent = hint;
+  el.saveTailscale.textContent = buttonText;
+
+  renderTailscaleAuthUrl(tailscale);
   updateTailscaleFormState();
 }
 
-function updateTailscaleFormState() {
-  const hostname = el.tailscaleHostname.value.trim();
-  const httpsHost = normalizedTailscaleHttpsHost(el.tailscaleHttpsHost.value);
-  const authKey = el.tailscaleAuthKey.value.trim();
-  const needsAuthKey = !state.tailscale?.authKeyConfigured;
-  const missing = !hostname || !httpsHost || (needsAuthKey && !authKey);
-  el.saveTailscale.disabled = missing;
-  el.tailscaleStatus.classList.toggle("is-error", missing);
-  if (!hostname) {
-    el.tailscaleStatus.textContent = "Device name is required.";
-  } else if (!httpsHost) {
-    el.tailscaleStatus.textContent = "HTTPS host is required.";
-  } else if (needsAuthKey && !authKey) {
-    el.tailscaleStatus.textContent = "Auth key is required the first time.";
-  } else {
-    el.tailscaleStatus.classList.remove("is-error");
-    el.tailscaleStatus.textContent = state.tailscale?.detail || tailscaleStateLabel();
+// Surface the Tailscale browser-auth URL when the sidecar reports NeedsLogin. We auto-open it
+// once per URL, then keep a re-open button visible in case the popup was blocked. The block sits
+// inside the modal between the status row and the inputs.
+function renderTailscaleAuthUrl(tailscale) {
+  if (!el.tailscaleStateText) return;
+  const url = String(tailscale?.authURL || "").trim();
+  let block = document.getElementById("tailscaleAuthUrlBlock");
+  if (!url || tailscale?.state === "ready") {
+    if (block) block.remove();
+    return;
   }
+  if (!block) {
+    block = document.createElement("div");
+    block.id = "tailscaleAuthUrlBlock";
+    block.className = "tailscale-auth-url";
+    el.tailscaleStateText.parentElement.insertAdjacentElement("afterend", block);
+  }
+  if (block.dataset.lastUrl !== url) {
+    block.dataset.lastUrl = url;
+    block.innerHTML = "";
+    const note = document.createElement("p");
+    note.className = "modal-hint";
+    note.textContent = "Tailscale needs you to authorize this device. Opening the auth page in a new tab.";
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "primary";
+    openBtn.textContent = "Open auth page";
+    openBtn.addEventListener("click", () => window.open(url, "_blank", "noopener,noreferrer"));
+    block.append(note, openBtn);
+    state.tailscaleOpenedAuthUrls = state.tailscaleOpenedAuthUrls || new Set();
+    if (!state.tailscaleOpenedAuthUrls.has(url)) {
+      state.tailscaleOpenedAuthUrls.add(url);
+      try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* popup blocked - button covers it */ }
+    }
+  }
+}
+
+function updateTailscaleFormState() {
+  // No more input field; the button is always enabled. The status row mirrors whatever detail
+  // the sidecar last published (or a placeholder when nothing's running yet).
+  el.saveTailscale.disabled = false;
+  el.tailscaleStatus.classList.remove("is-error");
+  el.tailscaleStatus.textContent = state.tailscale?.detail || tailscaleStateLabel();
 }
 
 async function refreshTailscaleStatus() {
@@ -2837,54 +2728,6 @@ async function refreshTailscaleStatus() {
   if (el.tailscaleDialog?.open) renderTailscaleDialog();
 }
 
-const TAILSCALE_STEPS = [
-  { id: "status" },
-  { id: "authkey" },
-  { id: "identity" },
-  { id: "done" },
-];
-
-let tailscaleWizard = null;
-
-function ensureTailscaleWizard() {
-  if (tailscaleWizard) return tailscaleWizard;
-  if (!el.tailscaleForm) return null;
-  tailscaleWizard = makeWizard({
-    wizardEl: el.tailscaleForm,
-    steps: TAILSCALE_STEPS,
-    refs: {
-      stepCount: el.tailscaleStepCount,
-      progressBar: el.tailscaleProgressBar,
-      back: el.tailscaleBack,
-      next: el.tailscaleNext,
-      finish: el.tailscaleFinish,
-      save: el.saveTailscale,
-      saveOnStep: "identity",
-    },
-    ready: () => true,
-    onEnter: (id) => {
-      // Toggle save vs next on the last input step.
-      el.tailscaleNext.hidden = id === "identity" || id === "done";
-      el.saveTailscale.hidden = id !== "identity";
-      el.tailscaleFinish.hidden = id !== "done";
-      if (id === "status") renderTailscaleDialog();
-      if (id === "done") {
-        el.tailscaleDoneSummary.textContent = tailscaleStateLabel(state.tailscale);
-      }
-    },
-    onNext: (id) => {
-      if (id === "authkey" && !state.tailscale?.authKeyConfigured && !el.tailscaleAuthKey.value.trim()) {
-        setTailscaleStatusMsg("Auth key is required the first time.", true);
-        return false;
-      }
-      setTailscaleStatusMsg("");
-      return true;
-    },
-    onFinish: () => closeTailscaleModal(),
-  });
-  return tailscaleWizard;
-}
-
 function setTailscaleStatusMsg(message, isError = false) {
   if (!el.tailscaleStatus) return;
   el.tailscaleStatus.textContent = message || "";
@@ -2894,50 +2737,70 @@ function setTailscaleStatusMsg(message, isError = false) {
 async function openTailscaleModal({ continueAfterSetup = false } = {}) {
   state.tailscaleContinueAfterSetup = continueAfterSetup;
   await refreshTailscaleStatus();
-  el.tailscaleAuthKey.value = "";
-  el.tailscaleHostname.value = state.tailscale?.hostname || "orch-ui";
-  el.tailscaleHttpsHost.value = state.tailscale?.httpsHost || "";
   renderTailscaleDialog();
   el.tailscaleDialog.showModal();
-  const wiz = ensureTailscaleWizard();
-  // If already configured, jump straight to the "Done" summary; otherwise start at "status".
-  wiz?.open(state.tailscale?.configured ? "done" : "status");
+  startTailscaleStatusWatch();
+}
+
+// While the modal is open we poll /api/tailscale every 3s so the user sees registration progress
+// (Starting -> NeedsLogin -> Running) without clicking Refresh. Auto-closes once the sidecar
+// reports state=ready with a real httpsHost; continueAfterSetup then opens the new-chat modal.
+function startTailscaleStatusWatch() {
+  stopTailscaleStatusWatch();
+  state.tailscaleStatusWatch = setInterval(async () => {
+    if (!el.tailscaleDialog?.open) {
+      stopTailscaleStatusWatch();
+      return;
+    }
+    await refreshTailscaleStatus();
+    if (state.tailscale?.state === "ready" && state.tailscale.httpsHost) {
+      const continueAfterSetup = state.tailscaleContinueAfterSetup;
+      stopTailscaleStatusWatch();
+      closeTailscaleModal();
+      setStatus(`Tailscale ready - ${state.tailscale.httpsHost}`);
+      if (continueAfterSetup) await openNewChatModal({ force: true });
+    }
+  }, 3000);
+}
+
+function stopTailscaleStatusWatch() {
+  if (state.tailscaleStatusWatch) {
+    clearInterval(state.tailscaleStatusWatch);
+    state.tailscaleStatusWatch = null;
+  }
 }
 
 function closeTailscaleModal() {
   el.tailscaleDialog.close();
   state.tailscaleContinueAfterSetup = false;
+  stopTailscaleStatusWatch();
 }
 
 async function saveTailscaleFromUi() {
-  updateTailscaleFormState();
   if (el.saveTailscale.disabled) return;
   el.saveTailscale.disabled = true;
   el.tailscaleStatus.classList.remove("is-error");
-  el.tailscaleStatus.textContent = "Saving...";
+  el.tailscaleStatus.textContent = "Restarting Tailscale sidecar. A browser tab will open to authorize this device.";
   try {
+    // No key in the body: server writes a hostname-only setup.env, drops a logout-pending
+    // sentinel so the sidecar wipes its persisted identity, and the new containerboot will run
+    // `tailscale up` without --auth-key, which emits an AuthURL the wizard auto-opens.
     const body = await api("/api/tailscale", {
       method: "POST",
-      body: JSON.stringify({
-        authKey: el.tailscaleAuthKey.value.trim(),
-        hostname: el.tailscaleHostname.value.trim(),
-        httpsHost: normalizedTailscaleHttpsHost(el.tailscaleHttpsHost.value),
-      }),
+      body: JSON.stringify({}),
     });
     state.tailscale = body.tailscale;
     state.tailscaleSetupDismissed = false;
     renderTailscaleButton();
-    const continueAfterSetup = state.tailscaleContinueAfterSetup;
-    closeTailscaleModal();
-    setStatus("Tailscale setup saved");
-    if (continueAfterSetup) await openNewChatModal({ force: true });
+    // Don't close the modal — the status watcher polls every 3s and auto-closes on state=ready.
+    el.tailscaleStateText.textContent = "Restarting sidecar...";
+    setStatus("Tailscale sidecar restarting; waiting for browser auth");
   } catch (error) {
     el.tailscaleStatus.classList.add("is-error");
     el.tailscaleStatus.textContent = error.message;
     updateTailscaleFormState();
   } finally {
     el.saveTailscale.disabled = false;
-    updateTailscaleFormState();
   }
 }
 
@@ -3536,7 +3399,10 @@ function finishLiveRun(event) {
     focusComposerInput();
   }
   refreshSessions().catch((error) => setStatus(`Session refresh error: ${error.message}`));
-  refreshUsage().catch((error) => setStatus(`Usage refresh error: ${error.message}`));
+  // Trigger a fresh probe for the supervisor that just finished, so its chip catches the new
+  // current/weekly percent and reset times instead of waiting for the next background poll.
+  // The burst inside triggerUsageProbe also covers refreshUsage().
+  triggerUsageProbe(session.supervisor);
   if (event.type === "done") scheduleAutopilot(session);
 }
 
@@ -3632,6 +3498,9 @@ async function init() {
   await refreshTailscaleStatus();
   await refreshGithubConnectionStatus();
   await refreshModelStatus();
+  // First page load: ask the server to capture fresh provider usage right now instead of waiting
+  // for the next 5-minute background poll, so the chips reflect reality on day-one of the session.
+  triggerUsageProbe();
   renderSupervisors();
   await refreshSessions();
   if (state.sessions[0]) await loadSession(state.sessions[0].id);
@@ -3676,6 +3545,10 @@ el.openGithubFromSettings?.addEventListener("click", () => {
   closeSettingsMenu();
   void openGithubModal();
 });
+el.signOutAllFromSettings?.addEventListener("click", () => {
+  closeSettingsMenu();
+  void withButtonBusy(el.signOutAllFromSettings, null, handleSignOutAll);
+});
 el.sidebarToggle.addEventListener("click", toggleSidebar);
 el.soundToggle.addEventListener("click", toggleSoundMute);
 el.speechToggle.addEventListener("click", toggleSpeechMute);
@@ -3711,11 +3584,19 @@ el.githubDialog?.addEventListener("click", (event) => {
   if (event.target === el.githubDialog) closeGithubModal();
 });
 el.githubDialog?.querySelector("[data-close-github]")?.addEventListener("click", closeGithubModal);
-el.generateGithubKeyButton?.addEventListener("click", handleGenerateGithubKey);
-el.copyGithubKeyButton?.addEventListener("click", handleCopyGithubKey);
-el.saveGithubTokenButton?.addEventListener("click", handleSaveGithubToken);
-el.testGithubSshButton?.addEventListener("click", handleTestGithubSsh);
-el.disconnectGithubButton?.addEventListener("click", handleDisconnectGithub);
+el.generateGithubKeyButton?.addEventListener("click", () => {
+  void withButtonBusy(el.generateGithubKeyButton, "Generating...", handleGenerateGithubKey);
+});
+el.copyGithubKeyButton?.addEventListener("click", () => {
+  void withButtonBusy(el.copyGithubKeyButton, "Copying...", handleCopyGithubKey);
+});
+el.saveGithubTokenButton?.addEventListener("click", () => {
+  void withButtonBusy(el.saveGithubTokenButton, "Verifying...", handleSaveGithubToken);
+});
+el.testGithubSshButton?.addEventListener("click", () => {
+  void withButtonBusy(el.testGithubSshButton, "Testing...", handleTestGithubSsh);
+});
+el.githubFinish?.addEventListener("click", closeGithubModal);
 
 el.closeConnect.addEventListener("click", closeConnectModal);
 el.refreshConnections.addEventListener("click", refreshConnections);
@@ -3723,6 +3604,7 @@ el.connectDialog.addEventListener("click", (event) => {
   if (event.target === el.connectDialog) closeConnectModal();
 });
 el.connectDialog.querySelector("[data-close-connect]").addEventListener("click", closeConnectModal);
+el.modelConnectFinish?.addEventListener("click", closeModelModal);
 el.closePrompts.addEventListener("click", closePromptModal);
 el.promptDialog.addEventListener("click", (event) => {
   if (event.target === el.promptDialog) closePromptModal();
@@ -3755,9 +3637,6 @@ el.skipTailscale.addEventListener("click", skipTailscaleSetup);
 el.tailscaleDialog.addEventListener("click", (event) => {
   if (event.target === el.tailscaleDialog) closeTailscaleModal();
 });
-el.tailscaleAuthKey.addEventListener("input", updateTailscaleFormState);
-el.tailscaleHostname.addEventListener("input", updateTailscaleFormState);
-el.tailscaleHttpsHost.addEventListener("input", updateTailscaleFormState);
 el.tailscaleForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   await saveTailscaleFromUi();

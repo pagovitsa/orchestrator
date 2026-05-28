@@ -432,6 +432,12 @@ export async function disconnectConnection(id) {
   return { disconnected: true, connections: await connectionStatus() };
 }
 
+export async function disconnectAllConnections() {
+  const ids = ["claude", "codex", "gemini", "deepseek"];
+  await Promise.allSettled(ids.map((id) => disconnectConnection(id)));
+  return { connections: await connectionStatus() };
+}
+
 export function getConnectionJob(id) {
   const job = jobs.get(id);
   if (!job) throw Object.assign(new Error("Connection job not found"), { status: 404 });

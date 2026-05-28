@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { paths, runtime } from "../config/env.js";
 
@@ -6,19 +6,19 @@ const tailscaleDir = path.join(paths.dataDir, "tailscale");
 const setupFile = path.join(tailscaleDir, "setup.json");
 const envFile = path.join(tailscaleDir, "setup.env");
 const statusFile = path.join(tailscaleDir, "status.json");
+// Drop-file the sidecar polls. When present, start.sh runs `tailscale logout`, wipes
+// /var/lib/tailscale, deletes the sentinel, and restarts. Used by both Re-register (Start setup
+// from the wizard) and Sign out everything from settings — anything that wants the sidecar's
+// tailnet identity gone, not just the UI's record of it.
+const logoutSentinelFile = path.join(tailscaleDir, "logout-pending");
+
+// Fixed device hostname. The sidecar always registers as this; the browser-auth flow gives the
+// user the chance to delete any stale orch-ui* in their tailnet admin if they want before
+// reauthorizing.
+export const ORCH_HOSTNAME = "orch-ui";
 
 function cleanString(value, limit = 1000) {
   return String(value || "").trim().slice(0, limit);
-}
-
-function envFlagValue(value, defaultValue = true) {
-  if (value === undefined || value === null || value === "") return defaultValue;
-  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
-}
-
-function envNumberValue(value, defaultValue) {
-  const number = Number(value || defaultValue);
-  return Number.isFinite(number) ? number : defaultValue;
 }
 
 function shellQuote(value) {
@@ -69,54 +69,35 @@ async function writeFileAtomic(file, content, mode = 0o600) {
   await rename(tmp, file);
 }
 
-export function normalizeTailscaleHostname(value) {
-  const hostname = cleanString(value || "orch-ui", 63).toLowerCase();
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname)) {
-    throw Object.assign(new Error("Tailscale hostname must be 1-63 letters, numbers, or dashes."), { status: 400 });
-  }
-  return hostname;
-}
-
-export function normalizeTailscaleHttpsHost(value) {
-  let raw = cleanString(value, 260);
-  if (!raw) throw Object.assign(new Error("Tailscale HTTPS host is required."), { status: 400 });
-  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw}`;
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw Object.assign(new Error("Tailscale HTTPS host must be a valid https URL."), { status: 400 });
-  }
-  if (url.protocol !== "https:") {
-    throw Object.assign(new Error("Tailscale HTTPS host must use https."), { status: 400 });
-  }
-  if (!url.hostname) {
-    throw Object.assign(new Error("Tailscale HTTPS host must include a hostname."), { status: 400 });
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw Object.assign(new Error("Tailscale HTTPS host cannot include credentials, query, or hash."), { status: 400 });
-  }
-  return url.origin;
-}
-
-function publicSetupFromConfig(config = {}, env = {}) {
-  const hostname = cleanString(config.hostname || env.ORCH_TAILSCALE_HOSTNAME || process.env.ORCH_TAILSCALE_HOSTNAME || "orch-ui", 63);
-  const httpsHost = cleanString(config.httpsHost || env.ORCH_TAILSCALE_HTTPS_HOST || process.env.ORCH_TAILSCALE_HTTPS_HOST || "", 260);
-  const authKeyConfigured = Boolean(env.ORCH_TAILSCALE_AUTHKEY || env.TS_AUTHKEY || process.env.ORCH_TAILSCALE_AUTHKEY || process.env.TS_AUTHKEY || config.authKeyConfigured);
-  const serve = config.serve !== undefined ? Boolean(config.serve) : envFlagValue(env.ORCH_TAILSCALE_SERVE ?? process.env.ORCH_TAILSCALE_SERVE, true);
-  const serveReset = config.serveReset !== undefined ? Boolean(config.serveReset) : envFlagValue(env.ORCH_TAILSCALE_SERVE_RESET ?? process.env.ORCH_TAILSCALE_SERVE_RESET, true);
-  const uiHttpsPort = envNumberValue(config.uiHttpsPort || env.ORCH_TAILSCALE_UI_HTTPS_PORT || process.env.ORCH_TAILSCALE_UI_HTTPS_PORT, 443);
-  const previewPorts = cleanString(config.previewPorts || env.ORCH_TAILSCALE_PREVIEW_PORTS || process.env.ORCH_TAILSCALE_PREVIEW_PORTS || runtime.previewPorts, 300);
+function publicSetupFromConfig(config = {}, env = {}, sidecar = {}) {
+  // Prefer the sidecar-reported live FQDN; otherwise fall back to whatever the save left behind.
+  const fqdn = cleanString(sidecar.fqdn || "", 260);
+  const httpsHost = fqdn
+    ? `https://${fqdn}`
+    : cleanString(config.httpsHost || env.ORCH_TAILSCALE_HTTPS_HOST || process.env.ORCH_TAILSCALE_HTTPS_HOST || "", 260);
+  const authKeyConfigured = Boolean(
+    env.ORCH_TAILSCALE_AUTHKEY || env.TS_AUTHKEY ||
+    process.env.ORCH_TAILSCALE_AUTHKEY || process.env.TS_AUTHKEY ||
+    config.authKeyConfigured,
+  );
+  // "Configured" means the sidecar is actually serving on the tailnet. We don't trust setup.env
+  // alone — tailscaled can have stale persisted state pointing at a deleted node and still claim
+  // BackendState=Running. Only state="ready" (which the sidecar only writes when BackendState=
+  // Running AND Self.Online=true) counts.
+  const sidecarReady = sidecar.state === "ready" && Boolean(httpsHost);
   return {
-    configured: Boolean(authKeyConfigured && httpsHost),
+    configured: sidecarReady,
     saved: Boolean(config.saved || config.updatedAt || Object.keys(env).length),
-    hostname,
+    hostname: ORCH_HOSTNAME,
     httpsHost,
+    fqdn,
     authKeyConfigured,
-    serve,
-    serveReset,
-    uiHttpsPort,
-    previewPorts,
+    apiManaged: Boolean(config.apiManaged),
+    cleanup: config.cleanup || null,
+    serve: true,
+    serveReset: true,
+    uiHttpsPort: 443,
+    previewPorts: runtime.previewPorts,
     updatedAt: config.updatedAt || "",
   };
 }
@@ -127,62 +108,76 @@ export async function tailscaleStatus() {
     readEnvFile(),
     readJsonFile(statusFile, {}),
   ]);
-  const setup = publicSetupFromConfig(config, env);
+  const setup = publicSetupFromConfig(config, env, sidecar);
   return {
     ...setup,
     state: cleanString(sidecar.state || (setup.configured ? "saved" : "missing"), 40),
     detail: cleanString(sidecar.detail || "", 300),
     sidecarUpdatedAt: cleanString(sidecar.updatedAt || "", 80),
+    // Live signals from `tailscale status --json` so the UI can react: show an auth URL when the
+    // sidecar needs browser login, and treat backendState=Running as "this is actually online".
+    authURL: cleanString(sidecar.authURL || "", 500),
+    backendState: cleanString(sidecar.backendState || "", 40),
   };
 }
 
-export async function saveTailscaleSetup(body = {}) {
-  const existingEnv = await readEnvFile();
-  const authKey = cleanString(body.authKey || existingEnv.ORCH_TAILSCALE_AUTHKEY || existingEnv.TS_AUTHKEY || process.env.ORCH_TAILSCALE_AUTHKEY || process.env.TS_AUTHKEY, 500);
-  if (!authKey) {
-    throw Object.assign(new Error("Tailscale auth key is required the first time."), { status: 400 });
-  }
+// Triggers a fresh tailscaled registration via browser auth. No key is required from the user; the
+// sidecar starts containerboot with no TS_AUTHKEY, which makes `tailscale up` emit an AuthURL that
+// the wizard catches and opens in a browser tab. We always drop a logout-pending sentinel first so
+// any pre-existing tailnet identity in /var/lib/tailscale is logged out and wiped before re-auth —
+// otherwise tailscaled would happily reuse a stale identity that's been deleted from the tailnet
+// and silently fail (BackendState=Running but 404 on every PollNetMap).
+export async function saveTailscaleSetup() {
+  console.error("[tailscale-save] starting fresh registration via browser auth");
 
-  const hostname = normalizeTailscaleHostname(body.hostname || existingEnv.ORCH_TAILSCALE_HOSTNAME || process.env.ORCH_TAILSCALE_HOSTNAME || "orch-ui");
-  const httpsHost = normalizeTailscaleHttpsHost(body.httpsHost || existingEnv.ORCH_TAILSCALE_HTTPS_HOST || process.env.ORCH_TAILSCALE_HTTPS_HOST || "");
-  const serve = body.serve === undefined ? envFlagValue(existingEnv.ORCH_TAILSCALE_SERVE ?? process.env.ORCH_TAILSCALE_SERVE, true) : Boolean(body.serve);
-  const serveReset = body.serveReset === undefined ? envFlagValue(existingEnv.ORCH_TAILSCALE_SERVE_RESET ?? process.env.ORCH_TAILSCALE_SERVE_RESET, true) : Boolean(body.serveReset);
-  const uiHttpsPort = envNumberValue(body.uiHttpsPort || existingEnv.ORCH_TAILSCALE_UI_HTTPS_PORT || process.env.ORCH_TAILSCALE_UI_HTTPS_PORT, 443);
-  if (uiHttpsPort < 1 || uiHttpsPort > 65535) {
-    throw Object.assign(new Error("UI HTTPS port must be between 1 and 65535."), { status: 400 });
-  }
-  const previewPorts = cleanString(body.previewPorts || existingEnv.ORCH_TAILSCALE_PREVIEW_PORTS || process.env.ORCH_TAILSCALE_PREVIEW_PORTS || runtime.previewPorts, 300);
   const updatedAt = new Date().toISOString();
-
   const publicConfig = {
     saved: true,
-    hostname,
-    httpsHost,
-    authKeyConfigured: true,
-    serve,
-    serveReset,
-    uiHttpsPort,
-    previewPorts,
+    hostname: ORCH_HOSTNAME,
+    httpsHost: "", // filled by sidecar after registration
+    authKeyConfigured: false,
+    apiManaged: false,
+    cleanup: null,
     updatedAt,
   };
 
   const envText = [
     "# Generated by Orch UI. Do not commit this file.",
-    `ORCH_TAILSCALE_AUTHKEY=${shellQuote(authKey)}`,
-    `ORCH_TAILSCALE_HOSTNAME=${shellQuote(hostname)}`,
-    `ORCH_TAILSCALE_HTTPS_HOST=${shellQuote(httpsHost)}`,
-    `ORCH_TAILSCALE_SERVE=${shellQuote(serve ? "1" : "0")}`,
-    `ORCH_TAILSCALE_SERVE_RESET=${shellQuote(serveReset ? "1" : "0")}`,
-    `ORCH_TAILSCALE_UI_HTTPS_PORT=${shellQuote(String(uiHttpsPort))}`,
-    `ORCH_TAILSCALE_PREVIEW_PORTS=${shellQuote(previewPorts)}`,
+    `ORCH_TAILSCALE_HOSTNAME=${shellQuote(ORCH_HOSTNAME)}`,
+    "ORCH_TAILSCALE_SERVE=1",
+    "ORCH_TAILSCALE_SERVE_RESET=1",
+    "ORCH_TAILSCALE_UI_HTTPS_PORT=443",
+    `ORCH_TAILSCALE_PREVIEW_PORTS=${shellQuote(runtime.previewPorts)}`,
     "",
   ].join("\n");
 
-  // Sequential, env first: the env file is what the sidecar consumes at startup. If we write the
-  // setup JSON first and the env write then fails (disk full, permissions), the UI reports
-  // "configured" but the sidecar has no key. Writing env first keeps the visible config truthful.
-  await writeFileAtomic(envFile, envText);
-  await writeFileAtomic(setupFile, `${JSON.stringify(publicConfig, null, 2)}\n`);
+  try {
+    await mkdir(tailscaleDir, { recursive: true });
+    await Promise.all([
+      rm(statusFile, { force: true }),
+      writeFile(logoutSentinelFile, updatedAt, "utf8"),
+      writeFileAtomic(setupFile, `${JSON.stringify(publicConfig, null, 2)}\n`),
+    ]);
+    await writeFileAtomic(envFile, envText);
+    console.error("[tailscale-save] wrote setup.env + logout-pending sentinel (sidecar will logout, wipe state, restart)");
+  } catch (error) {
+    console.error(`[tailscale-save] file write FAILED: ${error.message}`);
+    throw error;
+  }
 
+  return tailscaleStatus();
+}
+
+// Sign out everything (settings menu) calls this. We drop the logout-pending sentinel so the
+// sidecar actually runs `tailscale logout` and wipes its state — otherwise the file-side reset
+// would leave a still-registered orch-ui device on the tailnet, defeating the "sign out" intent.
+export async function clearTailscaleSetup() {
+  await mkdir(tailscaleDir, { recursive: true }).catch(() => {});
+  await Promise.all([
+    writeFile(logoutSentinelFile, new Date().toISOString(), "utf8").catch(() => {}),
+    rm(setupFile, { force: true }),
+    rm(envFile, { force: true }),
+    rm(statusFile, { force: true }),
+  ]);
   return tailscaleStatus();
 }

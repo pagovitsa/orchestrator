@@ -107,7 +107,7 @@ test("projectLabel returns project-oriented history labels", () => {
 
 test("saveSession treats incoming messages as authoritative", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -135,7 +135,7 @@ test("saveSession treats incoming messages as authoritative", async () => {
 
 test("createSession serializes concurrent creates for the same project to a single id", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -156,7 +156,7 @@ test("createSession serializes concurrent creates for the same project to a sing
 
 test("createSession shares a lock across cwd aliases that resolve to the same project", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -173,7 +173,7 @@ test("createSession shares a lock across cwd aliases that resolve to the same pr
 
 test("saveSession refuses partial session objects without messages", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -193,7 +193,7 @@ test("saveSession refuses partial session objects without messages", async () =>
 
 test("saveSession writes remember files atomically", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -392,7 +392,7 @@ test("safety scanner redacts sensitive object keys", () => {
 
 test("saveSession redacts secrets before persistence", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -414,7 +414,7 @@ test("saveSession redacts secrets before persistence", async () => {
 
 test("saveAttachments refuses text files with secrets before writing", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-attachments-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -438,7 +438,7 @@ test("saveAttachments refuses text files with secrets before writing", async () 
 
 test("saveAttachments accepts placeholder config while redacting inline preview", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-attachments-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -462,7 +462,7 @@ test("saveAttachments accepts placeholder config while redacting inline preview"
 test("saveAttachments respects inline attachment character budget", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
   const originalInlineChars = runtime.maxInlineAttachmentChars;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-attachments-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-attachments-"));
   try {
     paths.workspaceRoot = dir;
     runtime.maxInlineAttachmentChars = 5;
@@ -711,7 +711,7 @@ test("applySessionPatch updates persisted autopilot workflow state", () => {
 
 test("clearStaleAutopilotRuns persists restart cleanup for running workflow state", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -746,7 +746,7 @@ test("clearStaleAutopilotRuns persists restart cleanup for running workflow stat
 
 test("saveSession preserves running state for startup cleanup", async () => {
   const originalWorkspaceRoot = paths.workspaceRoot;
-  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "οrchestrator", ".tmp-sessions-"));
+  const dir = await mkdtemp(path.join(originalWorkspaceRoot, "orchestrator", ".tmp-sessions-"));
   try {
     paths.workspaceRoot = dir;
     await mkdir(path.join(dir, "project-a"), { recursive: true });
@@ -1336,7 +1336,7 @@ async function withGithubWorkspace(fn) {
   const secrets = await mkdtemp(path.join(os.tmpdir(), "orch-github-secrets-"));
   // resolveCwd validates against a cached real workspace root (set on first call). Keeping the
   // test workspace inside `originalWorkspaceRoot` ensures the isInside check still passes.
-  const workspace = await mkdtemp(path.join(originalWorkspace, "οrchestrator", ".tmp-github-"));
+  const workspace = await mkdtemp(path.join(originalWorkspace, "orchestrator", ".tmp-github-"));
   try {
     paths.secretsDir = secrets;
     paths.workspaceRoot = workspace;

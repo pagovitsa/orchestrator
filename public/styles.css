@@ -555,6 +555,20 @@ input {
   margin: 2px 4px;
 }
 
+.project-context-header {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.project-context-item[role="menuitemradio"][aria-checked="true"] {
+  background: var(--bg);
+  color: var(--accent);
+}
+
 @keyframes orch-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -1189,7 +1203,64 @@ input {
 .settings-menu-status[data-state="ok"] { color: #22c55e; }
 .settings-menu-status[data-state="warn"] { color: var(--danger); }
 
+.settings-menu-danger {
+  color: var(--danger);
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 10px !important;
+}
+
 .github-modal { width: min(560px, calc(100vw - 28px)); }
+.github-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+/* ------------ model connect single-panel ------------ */
+.model-connect-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.model-connect-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-3);
+  font-size: 13px;
+}
+
+.model-connect-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--soft);
+  box-shadow: 0 0 0 3px rgba(216, 168, 78, 0.13);
+}
+
+.model-connect-dot[data-state="ok"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 169, 154, 0.15);
+}
+
+.model-connect-dot[data-state="off"] {
+  background: var(--muted);
+  box-shadow: 0 0 0 3px rgba(170, 179, 173, 0.12);
+}
+
+.model-connect-detail {
+  color: var(--muted);
+}
+
+.model-connect-body {
+  display: grid;
+  gap: 10px;
+}
 
 /* ------------ shared wizard primitives ------------ */
 .wizard { display: grid; gap: 14px; padding: 18px; }
@@ -1379,6 +1450,15 @@ input {
 .tailscale-state.error .tailscale-state-dot {
   background: var(--danger);
   box-shadow: 0 0 0 3px rgba(228, 93, 82, 0.14);
+}
+
+.tailscale-auth-url {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--soft);
+  border-radius: 8px;
+  background: rgba(216, 168, 78, 0.08);
 }
 
 .modal-actions {
@@ -1678,35 +1758,47 @@ textarea:disabled {
 
 @media (max-width: 760px) {
   body {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    /* Sidebar is a vertical strip on the LEFT in mobile, not a banner on top. The strip is wide
+       enough to hold the icon buttons; it widens when expanded to reveal sessions. */
+    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-rows: 1fr;
   }
 
   .sidebar {
     position: sticky;
     top: 0;
+    left: 0;
     z-index: 30;
     gap: 10px;
-    width: 100%;
-    max-width: none;
-    min-height: auto;
-    max-height: 62px;
+    width: 64px;
+    max-width: 64px;
+    min-width: 0;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
     overflow: hidden;
-    padding: 12px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    transition: max-height 180ms ease;
+    padding: 12px 8px;
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+    transition: width 180ms ease, max-width 180ms ease;
   }
 
   .sidebar.is-expanded {
-    max-height: min(58vh, 440px);
+    width: min(80vw, 280px);
+    max-width: min(80vw, 280px);
     overflow: auto;
   }
 
-  .brand,
-  .brand-actions {
+  /* The icon buttons stack vertically; the toggle stays at the top of the column so the user can
+     always find it on the left edge of the screen. */
+  .brand {
     width: 100%;
-    justify-content: flex-start;
+  }
+  .brand-actions {
+    flex-direction: column;
+    width: 100%;
+    align-items: center;
+    gap: 6px;
   }
 
   .sidebar-toggle {
@@ -1719,16 +1811,18 @@ textarea:disabled {
   }
 
   .sessions {
-    max-height: min(36vh, 280px);
+    max-height: none;
   }
 
   .sidebar-status {
-    margin-top: 0;
+    margin-top: auto;
     justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .main {
-    height: auto;
+    height: 100vh;
+    height: 100dvh;
     min-height: 0;
   }
 

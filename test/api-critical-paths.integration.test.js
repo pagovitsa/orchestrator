@@ -194,26 +194,40 @@ test("tailscale setup API saves redacted Docker-sidecar state", async () => {
       assert.equal(initial.status, 200);
       assert.equal(initial.body.tailscale.configured, false);
 
-      const saved = await jsonRequest("POST", baseUrl + "/api/tailscale", {
-        authKey: "tskey-auth-test-secret",
-        hostname: "orch-ui",
-        httpsHost: "orch-ui.example.ts.net",
-      });
+      // Browser-auth path: POST takes no key. Backend writes a hostname-only setup.env, drops a
+      // logout-pending sentinel so the sidecar wipes any old identity, and returns the status.
+      // configured stays false until the sidecar actually registers (state=ready + fqdn).
+      const saved = await jsonRequest("POST", baseUrl + "/api/tailscale", {});
       assert.equal(saved.status, 200);
-      assert.equal(saved.body.tailscale.configured, true);
-      assert.equal(saved.body.tailscale.authKeyConfigured, true);
-      assert.equal(saved.body.tailscale.httpsHost, "https://orch-ui.example.ts.net");
+      assert.equal(saved.body.tailscale.authKeyConfigured, false);
+      assert.equal(saved.body.tailscale.configured, false);
+      assert.equal(saved.body.tailscale.hostname, "orch-ui");
+      assert.equal(saved.body.tailscale.httpsHost, "");
       assert.equal(Object.hasOwn(saved.body.tailscale, "authKey"), false);
 
-      const setupJson = await readFile(path.join(dataDir, "tailscale", "setup.json"), "utf8");
-      assert.equal(setupJson.includes("tskey-auth-test-secret"), false);
       const setupEnv = await readFile(path.join(dataDir, "tailscale", "setup.env"), "utf8");
-      assert.match(setupEnv, /ORCH_TAILSCALE_AUTHKEY='tskey-auth-test-secret'/);
-      assert.match(setupEnv, /ORCH_TAILSCALE_HTTPS_HOST='https:\/\/orch-ui\.example\.ts\.net'/);
+      assert.match(setupEnv, /ORCH_TAILSCALE_HOSTNAME='orch-ui'/);
+      assert.equal(/ORCH_TAILSCALE_AUTHKEY/.test(setupEnv), false);
+      assert.equal(/ORCH_TAILSCALE_HTTPS_HOST/.test(setupEnv), false);
 
+      // Logout sentinel must have been written so the sidecar's polling loop will wipe its
+      // persisted identity on the next tick.
+      const sentinel = await readFile(path.join(dataDir, "tailscale", "logout-pending"), "utf8");
+      assert.ok(sentinel.length > 0, "logout-pending sentinel should be present");
+
+      // Simulate the sidecar writing the live FQDN into status.json after registration; the GET
+      // endpoint should reflect it as the active httpsHost and flip configured to true.
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(
+        path.join(dataDir, "tailscale", "status.json"),
+        JSON.stringify({ state: "ready", detail: "ok", fqdn: "orch-ui.example.ts.net", updatedAt: new Date().toISOString() }),
+      );
       const after = await jsonRequest("GET", baseUrl + "/api/tailscale");
       assert.equal(after.body.tailscale.configured, true);
+      assert.equal(after.body.tailscale.httpsHost, "https://orch-ui.example.ts.net");
+      assert.equal(after.body.tailscale.fqdn, "orch-ui.example.ts.net");
       assert.equal(Object.hasOwn(after.body.tailscale, "authKey"), false);
+
       console.log(JSON.stringify({ ok: true }));
     } finally {
       if (server) await new Promise((done) => server.close(done));

@@ -49,11 +49,6 @@ server.listen(runtime.port, runtime.listenHost, () => {
   console.log(`orch-ui listening on ${runtime.listenHost}:${runtime.port}`);
   console.log(`workspace: ${paths.workspaceRoot}`);
   console.log(`default supervisor: ${runtime.defaultSupervisor}`);
+  console.log("[orch-ui] HTTP basic auth is disabled by design; rely on Tailscale ACL or loopback to authenticate clients (see README).");
   startUsagePolling();
-  if (!runtime.authPassword) {
-    console.warn(
-      "[orch-ui] WARNING: no ORCH_AUTH_PASSWORD set. The server has no login; only expose it on " +
-      "loopback (ORCH_BIND_HOST=127.0.0.1). Set ORCH_AUTH_PASSWORD before binding to a public interface.",
-    );
-  }
 });
