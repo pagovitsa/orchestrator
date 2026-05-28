@@ -2783,8 +2783,8 @@ async function saveTailscaleFromUi() {
   el.tailscaleStatus.textContent = "Restarting Tailscale sidecar. A browser tab will open to authorize this device.";
   try {
     // No key in the body: server writes a hostname-only setup.env, drops a logout-pending
-    // sentinel so the sidecar wipes its persisted identity, and the new containerboot will run
-    // `tailscale up` without --auth-key, which emits an AuthURL the wizard auto-opens.
+    // sentinel so the sidecar wipes its persisted identity, and then runs `tailscale up` without
+    // --auth-key, which emits an AuthURL the wizard auto-opens.
     const body = await api("/api/tailscale", {
       method: "POST",
       body: JSON.stringify({}),

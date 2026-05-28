@@ -144,9 +144,9 @@ Preview HTTPS URLs include the preview port:
 https://orch-ui.<your-tailnet>.ts.net:5173/
 ```
 
-The sidecar watches `/data/tailscale/setup.env`: when you save a new key in the UI it
-restarts `containerboot` in place, so you do **not** need to `docker compose restart` after
-changing the key. The status file at `/data/tailscale/status.json` carries the live FQDN that
+The sidecar watches `/data/tailscale/setup.env`: when you save Tailscale setup in the UI it
+restarts `tailscaled` in place, so you do **not** need to `docker compose restart` after
+changing setup. The status file at `/data/tailscale/status.json` carries the live FQDN that
 the UI reads back.
 
 ## Project Web Previews

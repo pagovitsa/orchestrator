@@ -1,12 +1,15 @@
 #!/bin/sh
 set -eu
 
-containerboot="${TS_CONTAINERBOOT:-/usr/local/bin/containerboot}"
 state_dir="${TS_STATE_DIR:-/var/lib/tailscale}"
 data_dir="${ORCH_TAILSCALE_DATA_DIR:-/data/tailscale}"
 config_env="${ORCH_TAILSCALE_CONFIG_ENV:-$data_dir/setup.env}"
 status_file="${ORCH_TAILSCALE_STATUS_FILE:-$data_dir/status.json}"
 logout_sentinel="$data_dir/logout-pending"
+socket_path="${TS_SOCKET:-/tmp/tailscaled.sock}"
+tailscaled_bin="${TS_TAILSCALED_BIN:-tailscaled}"
+tailscale_bin="${TS_TAILSCALE_BIN:-tailscale}"
+tailscale_tun="${TS_TUN:-userspace-networking}"
 ui_port="${ORCH_TAILSCALE_UI_PORT:-8787}"
 ui_https_port="${ORCH_TAILSCALE_UI_HTTPS_PORT:-443}"
 preview_ports="${ORCH_TAILSCALE_PREVIEW_PORTS:-3000-3020,5173-5190,8000-8020,8080-8090}"
@@ -43,7 +46,7 @@ write_status() {
 }
 
 # Returns the file mtime in seconds since epoch, or 0 if missing. Used to detect when the UI saves
-# a new auth key so we can restart containerboot in place.
+# new setup so we can restart tailscaled in place.
 config_mtime() {
   if [ -f "$config_env" ]; then
     stat -c %Y "$config_env" 2>/dev/null || stat -f %m "$config_env" 2>/dev/null || echo 0
@@ -90,6 +93,24 @@ emit_ports() {
 
 state_exists() {
   [ -s "$state_dir/tailscaled.state" ] || [ -s "$state_dir/tailscaled.state.tmp" ]
+}
+
+tailscale_cmd() {
+  "$tailscale_bin" --socket="$socket_path" "$@"
+}
+
+wipe_tailscale_state() {
+  log "wiping tailscaled state"
+  rm -rf "$state_dir"/* "$state_dir"/.[!.]* 2>/dev/null || true
+}
+
+consume_pending_logout_before_start() {
+  if [ -f "$logout_sentinel" ]; then
+    log "logout-pending sentinel found before start; wiping old Tailscale state"
+    write_status "restarting" "wiping old Tailscale state"
+    wipe_tailscale_state
+    rm -f "$logout_sentinel" 2>/dev/null || true
+  fi
 }
 
 load_saved_config() {
@@ -148,7 +169,7 @@ wait_for_saved_config() {
 # Running even after the control plane has deleted its node (404: node not found), but Self.Online
 # flips to false. Reading both lets the polling loop see that and surface "needs re-register".
 probe_tailscale_status() {
-  status_json="$(tailscale status --json 2>/dev/null || true)"
+  status_json="$(tailscale_cmd status --json 2>/dev/null || true)"
   if [ -z "$status_json" ]; then
     printf '\n\n\n\n'
     return 0
@@ -174,12 +195,12 @@ serve_https() {
   https_port="$1"
   target_port="$2"
   log "serve https port $https_port -> 127.0.0.1:$target_port"
-  tailscale serve --bg --yes --https="$https_port" "http://127.0.0.1:$target_port"
+  tailscale_cmd serve --bg --yes --https="$https_port" "http://127.0.0.1:$target_port"
 }
 
 configure_serve() {
   if [ "$serve_reset" != "0" ]; then
-    tailscale serve reset >/dev/null 2>&1 || true
+    tailscale_cmd serve reset >/dev/null 2>&1 || true
   fi
 
   serve_https "$ui_https_port" "$ui_port"
@@ -192,10 +213,58 @@ configure_serve() {
     serve_https "$port" "$port"
   done
 
-  tailscale serve status || true
+  tailscale_cmd serve status || true
 }
 
-# One run of the sidecar lifecycle: load config, boot tailscaled, configure Serve, watch for env
+wait_for_tailscaled_socket() {
+  elapsed=0
+  while [ "$elapsed" -lt "$wait_seconds" ]; do
+    if [ -S "$socket_path" ]; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+start_tailscaled() {
+  rm -f "$socket_path" 2>/dev/null || true
+  "$tailscaled_bin" --socket="$socket_path" --statedir="$state_dir" --tun="$tailscale_tun" &
+  daemon_pid="$!"
+  if ! wait_for_tailscaled_socket; then
+    write_status "error" "tailscaled socket did not become ready"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+start_tailscale_up() {
+  hostname="${TS_HOSTNAME:-orch-ui}"
+  if [ -n "${TS_AUTHKEY:-}" ]; then
+    # TS_EXTRA_ARGS is intentionally split into shell words so advanced deployments can pass
+    # multiple Tailscale flags through docker-compose.yml.
+    tailscale_cmd up --auth-key="$TS_AUTHKEY" --hostname="$hostname" ${TS_EXTRA_ARGS:-} &
+  else
+    tailscale_cmd up --hostname="$hostname" ${TS_EXTRA_ARGS:-} &
+  fi
+  up_pid="$!"
+}
+
+stop_tailscale_processes() {
+  if [ -n "${up_pid:-}" ]; then
+    kill "$up_pid" 2>/dev/null || true
+    wait "$up_pid" 2>/dev/null || true
+  fi
+  if [ -n "${daemon_pid:-}" ]; then
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+  fi
+}
+
+# One run of the sidecar lifecycle: load config, start tailscaled, configure Serve, watch for env
 # file changes, exit when the watcher sees a new mtime so the outer loop can re-run with the new
 # auth key / hostname.
 run_once() {
@@ -207,19 +276,32 @@ run_once() {
     fi
   fi
 
-  if [ ! -x "$containerboot" ]; then
-    log "cannot find executable containerboot at $containerboot" >&2
-    write_status "error" "containerboot is missing"
+  consume_pending_logout_before_start
+
+  if ! command -v "$tailscaled_bin" >/dev/null 2>&1; then
+    log "cannot find tailscaled executable: $tailscaled_bin" >&2
+    write_status "error" "tailscaled is missing"
+    return 127
+  fi
+  if ! command -v "$tailscale_bin" >/dev/null 2>&1; then
+    log "cannot find tailscale executable: $tailscale_bin" >&2
+    write_status "error" "tailscale CLI is missing"
     return 127
   fi
 
   start_mtime="$(config_mtime)"
 
   write_status "starting" "starting Tailscale"
-  "$containerboot" &
-  boot_pid="$!"
-  # Make sure SIGTERM from outside kills both our watcher children and containerboot.
-  trap 'kill "$boot_pid" 2>/dev/null || true; wait "$boot_pid" 2>/dev/null || true; exit 0' INT TERM
+  daemon_pid=""
+  up_pid=""
+  up_done=0
+  up_rc=0
+  if ! start_tailscaled; then
+    return 1
+  fi
+  start_tailscale_up
+  # Make sure SIGTERM from outside kills both watcher children and tailscaled.
+  trap 'stop_tailscale_processes; exit 0' INT TERM
 
   fqdn=""
   backend=""
@@ -235,7 +317,19 @@ run_once() {
   #   - setup.env mtime changes → restart (returns 75 so the outer loop reloads config)
   #   - BackendState=Running + FQDN known → configure Serve once, then keep heartbeating "ready"
   #   - BackendState=NeedsLogin → publish the AuthURL so the UI can show / open it
-  while kill -0 "$boot_pid" 2>/dev/null; do
+  while kill -0 "$daemon_pid" 2>/dev/null; do
+    if [ "$up_done" = "0" ] && ! kill -0 "$up_pid" 2>/dev/null; then
+      if wait "$up_pid"; then
+        up_rc=0
+      else
+        up_rc=$?
+      fi
+      up_done=1
+      if [ "$up_rc" != "0" ]; then
+        log "tailscale up exited with status $up_rc"
+      fi
+    fi
+
     # logout-pending sentinel: orch-ui dropped this when the user clicked "Re-register" in the
     # wizard or "Sign out everything" in settings. Run `tailscale logout` so the node is removed
     # from the tailnet, wipe the persisted state so the next start can't reuse a stale identity,
@@ -243,11 +337,9 @@ run_once() {
     if [ -f "$logout_sentinel" ]; then
       log "logout-pending sentinel found; calling tailscale logout"
       write_status "restarting" "logging out and wiping Tailscale state"
-      tailscale logout >/dev/null 2>&1 || true
-      kill -TERM "$boot_pid" 2>/dev/null || true
-      wait "$boot_pid" 2>/dev/null || true
-      log "wiping tailscaled state"
-      rm -rf "$state_dir"/* "$state_dir"/.[!.]* 2>/dev/null || true
+      tailscale_cmd logout >/dev/null 2>&1 || true
+      stop_tailscale_processes
+      wipe_tailscale_state
       rm -f "$logout_sentinel" 2>/dev/null || true
       return 75
     fi
@@ -256,13 +348,11 @@ run_once() {
     if [ "$current_mtime" != "$start_mtime" ] && [ "$current_mtime" != "0" ]; then
       log "setup.env changed (mtime $start_mtime -> $current_mtime); restarting tailscaled"
       write_status "restarting" "applying new Tailscale setup"
-      kill -TERM "$boot_pid" 2>/dev/null || true
-      wait "$boot_pid" 2>/dev/null || true
+      stop_tailscale_processes
       # A new key (or browser-auth restart) means the user wants a fresh registration. Drop any
-      # persisted tailscaled state so the next containerboot can't fall back to a stale node
+      # persisted tailscaled state so the next start can't fall back to a stale node
       # identity that's been deleted from the tailnet (which would leave us stuck in NeedsLogin).
-      log "wiping tailscaled state for clean re-registration"
-      rm -rf "$state_dir"/* "$state_dir"/.[!.]* 2>/dev/null || true
+      wipe_tailscale_state
       return 75  # EX_TEMPFAIL — outer loop treats this as "go again"
     fi
 
@@ -311,13 +401,17 @@ run_once() {
         # tailscaled not responding yet — keep the previous status.
         ;;
       *)
-        write_status "starting" "Tailscale backend: $backend" "$fqdn" "$auth_url" "$backend"
+        if [ "$up_done" = "1" ] && [ "$up_rc" != "0" ]; then
+          write_status "error" "tailscale up exited with status $up_rc" "$fqdn" "$auth_url" "$backend"
+        else
+          write_status "starting" "Tailscale backend: $backend" "$fqdn" "$auth_url" "$backend"
+        fi
         ;;
     esac
     sleep 2
   done
 
-  wait "$boot_pid" 2>/dev/null || true
+  stop_tailscale_processes
   return 0
 }
 

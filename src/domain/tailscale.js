@@ -122,9 +122,9 @@ export async function tailscaleStatus() {
 }
 
 // Triggers a fresh tailscaled registration via browser auth. No key is required from the user; the
-// sidecar starts containerboot with no TS_AUTHKEY, which makes `tailscale up` emit an AuthURL that
-// the wizard catches and opens in a browser tab. We always drop a logout-pending sentinel first so
-// any pre-existing tailnet identity in /var/lib/tailscale is logged out and wiped before re-auth —
+// sidecar starts tailscaled and runs `tailscale up` without TS_AUTHKEY, which emits an AuthURL that
+// the wizard catches and opens in a browser tab. We drop a logout-pending sentinel first so any
+// pre-existing tailnet identity in /var/lib/tailscale is logged out and wiped before re-auth —
 // otherwise tailscaled would happily reuse a stale identity that's been deleted from the tailnet
 // and silently fail (BackendState=Running but 404 on every PollNetMap).
 export async function saveTailscaleSetup() {
