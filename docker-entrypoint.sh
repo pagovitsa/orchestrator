@@ -7,6 +7,12 @@ export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" /data/sessions /data/orch-mcp /data/secrets
 chown -R node:node "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" /data/sessions /data/orch-mcp /data/secrets
 
+# Docker creates missing host bind-mount sources as root, so the workspace root often arrives
+# unwritable for the node user. Ensure it exists and is owned by node so project creation works.
+workspace_root="${ORCH_WORKSPACE_ROOT:-/workspace}"
+mkdir -p "$workspace_root"
+chown node:node "$workspace_root"
+
 env_enabled() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;

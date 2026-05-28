@@ -51,7 +51,7 @@ ARG SERENA_SPEC=serena-agent
 RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
     uv tool install --python 3.12 ${SERENA_SPEC}
 
-RUN mkdir -p /workspace /workspace/οrchestrator /data /app \
+RUN mkdir -p /workspace /data /app \
   && chown -R node:node /workspace /data /app
 
 WORKDIR /app
