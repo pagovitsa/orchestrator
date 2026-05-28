@@ -146,20 +146,50 @@ async function lockIsStale(lockPath) {
 // both think they own it. We gate the rm+recreate behind a separate `.steal` lock that itself
 // uses `wx` for atomicity, encodes the holder PID, and is also stale-recoverable so a crashed
 // stealer cannot permanently wedge writers.
-// Atomic stale-file claim. `rename(src, uniqueDst)` on a freshly-created `uniqueDst` will only
-// succeed once per `src` — Node maps this to the POSIX rename, which atomically unlinks `src`
-// and creates the target. A second concurrent claimer sees ENOENT. We then `rm` the unique
-// per-claimer trash path so a delayed clean-up cannot ever delete another process's fresh file.
-async function claimStaleByRename(filePath) {
+// Stale-file claim with content verification. `rename(src, uniqueDst)` is atomic on POSIX, but
+// it is not "compare-and-claim by identity": if another process recreated `src` between our
+// stale-check and our rename, we would claim their fresh file. We mitigate by reading the
+// claimed file back: if it still names the dead PID we expected, the claim is valid; otherwise
+// we attempt to restore the file and back out.
+//
+// A residual narrow race remains (rare conjunction: two recoverers, exact timing of fresh
+// recreate, restore-rename loses to a new EEXIST). The bounded consequence is a single lost
+// memory update — the underlying writeStore is itself atomic (temp+rename), so memory.json
+// cannot be corrupted, only stale. Acceptable for the user-facts use case. A bulletproof fix
+// requires an advisory inter-process lock primitive (flock / proper-lockfile), out of scope here.
+async function claimStaleByRename(filePath, expectedPid) {
   const trashPath = `${filePath}.trash.${process.pid}.${randomBytes(8).toString("hex")}`;
   try {
     await rename(filePath, trashPath);
   } catch (error) {
-    if (error.code === "ENOENT") return false; // someone else won
+    if (error.code === "ENOENT") return false; // someone else won the race
     throw error;
+  }
+  try {
+    const observed = (await readFile(trashPath, "utf8")).trim();
+    if (expectedPid !== undefined && observed !== String(expectedPid)) {
+      // We grabbed a fresh holder's file. Best-effort restore — if their slot is taken again
+      // (EEXIST), the trash is harmless; clean up and report the claim as failed.
+      try {
+        await rename(trashPath, filePath);
+      } catch {
+        await rm(trashPath, { force: true }).catch(() => {});
+      }
+      return false;
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
   }
   await rm(trashPath, { force: true }).catch(() => {});
   return true;
+}
+
+async function stalePidOf(filePath) {
+  try {
+    return Number.parseInt((await readFile(filePath, "utf8")).trim(), 10);
+  } catch {
+    return Number.NaN;
+  }
 }
 
 async function takeoverStaleLock(lockPath) {
@@ -173,14 +203,16 @@ async function takeoverStaleLock(lockPath) {
     // writer. Atomically claim it via rename so a delayed cleanup cannot clobber a fresh
     // .steal created by another process between our check and our remove.
     if (await lockIsStale(stealPath)) {
-      await claimStaleByRename(stealPath);
+      const stalePid = await stalePidOf(stealPath);
+      if (Number.isFinite(stalePid)) await claimStaleByRename(stealPath, stalePid);
     }
     return false; // caller retries — backoff handled by the outer acquire loop
   }
   try {
     await stealHandle.writeFile(String(process.pid), "utf8");
     if (await lockIsStale(lockPath)) {
-      await claimStaleByRename(lockPath);
+      const stalePid = await stalePidOf(lockPath);
+      if (Number.isFinite(stalePid)) await claimStaleByRename(lockPath, stalePid);
     }
   } finally {
     await stealHandle.close().catch(() => {});
