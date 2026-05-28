@@ -259,6 +259,24 @@ GOOGLE_API_KEY=
 
 OAuth/browser sessions and API-key billing are separate. Use keys only when you intentionally want API-based auth.
 
+## Docker From Supervisors
+
+The image includes the Docker CLI and Docker Compose plugin. Compose mounts the host Docker socket into `orch-ui`, and the entrypoint adds the `node` user to the socket group at startup, so Claude, Codex, and Gemini supervisor runs can execute commands such as:
+
+```bash
+docker ps
+docker compose up -d --build
+```
+
+The default socket settings are:
+
+```env
+ORCH_DOCKER_SOCKET=/var/run/docker.sock
+ORCH_DOCKER_HOST=unix:///var/run/docker.sock
+```
+
+Mounting the Docker socket gives supervisors host-level Docker control. Keep the UI on loopback or Tailscale and only enable write-capable supervisors for projects you trust.
+
 ## Important Environment Variables
 
 The full current reference is `.env.example`. The compose file passes the app-facing keys through to `orch-ui`; `UID`, `GID`, and host path substitutions are compose/build-time controls.
@@ -275,6 +293,7 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 | `ORCH_TIMEOUT_MS` | Per-run timeout. `0` disables automatic timeout. |
 | `ORCH_AUTO_UPDATE_CLIS` | Refreshes CLI packages on boot when `1`. |
 | `ORCH_CLI_PACKAGE_SPECS` | CLI package specs, useful for pinning versions. |
+| `ORCH_DOCKER_SOCKET`, `ORCH_DOCKER_HOST` | Host Docker socket and in-container Docker client endpoint for supervisors. |
 | `ORCH_ENABLED_TOOLS` | Shared MCP tool set. |
 | `ORCH_UPLOAD_MAX_BYTES` | Total upload size per message. |
 | `ORCH_UPLOAD_INLINE_CHARS` | Text attachment preview budget injected into prompts. |

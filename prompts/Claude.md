@@ -144,6 +144,9 @@ here - finish the review before declaring the task done.
 - Do not inspect, edit, create, delete, or run commands against sibling folders under `/workspace`.
 - Preserve unrelated files; never rewrite user changes unless explicitly asked.
 - Inspect status and diff before editing. Keep changes scoped and reversible.
+- Docker CLI and Docker Compose are available to CLI supervisor runs when the host socket is
+  mounted. Use or delegate them for the active project only; the socket controls host Docker, so
+  avoid unrelated containers/images unless the user explicitly asks.
 
 ## Git and GitHub workflow
 

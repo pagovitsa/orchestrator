@@ -285,17 +285,43 @@ test("autopilot API blocks concurrent decisions, supports stop, and restarts", a
         headers: { "content-type": "application/json" },
       });
 
+      const continued = await postJson(autopilotUrl);
+      const afterContinue = await loadSession(session.id);
+      assert.equal(continued.status, 200);
+      assert.equal(continued.body.decision.action, "message");
+      assert.equal(continued.body.session.autopilotEnabled, true);
+      assert.equal(continued.body.session.autopilotState.state, "completed");
+      assert.equal(afterContinue.autopilotEnabled, true);
+      assert.equal(afterContinue.autopilotState.state, "completed");
+      assert.equal(afterContinue.autopilotHistory.length, 1);
+      assert.equal(afterContinue.autopilotFeed.length, 1);
+
+      let errorFetchCalled = false;
+      globalThis.fetch = async () => {
+        errorFetchCalled = true;
+        throw new Error("fetch should not be called for app-error stops");
+      };
+      afterContinue.messages.push({
+        role: "assistant",
+        supervisor: "deepseek",
+        content: "Error: model crashed",
+        error: true,
+        at: "2026-01-01T00:01:00.000Z",
+      });
+      await saveSession(afterContinue);
+
       const stopped = await postJson(autopilotUrl);
-      const afterRestart = await loadSession(session.id);
+      const afterError = await loadSession(session.id);
       assert.equal(stopped.status, 200);
+      assert.equal(errorFetchCalled, false);
       assert.equal(stopped.body.decision.action, "stop");
       assert.equal(stopped.body.session.autopilotEnabled, false);
       assert.equal(stopped.body.session.autopilotState.state, "stopped");
-      assert.equal(afterRestart.autopilotEnabled, false);
-      assert.equal(afterRestart.autopilotState.state, "stopped");
-      assert.equal(afterRestart.autopilotState.reason, "Human approval required");
-      assert.equal(afterRestart.autopilotHistory.length, 1);
-      assert.equal(afterRestart.autopilotFeed.length, 1);
+      assert.equal(afterError.autopilotEnabled, false);
+      assert.equal(afterError.autopilotState.state, "stopped");
+      assert.equal(afterError.autopilotState.reason, "Last assistant message is an error or stopped run");
+      assert.equal(afterError.autopilotHistory.length, 2);
+      assert.equal(afterError.autopilotFeed.length, 2);
       console.log(JSON.stringify({ ok: true }));
     } finally {
       globalThis.fetch = originalFetch;

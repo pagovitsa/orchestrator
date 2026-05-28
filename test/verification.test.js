@@ -52,12 +52,28 @@ test("recent public config options stay documented", async () => {
     "ORCH_USAGE_POLL_INTERVAL_MS",
     "ORCH_UPLOAD_INLINE_CHARS",
     "ORCH_UPLOAD_MAX_BYTES",
+    "ORCH_DOCKER_SOCKET",
+    "ORCH_DOCKER_HOST",
   ];
 
   for (const option of publicOptions) {
     assert.match(readme, new RegExp(`\\b${option}\\b`), `${option} missing from README.md`);
     assert.match(envExample, new RegExp(`\\b${option}\\b`), `${option} missing from .env.example`);
   }
+});
+
+test("Docker supervisor access stays wired into image and compose", async () => {
+  const [dockerfile, compose, entrypoint] = await Promise.all([
+    readFile(path.resolve("Dockerfile"), "utf8"),
+    readFile(path.resolve("docker-compose.yml"), "utf8"),
+    readFile(path.resolve("docker-entrypoint.sh"), "utf8"),
+  ]);
+
+  assert.match(dockerfile, /\bdocker-ce-cli\b/);
+  assert.match(dockerfile, /\bdocker-compose-plugin\b/);
+  assert.match(compose, /DOCKER_HOST/);
+  assert.match(compose, /\/var\/run\/docker\.sock/);
+  assert.match(entrypoint, /usermod -aG "\$docker_group" node/);
 });
 
 test("autopilot decision timeout follows idle timeout unless explicitly set", async () => {

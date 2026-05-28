@@ -13,6 +13,24 @@ workspace_root="${ORCH_WORKSPACE_ROOT:-/workspace}"
 mkdir -p "$workspace_root"
 chown node:node "$workspace_root"
 
+# When the host Docker socket is mounted, match its group dynamically so the
+# non-root supervisor processes can run `docker` and `docker compose`.
+docker_sock="${ORCH_DOCKER_SOCKET:-/var/run/docker.sock}"
+if [ -S "$docker_sock" ]; then
+  docker_gid="$(stat -c '%g' "$docker_sock" 2>/dev/null || true)"
+  if [ -n "$docker_gid" ]; then
+    docker_group="$(getent group "$docker_gid" | cut -d: -f1 | head -n1 || true)"
+    if [ -z "$docker_group" ]; then
+      docker_group="docker-host"
+      groupadd -g "$docker_gid" "$docker_group" 2>/dev/null || true
+    fi
+    docker_group="$(getent group "$docker_gid" | cut -d: -f1 | head -n1 || true)"
+    if [ -n "$docker_group" ]; then
+      usermod -aG "$docker_group" node
+    fi
+  fi
+fi
+
 env_enabled() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;

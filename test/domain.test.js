@@ -1059,26 +1059,40 @@ test("decideAutopilotNext sends latest messages to DeepSeek for context", async 
   }
 });
 
-test("normalizeAutopilotDecision respects stop after completion summary", () => {
+test("normalizeAutopilotDecision converts non-error stops into next phase continuations", () => {
   const normalized = normalizeAutopilotDecision(
     { action: "stop", kind: "stop", reason: "task appears complete" },
+    {
+      lastAssistant: {
+        role: "assistant",
+        content: [
+          "Phase F is done and committed.",
+          "",
+          "Remaining useful next phases:",
+          "- `F2` - settings version-downgrade guard.",
+          "- `F3` - fsync + single-instance lock on the settings store.",
+        ].join("\n"),
+      },
+    },
   );
 
-  assert.equal(normalized.action, "stop");
-  assert.equal(normalized.kind, "stop");
-  assert.equal(normalized.reason, "task appears complete");
+  assert.equal(normalized.action, "message");
+  assert.equal(normalized.kind, "continue");
+  assert.match(normalized.content, /F2 - settings version-downgrade guard/);
+  assert.match(normalized.reason, /Continuing instead of stopping/);
 });
 
-test("normalizeAutopilotDecision keeps stop when assistant asks for approval", () => {
+test("normalizeAutopilotDecision keeps stop when the assistant turn is an app error", () => {
   const normalized = normalizeAutopilotDecision(
-    { action: "stop", kind: "stop", reason: "approval required" },
+    { action: "stop", kind: "stop", reason: "run failed" },
+    { lastAssistant: { role: "assistant", content: "Error: model crashed", error: true } },
   );
 
   assert.equal(normalized.action, "stop");
-  assert.equal(normalized.reason, "approval required");
+  assert.equal(normalized.reason, "run failed");
 });
 
-test("decideAutopilotNext respects DeepSeek stop decisions", async () => {
+test("decideAutopilotNext converts DeepSeek stop decisions into continuations", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
   runtime.deepseekApiKey = "test-deepseek-key";
@@ -1098,15 +1112,17 @@ test("decideAutopilotNext respects DeepSeek stop decisions", async () => {
       ],
     });
 
-    assert.equal(decision.action, "stop");
-    assert.equal(decision.reason, "nothing left to do");
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /choose the safest concrete next step/i);
+    assert.match(decision.reason, /nothing left to do/);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
   }
 });
 
-test("decideAutopilotNext on a fresh session stops without hitting DeepSeek and explains why", async () => {
+test("decideAutopilotNext on a fresh session starts with a safe first step without hitting DeepSeek", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
   runtime.deepseekApiKey = "test-deepseek-key";
@@ -1118,23 +1134,29 @@ test("decideAutopilotNext on a fresh session stops without hitting DeepSeek and 
   try {
     const decision = await decideAutopilotNext({ supervisor: "codex", cwd: ".", messages: [] });
     assert.equal(fetchCalled, false);
-    assert.equal(decision.action, "stop");
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
     assert.equal(/error|stopped run/i.test(decision.reason), false);
-    assert.match(decision.reason, /assistant message/i);
+    assert.match(decision.content, /Inspect the project status/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
   }
 });
 
-test("decideAutopilotNext stops locally on git push auth blockers", async () => {
+test("decideAutopilotNext keeps going on auth blockers with a local-only continuation", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
   runtime.deepseekApiKey = "test-deepseek-key";
   let fetchCalled = false;
   globalThis.fetch = async () => {
     fetchCalled = true;
-    throw new Error("fetch should not be called for local push auth blockers");
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"action":"stop","kind":"stop","reason":"manual credentials required"}' } }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -1158,10 +1180,11 @@ test("decideAutopilotNext stops locally on git push auth blockers", async () => 
       ],
     });
 
-    assert.equal(fetchCalled, false);
-    assert.equal(decision.action, "stop");
-    assert.equal(decision.kind, "stop");
-    assert.match(decision.reason, /git push authentication/i);
+    assert.equal(fetchCalled, true);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /local-only next step/i);
+    assert.match(decision.content, /avoids secrets and remote write access/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;

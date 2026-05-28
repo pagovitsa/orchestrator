@@ -47,6 +47,7 @@ services:
       ORCH_CLI_PACKAGE_SPECS: "${ORCH_CLI_PACKAGE_SPECS:-@anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest}"
       ORCH_CLI_UPDATE_TIMEOUT_SECONDS: "${ORCH_CLI_UPDATE_TIMEOUT_SECONDS:-120}"
       ORCH_NETWORK_MODE: "${ORCH_NETWORK_MODE:-bridge}"
+      DOCKER_HOST: "${ORCH_DOCKER_HOST:-unix:///var/run/docker.sock}"
       ORCH_BIND_HOST: "${ORCH_BIND_HOST:-127.0.0.1}"
       ORCH_LISTEN_HOST: "${ORCH_LISTEN_HOST:-::}"
       ORCH_UI_PORT: "${ORCH_UI_PORT:-8787}"
@@ -84,6 +85,7 @@ services:
       - gemini_auth:/home/node/.gemini
       - orch_data:/data
       - "./prompts:/app/prompts:ro"
+      - "${ORCH_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock"
     working_dir: /app
 
   tailscale:

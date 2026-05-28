@@ -11,6 +11,9 @@ Workspace:
 - Do not inspect, edit, create, delete, or run commands against sibling folders under `/workspace`.
 - Preserve unrelated files and never rewrite user changes unless explicitly asked.
 - Prefer evidence from local files and executable checks over model opinion.
+- Docker CLI and Docker Compose are available to CLI supervisor runs when the host socket is
+  mounted. Use or delegate them for the active project only; the socket controls host Docker, so
+  avoid unrelated containers/images unless the user explicitly asks.
 
 Operating rules:
 - First understand the goal and current session context.

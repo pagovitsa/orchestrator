@@ -35,18 +35,66 @@ function hasRunError(message) {
   return /^\s*(error|command failed|uncaught|traceback)\b/i.test(String(message.content || ""));
 }
 
-function hasPushAuthBlocker(message) {
-  const content = assistantContent(message);
-  if (!content) return false;
-  const hasGitPush = /\bgit push\b/i.test(content);
-  const hasPublicKeyDenied = /\bpermission denied\s*\(publickey\)/i.test(content);
-  const mentionsMissingToken = /(?:\b(no|neither)\b[\s\S]{0,80}\b(GITHUB_TOKEN|GH_TOKEN)\b)|(?:\b(GITHUB_TOKEN|GH_TOKEN)\b[\s\S]{0,80}\b(absent|missing|not present)\b)/i.test(content);
-  const asksForAuth = /\b(next unblock step|provide|install|configure|expose|set)\b[\s\S]{0,80}\b(auth|credential|credentials|token|tokens|ssh key|github push auth)\b/i.test(content);
-  return hasGitPush && (hasPublicKeyDenied || mentionsMissingToken) && asksForAuth;
-}
-
 function assistantContent(message) {
   return messageContent(message);
+}
+
+function normalizedLine(text) {
+  return String(text || "")
+    .replace(/[`\*_]/g, "")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function riskyAutopilotTask(text) {
+  return /\b(secret|credential|credentials|token|password|api key|billing|production|prod|deploy|release|force[- ]?push|history rewrite|delete backups?|drop database|destructive)\b/i
+    .test(String(text || ""));
+}
+
+function extractSuggestedNextTask(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const markerIndex = lines.findIndex((line) => (
+    /\b(remaining useful next phases?|remaining next phases?|useful next phases?|next phases?|remaining useful next steps?|next steps?|follow[- ]?ups?|todo)\b/i
+      .test(line)
+  ));
+  const start = markerIndex >= 0 ? markerIndex + 1 : 0;
+  const end = markerIndex >= 0 ? Math.min(lines.length, start + 12) : lines.length;
+
+  for (let index = start; index < end; index += 1) {
+    const trimmed = lines[index].trim();
+    const match = trimmed.match(/^[-*]\s+(.+)$/) || trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (!match) continue;
+    const candidate = normalizedLine(match[1]);
+    if (candidate && !riskyAutopilotTask(candidate)) return candidate;
+  }
+
+  return "";
+}
+
+function mentionsManualAuth(text) {
+  return /\b(auth|authenticate|login|credential|credentials|token|tokens|ssh key|api key|manual authentication)\b/i
+    .test(String(text || ""));
+}
+
+function mentionsRiskyApproval(text) {
+  return /\b(approval|confirm|permission)\b[\s\S]{0,120}\b(delete|destructive|production|prod|deploy|release|force[- ]?push|history rewrite|billing)\b/i
+    .test(String(text || ""));
+}
+
+function fallbackContinuationContent(lastAssistant) {
+  const content = assistantContent(lastAssistant);
+  if (mentionsManualAuth(content)) {
+    return "Do not wait for credentials or manual authentication. Choose the safest local-only next step that avoids secrets and remote write access, verify it, and report any remaining auth blocker separately.";
+  }
+  if (mentionsRiskyApproval(content)) {
+    return "Choose the safest reversible path that avoids destructive changes, production deployment, force-push, and history rewrites. Continue with local inspection or tests, then report the decision and result.";
+  }
+  const nextTask = extractSuggestedNextTask(content);
+  if (nextTask) {
+    return `Take the next safe remaining item: ${nextTask}. Implement it end to end, run targeted verification, and report what changed.`;
+  }
+  return "Review the latest result, choose the safest concrete next step in this project, implement it, run targeted verification, and report what changed.";
 }
 
 function extractJsonObject(text) {
@@ -89,8 +137,18 @@ export function parseAutopilotDecision(text) {
   return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
 }
 
-export function normalizeAutopilotDecision(decision) {
+export function normalizeAutopilotDecision(decision, { lastAssistant } = {}) {
   if (decision?.action === "message") return decision;
+  if (lastAssistant && !hasRunError(lastAssistant)) {
+    return {
+      action: "message",
+      kind: "continue",
+      content: fallbackContinuationContent(lastAssistant),
+      reason: decision?.reason
+        ? `Continuing instead of stopping: ${decision.reason}`
+        : "Autopilot continues unless the last assistant turn is an app or run error",
+    };
+  }
   return decision;
 }
 
@@ -102,13 +160,15 @@ function autopilotPrompt(session, lastAssistant) {
     "Rules:",
     "- First read the latest messages as the context window. Use them to form an accurate picture of the project state before deciding.",
     "- Judge the latest assistant message in that context, not in isolation.",
-    "- If the last assistant message is an app/model error, failed login, auth failure, missing credential, timeout, permission failure, blocked state, completed task, or asks for destructive/human approval, return {\"action\":\"stop\",\"reason\":\"...\"}.",
-    "- If the last assistant asks a low-risk, non-approval question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- Never answer questions that involve destructive changes, secrets, credentials, billing, deployment, production access, force-push, or history rewrites.",
+    "- Return {\"action\":\"stop\",\"reason\":\"...\"} ONLY when the last assistant message is an app/model/CLI run error or failed/stopped run that would loop if continued.",
+    "- If the last assistant says work is done but lists remaining phases, next steps, or follow-ups, choose the first safe concrete item and continue.",
+    "- If the last assistant asks the user to choose among safe options, choose the safest useful option for the project and continue.",
+    "- If the last assistant asks a low-risk question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
+    "- Never provide or invent secrets, credentials, billing decisions, production access, force-push approval, history rewrites, or destructive approval.",
+    "- If a path needs credentials, deployment, production access, or destructive approval, choose a safe local-only/reversible alternative and continue instead of stopping.",
     "- If the last assistant still leaves a clear, concrete, reversible next step, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- If that next step is for the user to provide credentials, auth tokens, SSH keys, or manual authentication, stop instead even if the assistant labels it as a next unblock step.",
     "- For continue, tell the supervisor the specific next step, require verification, and avoid generic continue-only instructions.",
-    "- Otherwise, stop.",
+    "- Otherwise, decide the safest concrete next step yourself and continue.",
     "- Keep content concise but actionable. It will be sent automatically to the active supervisor as the next user message.",
     "",
     `Project: ${session.cwd || session.project || "."}`,
@@ -266,13 +326,15 @@ export async function decideAutopilotNextWithRetry(session, {
 export async function decideAutopilotNext(session, { signal } = {}) {
   const lastAssistant = latestAssistantMessage(session);
   if (!lastAssistant) {
-    return { action: "stop", kind: "stop", reason: "No assistant message to evaluate yet" };
+    return {
+      action: "message",
+      kind: "continue",
+      content: "Inspect the project status, choose the safest concrete next step, run targeted verification, and report what changed.",
+      reason: "Autopilot starts by choosing a safe first step",
+    };
   }
   if (hasRunError(lastAssistant)) {
     return { action: "stop", kind: "stop", reason: "Last assistant message is an error or stopped run" };
-  }
-  if (hasPushAuthBlocker(lastAssistant)) {
-    return { action: "stop", kind: "stop", reason: "Assistant indicates git push authentication is blocked and needs manual credentials" };
   }
   if (!runtime.deepseekApiKey) {
     throw Object.assign(new Error("DeepSeek API key is required for Autopilot"), { status: 409 });
@@ -317,5 +379,5 @@ export async function decideAutopilotNext(session, { signal } = {}) {
     throw Object.assign(new Error(`DeepSeek autopilot returned non-JSON body: ${error.message} :: ${snippet}`), { status: 502 });
   }
   const content = parsed.choices?.[0]?.message?.content || "";
-  return parseAutopilotDecision(content);
+  return normalizeAutopilotDecision(parseAutopilotDecision(content), { lastAssistant });
 }

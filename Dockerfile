@@ -29,6 +29,17 @@ RUN apt-get update \
     tini \
   && rm -rf /var/lib/apt/lists/*
 
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+  && chmod a+r /etc/apt/keyrings/docker.asc \
+  && . /etc/os-release \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+    docker-ce-cli \
+    docker-compose-plugin \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN python3 -m pip install --no-cache-dir --break-system-packages uv
 
 RUN npm install -g \
@@ -59,7 +70,7 @@ WORKDIR /app
 COPY --chown=node:node pal-mcp-server ./pal-mcp-server
 RUN python3 -m pip install --no-cache-dir --break-system-packages -r /app/pal-mcp-server/requirements.txt
 
-COPY --chown=node:node package.json README.md .env.example ./
+COPY --chown=node:node package.json README.md .env.example Dockerfile docker-compose.yml docker-entrypoint.sh ./
 COPY --chown=node:node src ./src
 COPY --chown=node:node test ./test
 COPY --chown=node:node public ./public
