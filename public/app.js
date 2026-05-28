@@ -1,4 +1,4 @@
-import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "./client-helpers.js";
 
 const state = {
   config: null,
@@ -25,6 +25,7 @@ const state = {
   activeModelTab: "connection",
   projectMenuProject: null,
   autopilotPhases: new Map(),
+  autopilotTimers: new Set(),
   soundMuted: readBooleanPreference("orch.soundMuted", false),
   speechEnabled: readBooleanPreference("orch.speechEnabled", false),
   audioContext: null,
@@ -1590,8 +1591,11 @@ async function maybeRunAutopilot(session) {
 }
 
 function scheduleAutopilot(session) {
-  if (!session?.id || !projectAutopilotEnabled(session)) return;
+  if (!session?.id || !projectAutopilotEnabled(session) || !autopilotNeedsDecision(session)) return;
+  if (state.autopilotTimers.has(session.id)) return;
+  state.autopilotTimers.add(session.id);
   setTimeout(() => {
+    state.autopilotTimers.delete(session.id);
     maybeRunAutopilot(session);
   }, 450);
 }
@@ -2456,6 +2460,7 @@ async function loadSession(id) {
   syncComposerState();
   setWorkspaceStatus();
   collapseResponsiveSidebar();
+  scheduleAutopilot(state.currentSession);
 }
 
 async function createSession({ supervisor, cwd }) {
@@ -3007,6 +3012,7 @@ function finishLiveRun(event) {
   }
   refreshSessions().catch((error) => setStatus(`Session refresh error: ${error.message}`));
   refreshUsage().catch((error) => setStatus(`Usage refresh error: ${error.message}`));
+  if (event.type === "done") scheduleAutopilot(session);
 }
 
 function handleLiveAutopilot(event) {

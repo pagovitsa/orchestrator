@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
+import { appendMessageError, applyTerminalFlags, autopilotFeedEntryLabel, autopilotNeedsDecision, autopilotStateLabel, createSessionSendGate, messageClassNames, messageStateLabel, normalizeAutopilotFeed, readAttachments, streamApi } from "../public/client-helpers.js";
 
 test("readAttachments rejects oversized batches before reading files", async () => {
   let readCount = 0;
@@ -161,6 +161,35 @@ test("autopilot feed helpers keep sidebar labels compact", () => {
   assert.equal(normalizeAutopilotFeed(feed, { limit: 0 }).length, 0);
   assert.equal(normalizeAutopilotFeed(feed, { limit: 99 }).length, 2);
   assert.deepEqual(normalizeAutopilotFeed(null), []);
+});
+
+test("autopilotNeedsDecision detects missed ready assistant turns", () => {
+  const session = {
+    autopilotEnabled: true,
+    autopilotState: { state: "created" },
+    messages: [
+      { role: "user", at: "2026-05-27T10:00:00.000Z", content: "go" },
+      { role: "assistant", at: "2026-05-27T10:05:00.000Z", content: "done" },
+    ],
+    autopilotHistory: [],
+  };
+
+  assert.equal(autopilotNeedsDecision(session), true);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    autopilotHistory: [{ at: "2026-05-27T10:06:00.000Z", action: "message" }],
+  }), false);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    autopilotHistory: [{ at: "2026-05-27T10:06:00.000Z", action: "stop" }],
+  }), false);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    autopilotHistory: [{ at: "2026-05-27T10:04:00.000Z", action: "stop" }],
+  }), true);
+  assert.equal(autopilotNeedsDecision({ ...session, messages: [...session.messages, { role: "user", at: "2026-05-27T10:07:00.000Z" }] }), false);
+  assert.equal(autopilotNeedsDecision({ ...session, autopilotState: { state: "running" } }), false);
+  assert.equal(autopilotNeedsDecision({ ...session, messages: [{ ...session.messages.at(-1), streaming: true }] }), false);
 });
 
 test("createSessionSendGate blocks duplicate sends until released", () => {

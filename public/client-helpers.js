@@ -74,6 +74,27 @@ export function autopilotStateLabel(autopilotState = {}, enabled = false) {
   return enabled ? "ready" : "paused";
 }
 
+export function autopilotNeedsDecision(session) {
+  if (!session?.autopilotEnabled || !Array.isArray(session.messages)) return false;
+  const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
+  if (!["created", "completed"].includes(workflowState)) return false;
+  const lastMessage = session.messages.at(-1);
+  if (lastMessage?.role !== "assistant" || lastMessage.streaming || lastMessage.error || lastMessage.stopped) return false;
+  const lastAssistantAt = Date.parse(lastMessage.at || "");
+  const lastHistory = Array.isArray(session.autopilotHistory) ? session.autopilotHistory.at(-1) : null;
+  const lastHistoryAt = Date.parse(lastHistory?.at || "");
+  if (
+    String(lastHistory?.action || "").toLowerCase() === "stop"
+    && Number.isFinite(lastHistoryAt)
+    && (!Number.isFinite(lastAssistantAt) || lastHistoryAt >= lastAssistantAt)
+  ) return false;
+  const decisionTimes = Array.isArray(session.autopilotHistory)
+    ? session.autopilotHistory.map((entry) => Date.parse(entry?.at || "")).filter(Number.isFinite)
+    : [];
+  const lastDecisionAt = decisionTimes.length ? Math.max(...decisionTimes) : 0;
+  return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;
+}
+
 export function normalizeAutopilotFeed(feed = [], { limit = 2 } = {}) {
   const max = Math.max(0, Math.min(10, Math.round(Number(limit) || 0)));
   if (!Array.isArray(feed) || max <= 0) return [];

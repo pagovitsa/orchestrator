@@ -871,6 +871,13 @@ test("parseAutopilotDecision stops on explicit stop decisions", () => {
   assert.equal(parsed.reason, "auth failed");
 });
 
+test("parseAutopilotDecision stops on empty message decisions", () => {
+  const parsed = parseAutopilotDecision('{"action":"continue","content":"","reason":"no text"}');
+
+  assert.equal(parsed.action, "stop");
+  assert.equal(parsed.reason, "no text");
+});
+
 test("decideAutopilotNext sends latest messages to DeepSeek for context", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
@@ -911,45 +918,157 @@ test("decideAutopilotNext sends latest messages to DeepSeek for context", async 
   }
 });
 
-test("normalizeAutopilotDecision forces continue after non-blocking completion summary", () => {
-  const lastAssistant = {
-    role: "assistant",
-    content: [
-      "Changed:       ολοκληρώθηκαν και έγιναν commit:",
-      "- `3f9c78e Add client UI safety plumbing` για iter18-27.",
-      "",
-      "Verification:  passed:",
-      "- `NODE_ENV=development corepack pnpm@9.12.0 -r typecheck`",
-      "- `NODE_ENV=development corepack pnpm@9.12.0 -r test`",
-      "",
-      "Risks / notes: Electron runtime smoke παραμένει blocked από το container Electron binary issue.",
-    ].join("\n"),
-  };
-
+test("normalizeAutopilotDecision respects stop after completion summary", () => {
   const normalized = normalizeAutopilotDecision(
     { action: "stop", kind: "stop", reason: "task appears complete" },
-    lastAssistant,
   );
 
-  assert.equal(normalized.action, "message");
-  assert.equal(normalized.kind, "continue");
-  assert.match(normalized.content, /Συνέχισε/);
-  assert.match(normalized.reason, /Forced continue/);
+  assert.equal(normalized.action, "stop");
+  assert.equal(normalized.kind, "stop");
+  assert.equal(normalized.reason, "task appears complete");
 });
 
 test("normalizeAutopilotDecision keeps stop when assistant asks for approval", () => {
-  const lastAssistant = {
-    role: "assistant",
-    content: "I need human approval before deleting these files. Please confirm.",
-  };
-
   const normalized = normalizeAutopilotDecision(
     { action: "stop", kind: "stop", reason: "approval required" },
-    lastAssistant,
   );
 
   assert.equal(normalized.action, "stop");
   assert.equal(normalized.reason, "approval required");
+});
+
+test("decideAutopilotNext respects DeepSeek stop decisions", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '{"action":"stop","reason":"nothing left to do"}' } }],
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "All checks pass. Nothing else is required." },
+      ],
+    });
+
+    assert.equal(decision.action, "stop");
+    assert.equal(decision.reason, "nothing left to do");
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext stops locally on git push auth blockers", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called for local push auth blockers");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Blocked on push: `git push origin main` cannot authenticate from this container.",
+            "",
+            "What happened:",
+            "- GitHub then rejected auth: `Permission denied (publickey)`.",
+            "- `gh` is not installed, and neither `GITHUB_TOKEN` nor `GH_TOKEN` is present.",
+            "",
+            "Next unblock step: provide GitHub push auth in this container, for example an SSH key accepted by `github.com:pagovitsa/orchestrator.git`, or install/configure `gh`, or expose `GH_TOKEN`/`GITHUB_TOKEN` with repo write access.",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "stop");
+    assert.equal(decision.kind, "stop");
+    assert.match(decision.reason, /git push authentication/i);
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext lets non-auth blockers go to DeepSeek", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Install the missing package and rerun tests.","reason":"recoverable blocker"}' } }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: "Blocked on a missing dev dependency. Next unblock step: install the package and rerun tests.",
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, true);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext rejects invalid DeepSeek decisions without fallback continue", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: "not json" } }],
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+
+  try {
+    await assert.rejects(
+      decideAutopilotNext({
+        supervisor: "codex",
+        cwd: "project-a",
+        messages: [
+          { role: "assistant", supervisor: "codex", content: "All checks pass. Nothing else is required." },
+        ],
+      }),
+      /not valid JSON/,
+    );
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("autopilot retry config clamps invalid values", () => {

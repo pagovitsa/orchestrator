@@ -7,15 +7,6 @@ const MAX_ERROR_BODY_CHARS = 1000;
 const MAX_FEED_REASON_CHARS = 80;
 const RECENT_TRANSCRIPT_LIMIT = 16;
 const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
-const FALLBACK_CONTINUE_MESSAGE = [
-  "Autopilot:",
-  "Συνέχισε με προσοχή και απόλυτη προσήλωση στο project.",
-  "Προχώρησε στο επόμενο λογικό βήμα, επαλήθευσε ό,τι αλλάζεις, και ρώτα μόνο αν υπάρχει πραγματικό blocker ή χρειάζεται ανθρώπινη έγκριση.",
-].join("\n");
-
-const BLOCKING_APPROVAL_PATTERN = /\b(confirm|approve|approval|permission|human approval|destructive|delete|remove|drop|wipe|force[- ]?push|rewrite history|deploy|production|billing|payment|secret|credential)\b/i;
-const QUESTION_PATTERN = /[?？]\s*$|(?:\b(should i|do you want|would you like|shall i|can i|may i|please confirm|which option|what would you like)\b)/i;
-
 function latestAssistantMessage(session) {
   return [...(session.messages || [])].reverse().find((message) => message.role === "assistant") || null;
 }
@@ -42,26 +33,18 @@ function hasRunError(message) {
   return /^\s*(error|command failed|uncaught|traceback)\b/i.test(String(message.content || ""));
 }
 
+function hasPushAuthBlocker(message) {
+  const content = assistantContent(message);
+  if (!content) return false;
+  const hasGitPush = /\bgit push\b/i.test(content);
+  const hasPublicKeyDenied = /\bpermission denied\s*\(publickey\)/i.test(content);
+  const mentionsMissingToken = /(?:\b(no|neither)\b[\s\S]{0,80}\b(GITHUB_TOKEN|GH_TOKEN)\b)|(?:\b(GITHUB_TOKEN|GH_TOKEN)\b[\s\S]{0,80}\b(absent|missing|not present)\b)/i.test(content);
+  const asksForAuth = /\b(next unblock step|provide|install|configure|expose|set)\b[\s\S]{0,80}\b(auth|credential|credentials|token|tokens|ssh key|github push auth)\b/i.test(content);
+  return hasGitPush && (hasPublicKeyDenied || mentionsMissingToken) && asksForAuth;
+}
+
 function assistantContent(message) {
   return messageContent(message);
-}
-
-function shouldForceContinue(lastAssistant) {
-  if (hasRunError(lastAssistant)) return false;
-  const content = assistantContent(lastAssistant);
-  if (!content) return false;
-  if (BLOCKING_APPROVAL_PATTERN.test(content)) return false;
-  if (QUESTION_PATTERN.test(content)) return false;
-  return true;
-}
-
-function fallbackContinueDecision(reason = "") {
-  return {
-    action: "message",
-    kind: "continue",
-    content: FALLBACK_CONTINUE_MESSAGE,
-    reason: reason || "Assistant finished without a blocker; autopilot continues the project.",
-  };
 }
 
 function extractJsonObject(text) {
@@ -91,7 +74,8 @@ export function parseAutopilotDecision(text) {
   }
 
   if (["message", "answer", "continue"].includes(action) || rawContent) {
-    const content = rawContent || FALLBACK_CONTINUE_MESSAGE;
+    const content = rawContent;
+    if (!content) return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
     return {
       action: "message",
       kind: kind || (action === "answer" ? "answer" : "continue"),
@@ -103,11 +87,8 @@ export function parseAutopilotDecision(text) {
   return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
 }
 
-export function normalizeAutopilotDecision(decision, lastAssistant) {
+export function normalizeAutopilotDecision(decision) {
   if (decision?.action === "message") return decision;
-  if (shouldForceContinue(lastAssistant)) {
-    return fallbackContinueDecision(decision?.reason ? `Forced continue after non-blocking stop: ${decision.reason}` : "");
-  }
   return decision;
 }
 
@@ -119,11 +100,13 @@ function autopilotPrompt(session, lastAssistant) {
     "Rules:",
     "- First read the latest messages as the context window. Use them to form an accurate picture of the project state before deciding.",
     "- Judge the latest assistant message in that context, not in isolation.",
-    "- If the last assistant message is an app/model error, failed login, auth failure, missing credential, timeout, permission failure, or asks for destructive/human approval, return {\"action\":\"stop\",\"reason\":\"...\"}.",
-    "- If the last assistant asks the user a question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- The answer should act like a careful project owner: prefer reversible steps, no destructive approval, no fake secrets, no guessy external commitments.",
-    "- If the last assistant simply finished a phase or reported completion without a blocking question/error, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- For continue, tell the supervisor to continue carefully and with absolute focus on the project, verify changes, and proceed to the next logical step.",
+    "- If the last assistant message is an app/model error, failed login, auth failure, missing credential, timeout, permission failure, blocked state, completed task, or asks for destructive/human approval, return {\"action\":\"stop\",\"reason\":\"...\"}.",
+    "- If the last assistant asks a low-risk, non-approval question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
+    "- Never answer questions that involve destructive changes, secrets, credentials, billing, deployment, production access, force-push, or history rewrites.",
+    "- If the last assistant still leaves a clear, concrete, reversible next step, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
+    "- If that next step is for the user to provide credentials, auth tokens, SSH keys, or manual authentication, stop instead even if the assistant labels it as a next unblock step.",
+    "- For continue, tell the supervisor the specific next step, require verification, and avoid generic continue-only instructions.",
+    "- Otherwise, stop.",
     "- Keep content concise but actionable. It will be sent automatically to the active supervisor as the next user message.",
     "",
     `Project: ${session.cwd || session.project || "."}`,
@@ -277,6 +260,9 @@ export async function decideAutopilotNext(session, { signal } = {}) {
   if (hasRunError(lastAssistant)) {
     return { action: "stop", kind: "stop", reason: "Last assistant message is an error or stopped run" };
   }
+  if (hasPushAuthBlocker(lastAssistant)) {
+    return { action: "stop", kind: "stop", reason: "Assistant indicates git push authentication is blocked and needs manual credentials" };
+  }
   if (!runtime.deepseekApiKey) {
     throw Object.assign(new Error("DeepSeek API key is required for Autopilot"), { status: 409 });
   }
@@ -315,10 +301,7 @@ export async function decideAutopilotNext(session, { signal } = {}) {
   try {
     decision = parseAutopilotDecision(content);
   } catch (error) {
-    if (shouldForceContinue(lastAssistant)) {
-      return fallbackContinueDecision(`Forced continue after invalid DeepSeek decision: ${error.message}`);
-    }
     throw error;
   }
-  return normalizeAutopilotDecision(decision, lastAssistant);
+  return normalizeAutopilotDecision(decision);
 }
