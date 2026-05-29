@@ -305,6 +305,7 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 | `ORCH_AUTOPILOT_RETRY_ATTEMPTS` | Decision retry attempts for transient failures. |
 | `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` | Base retry backoff for Autopilot decisions. |
 | `ORCH_AUTOPILOT_FEED_LIMIT` | Recent Autopilot activity entries shown per project. |
+| `ORCH_AUTOPILOT_SERVER_LOOP_MS` | Server-side scheduler interval so Autopilot continues without a browser tab. |
 | `ORCH_TAILSCALE_*` | Docker sidecar auth, hostname, Serve, and HTTPS settings. |
 | `CLAUDE_MODEL`, `CODEX_MODEL`, `GEMINI_MODEL` | Optional CLI model overrides. |
 
@@ -318,6 +319,7 @@ Autopilot has:
 - separate decision timeout
 - retry/backoff for transient DeepSeek or network failures
 - bounded, redacted sidebar activity feed
+- a server-side scheduler, so enabled projects keep advancing even when the browser tab sleeps or disconnects
 
 Usage state is stored in `/data/usage.json`. The UI tracks runs, provider usage probes, token/cost deltas, daily totals, and lifetime totals. Budget warnings are informational and do not stop runs.
 

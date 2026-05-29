@@ -1765,6 +1765,7 @@ async function maybeRunAutopilot(session) {
       setStatus(`${projectName} autopilot off`);
       return;
     }
+    if (body.serverDriven) return;
     await sendAutopilotDecision(session, decision);
   } catch (error) {
     setStatus(`Autopilot error: ${error.message}`);
@@ -3490,7 +3491,7 @@ function handleLiveAutopilot(event) {
     setStatus(decision.action === "message"
       ? `${project} autopilot decided: ${decision.kind || "message"}`
       : `Autopilot stopped: ${decision.reason || "no next action"}`);
-    if (decision.action === "message" && liveSession) {
+    if (decision.action === "message" && liveSession && !event.serverDriven) {
       setTimeout(() => {
         if (!state.runs.has(event.sessionId) && !state.pendingSends.has(event.sessionId)) {
           void sendAutopilotDecision(liveSession, decision);

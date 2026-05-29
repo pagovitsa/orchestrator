@@ -80,6 +80,21 @@ function isAutopilotIdleTimeoutMessage(message) {
   return /\bautopilot idle timeout\b/i.test(content);
 }
 
+function isAutopilotRunFailureMessage(message) {
+  if (!message || message.role !== "assistant") return false;
+  return Boolean(message.error || message.stopped);
+}
+
+function consecutiveAutopilotRunFailures(session) {
+  let count = 0;
+  for (const message of [...(session?.messages || [])].reverse()) {
+    if (message.role !== "assistant") continue;
+    if (!isAutopilotRunFailureMessage(message)) break;
+    count += 1;
+  }
+  return count;
+}
+
 export function autopilotNeedsDecision(session) {
   if (!session?.autopilotEnabled || !Array.isArray(session.messages)) return false;
   const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
@@ -89,12 +104,13 @@ export function autopilotNeedsDecision(session) {
     && /autopilot enabled/i.test(String(session.autopilotState?.reason || ""))
     && Number.isFinite(enabledAt);
   const lastMessage = session.messages.at(-1);
+  const failureCount = consecutiveAutopilotRunFailures(session);
   const recoveringFromIdleTimeout = isAutopilotIdleTimeoutMessage(lastMessage);
+  const recoveringFromRunFailure = isAutopilotRunFailureMessage(lastMessage) && failureCount > 0 && failureCount < 3;
   if (
     lastMessage?.role !== "assistant"
     || lastMessage.streaming
-    || lastMessage.error
-    || (lastMessage.stopped && !recoveringFromIdleTimeout)
+    || ((lastMessage.error || lastMessage.stopped) && !recoveringFromIdleTimeout && !recoveringFromRunFailure)
   ) return false;
   const lastAssistantAt = Date.parse(lastMessage.at || "");
   const lastHistory = Array.isArray(session.autopilotHistory) ? session.autopilotHistory.at(-1) : null;

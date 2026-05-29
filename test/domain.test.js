@@ -8,7 +8,9 @@ import {
   appendAutopilotHistory,
   autopilotFeedLimit,
   autopilotMemoryArgs,
+  autopilotNeedsDecision,
   clearAutopilotHistory,
+  consecutiveAutopilotRunFailures,
   decideAutopilotNext,
   decideAutopilotNextWithRetry,
   isAutopilotIdleTimeoutMessage,
@@ -1152,6 +1154,53 @@ test("normalizeAutopilotDecision turns Docker-gate blockers into Docker verifica
   assert.match(normalized.content, /docker version/);
 });
 
+test("decideAutopilotNext retries supervisor run failures up to three consecutive failures", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  runtime.deepseekApiKey = "";
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called for failure recovery decisions");
+  };
+
+  try {
+    const oneFailure = {
+      supervisor: "codex",
+      cwd: "project-a",
+      autopilotEnabled: true,
+      autopilotState: { state: "created" },
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "Error: usage limit", error: true, at: "2026-05-29T00:00:00.000Z" },
+      ],
+    };
+    const recovery = await decideAutopilotNext(oneFailure);
+    assert.equal(fetchCalled, false);
+    assert.equal(consecutiveAutopilotRunFailures(oneFailure), 1);
+    assert.equal(autopilotNeedsDecision(oneFailure), true);
+    assert.equal(recovery.action, "message");
+    assert.match(recovery.reason, /1\/3/);
+    assert.match(recovery.content, /Do not stop yet/);
+
+    const threeFailures = {
+      ...oneFailure,
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "Error: usage limit 1", error: true, at: "2026-05-29T00:00:00.000Z" },
+        { role: "assistant", supervisor: "codex", content: "Error: usage limit 2", error: true, at: "2026-05-29T00:01:00.000Z" },
+        { role: "assistant", supervisor: "codex", content: "Error: usage limit 3", error: true, at: "2026-05-29T00:02:00.000Z" },
+      ],
+    };
+    const stopped = await decideAutopilotNext(threeFailures);
+    assert.equal(consecutiveAutopilotRunFailures(threeFailures), 3);
+    assert.equal(autopilotNeedsDecision(threeFailures), false);
+    assert.equal(stopped.action, "stop");
+    assert.match(stopped.reason, /Three consecutive/);
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("decideAutopilotNext converts DeepSeek stop decisions into continuations", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
@@ -1174,7 +1223,7 @@ test("decideAutopilotNext converts DeepSeek stop decisions into continuations", 
 
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
-    assert.match(decision.content, /choose the safest concrete next step/i);
+    assert.match(decision.content, /identify the next safest concrete phase/i);
     assert.match(decision.reason, /nothing left to do/);
   } finally {
     runtime.deepseekApiKey = originalKey;

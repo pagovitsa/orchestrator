@@ -225,6 +225,15 @@ test("autopilotNeedsDecision detects missed ready assistant turns", () => {
       ...session.messages,
       { role: "assistant", at: "2026-05-27T10:08:00.000Z", content: "Stopped by user", stopped: true },
     ],
+  }), true);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    messages: [
+      ...session.messages,
+      { role: "assistant", at: "2026-05-27T10:08:00.000Z", content: "Stopped by user", stopped: true },
+      { role: "assistant", at: "2026-05-27T10:09:00.000Z", content: "Error: usage limit", error: true },
+      { role: "assistant", at: "2026-05-27T10:10:00.000Z", content: "Error: usage limit", error: true },
+    ],
   }), false);
 });
 

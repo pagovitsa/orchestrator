@@ -14,6 +14,21 @@ export function isAutopilotIdleTimeoutMessage(message) {
   return AUTOPILOT_IDLE_TIMEOUT_PATTERN.test(messageContent(message));
 }
 
+export function isAutopilotRunFailureMessage(message) {
+  if (!message || message.role !== "assistant") return false;
+  return Boolean(message.error || message.stopped);
+}
+
+export function consecutiveAutopilotRunFailures(session) {
+  let count = 0;
+  for (const message of [...(session?.messages || [])].reverse()) {
+    if (message.role !== "assistant") continue;
+    if (!isAutopilotRunFailureMessage(message)) break;
+    count += 1;
+  }
+  return count;
+}
+
 function latestAssistantMessage(session) {
   return [...(session.messages || [])]
     .reverse()
@@ -41,8 +56,7 @@ function hasRunError(message) {
   // Caller is responsible for guarding the no-assistant-message case; treating "no message" as
   // "error" was wedging fresh sessions with a misleading reason.
   if (!message) return false;
-  if (message.error || message.stopped) return true;
-  return /^\s*(error|command failed|uncaught|traceback)\b/i.test(String(message.content || ""));
+  return isAutopilotRunFailureMessage(message);
 }
 
 function assistantContent(message) {
@@ -112,7 +126,16 @@ function fallbackContinuationContent(lastAssistant) {
   if (nextTask) {
     return `Take the next safe remaining item: ${nextTask}. Implement it end to end, run targeted verification, and report what changed.`;
   }
-  return "Review the latest result, choose the safest concrete next step in this project, implement it, run targeted verification, and report what changed.";
+  return "Review the latest result and repo state. If there is no explicit next phase, identify the next safest concrete phase or ask yourself what phase should follow, then implement that step, run targeted verification, and report the decision and result.";
+}
+
+function runFailureRecoveryContent(lastAssistant, failureCount = 1) {
+  const details = assistantContent(lastAssistant).replace(/\s+/g, " ").slice(0, 280);
+  return [
+    `The previous supervisor run failed before a normal final answer was saved (${failureCount}/3).`,
+    details ? `Observed failure: ${details}` : "",
+    "Do not stop yet. Inspect the current repo state, usage/tool status, and any partial changes; choose the smallest safe recovery step, avoid repeating the exact failing command unchanged, run targeted verification, and report the concrete result.",
+  ].filter(Boolean).join(" ");
 }
 
 function extractJsonObject(text) {
@@ -170,6 +193,41 @@ export function normalizeAutopilotDecision(decision, { lastAssistant } = {}) {
   return decision;
 }
 
+export function autopilotNeedsDecision(session) {
+  if (!session?.autopilotEnabled || !Array.isArray(session.messages)) return false;
+  const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
+  if (!["created", "completed"].includes(workflowState)) return false;
+  const enabledAt = Date.parse(session.autopilotState?.updatedAt || "");
+  const enabledAfterHistoryReset = workflowState === "created"
+    && /autopilot enabled/i.test(String(session.autopilotState?.reason || ""))
+    && Number.isFinite(enabledAt);
+  const lastMessage = session.messages.at(-1);
+  const failureCount = consecutiveAutopilotRunFailures(session);
+  const recoveringFromIdleTimeout = isAutopilotIdleTimeoutMessage(lastMessage);
+  const recoveringFromRunFailure = isAutopilotRunFailureMessage(lastMessage) && failureCount > 0 && failureCount < 3;
+  if (
+    lastMessage?.role !== "assistant"
+    || lastMessage.streaming
+    || ((lastMessage.error || lastMessage.stopped) && !recoveringFromIdleTimeout && !recoveringFromRunFailure)
+  ) return false;
+  const lastAssistantAt = Date.parse(lastMessage.at || "");
+  const lastHistory = Array.isArray(session.autopilotHistory) ? session.autopilotHistory.at(-1) : null;
+  const lastHistoryAt = Date.parse(lastHistory?.at || "");
+  if (
+    String(lastHistory?.action || "").toLowerCase() === "stop"
+    && Number.isFinite(lastHistoryAt)
+    && (!Number.isFinite(lastAssistantAt) || lastHistoryAt >= lastAssistantAt)
+    && (!enabledAfterHistoryReset || lastHistoryAt >= enabledAt)
+  ) return false;
+  const decisionTimes = Array.isArray(session.autopilotHistory)
+    ? session.autopilotHistory
+      .map((entry) => Date.parse(entry?.at || ""))
+      .filter((time) => Number.isFinite(time) && (!enabledAfterHistoryReset || time >= enabledAt))
+    : [];
+  const lastDecisionAt = decisionTimes.length ? Math.max(...decisionTimes) : 0;
+  return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;
+}
+
 function fallbackDecisionForPlannerError(session, error) {
   const lastAssistant = latestAssistantMessage(session);
   if (!lastAssistant || hasRunError(lastAssistant)) return null;
@@ -198,8 +256,9 @@ function autopilotPrompt(session, lastAssistant) {
     "- If a path needs credentials, deployment, production access, or destructive approval, choose a safe local-only/reversible alternative and continue instead of stopping.",
     "- Docker is available in the orch-ui supervisor container via the mounted Docker socket. If the latest assistant says Docker/testcontainers are unavailable, choose a next message that verifies Docker and runs the Docker gate instead of stopping or repeating that blocker.",
     "- If the last assistant still leaves a clear, concrete, reversible next step, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
+    "- If there is no explicit next step or next phase, ask the supervisor to inspect repo status/history, identify the next safest concrete phase, make that choice itself, implement it, verify it, and report the result.",
     "- For continue, tell the supervisor the specific next step, require verification, and avoid generic continue-only instructions.",
-    "- Otherwise, decide the safest concrete next step yourself and continue.",
+    "- Otherwise, decide the safest concrete next step yourself or ask the supervisor to choose it from repo context, then continue.",
     "- Keep content concise but actionable. It will be sent automatically to the active supervisor as the next user message.",
     "",
     `Project: ${session.cwd || session.project || "."}`,
@@ -359,6 +418,14 @@ export async function decideAutopilotNextWithRetry(session, {
 }
 
 export async function decideAutopilotNext(session, { signal } = {}) {
+  const failureCount = consecutiveAutopilotRunFailures(session);
+  if (failureCount >= 3) {
+    return {
+      action: "stop",
+      kind: "stop",
+      reason: "Three consecutive supervisor runs failed before returning a normal final answer",
+    };
+  }
   const lastAssistant = latestAssistantMessage(session);
   if (!lastAssistant) {
     return {
@@ -369,7 +436,12 @@ export async function decideAutopilotNext(session, { signal } = {}) {
     };
   }
   if (hasRunError(lastAssistant)) {
-    return { action: "stop", kind: "stop", reason: "Last assistant message is an error or stopped run" };
+    return {
+      action: "message",
+      kind: "continue",
+      content: runFailureRecoveryContent(lastAssistant, Math.max(1, failureCount)),
+      reason: `Recovering from supervisor run failure ${Math.max(1, failureCount)}/3`,
+    };
   }
   if (!runtime.deepseekApiKey) {
     throw Object.assign(new Error("DeepSeek API key is required for Autopilot"), { status: 409 });

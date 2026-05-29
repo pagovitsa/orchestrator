@@ -5,7 +5,7 @@ import { authorizeRequest, startupAuthError } from "./http/auth.js";
 import { ensurePromptStore } from "./domain/prompts.js";
 import { clearStaleAutopilotRuns, ensureSessionStore } from "./domain/sessions.js";
 import { clearStaleActiveRuns, startUsagePolling } from "./domain/usage.js";
-import { handleApi } from "./http/routes.js";
+import { handleApi, startAutopilotServerLoop } from "./http/routes.js";
 import { sendErrorJson, sendJson } from "./http/response.js";
 import { serveStatic } from "./http/static.js";
 
@@ -51,4 +51,5 @@ server.listen(runtime.port, runtime.listenHost, () => {
   console.log(`default supervisor: ${runtime.defaultSupervisor}`);
   console.log("[orch-ui] HTTP basic auth is disabled by design; rely on Tailscale ACL or loopback to authenticate clients (see README).");
   startUsagePolling();
+  startAutopilotServerLoop();
 });
