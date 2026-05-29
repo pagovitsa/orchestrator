@@ -203,6 +203,29 @@ test("autopilotNeedsDecision detects missed ready assistant turns", () => {
   assert.equal(autopilotNeedsDecision({ ...session, messages: [...session.messages, { role: "user", at: "2026-05-27T10:07:00.000Z" }] }), false);
   assert.equal(autopilotNeedsDecision({ ...session, autopilotState: { state: "running" } }), false);
   assert.equal(autopilotNeedsDecision({ ...session, messages: [{ ...session.messages.at(-1), streaming: true }] }), false);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    messages: [
+      ...session.messages,
+      { role: "assistant", at: "2026-05-27T10:08:00.000Z", content: "Autopilot idle timeout", stopped: true },
+    ],
+    autopilotHistory: [{ at: "2026-05-27T10:06:00.000Z", action: "message" }],
+  }), true);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    messages: [
+      ...session.messages,
+      { role: "assistant", at: "2026-05-27T10:08:00.000Z", content: "Autopilot idle timeout", stopped: true },
+    ],
+    autopilotHistory: [{ at: "2026-05-27T10:09:00.000Z", action: "message" }],
+  }), false);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    messages: [
+      ...session.messages,
+      { role: "assistant", at: "2026-05-27T10:08:00.000Z", content: "Stopped by user", stopped: true },
+    ],
+  }), false);
 });
 
 test("autopilotCanResumeFromSummary only allows runnable enabled summaries", () => {

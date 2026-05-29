@@ -11,6 +11,7 @@ import {
   clearAutopilotHistory,
   decideAutopilotNext,
   decideAutopilotNextWithRetry,
+  isAutopilotIdleTimeoutMessage,
   isRetriableAutopilotError,
   normalizeAutopilotDecision,
   normalizeAutopilotRetryConfig,
@@ -1053,6 +1054,49 @@ test("decideAutopilotNext sends latest messages to DeepSeek for context", async 
     assert.match(prompt, /USER:\nAlso keep the mobile layout stable\./);
     assert.match(prompt, /ASSISTANT\/CLAUDE:\nDone; tests pass and layout is stable\./);
     assert.match(prompt, /Last assistant message to judge:\nDone; tests pass and layout is stable\./);
+  } finally {
+    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext recovers from idle timeout markers", async () => {
+  const originalKey = runtime.deepseekApiKey;
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  runtime.deepseekApiKey = "test-deepseek-key";
+  globalThis.fetch = async (_url, options = {}) => {
+    requestBody = JSON.parse(String(options.body || "{}"));
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Run a narrower diagnostic and continue.","reason":"recover timeout"}' } }],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const timeoutMessage = {
+      role: "assistant",
+      supervisor: "codex",
+      content: "Autopilot idle timeout",
+      stopped: true,
+    };
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "The Docker gate is still running; next check the failing db test." },
+        timeoutMessage,
+      ],
+    });
+
+    assert.equal(isAutopilotIdleTimeoutMessage(timeoutMessage), true);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.content, "Run a narrower diagnostic and continue.");
+    const prompt = requestBody.messages[1].content;
+    assert.match(prompt, /Autopilot idle timeout/);
+    assert.match(prompt, /Last assistant message to judge:\nThe Docker gate is still running/);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;

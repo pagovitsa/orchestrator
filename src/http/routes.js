@@ -155,6 +155,10 @@ function errorDetail(error, limit = 1000) {
   return redactSensitiveText(error?.message || String(error || "")).slice(0, limit);
 }
 
+function isAutopilotIdleTimeoutReason(reason) {
+  return /\bautopilot idle timeout\b/i.test(String(reason || ""));
+}
+
 function activeRunForProject(project) {
   for (const run of activeRuns.values()) {
     if (run.cwd === project) return run;
@@ -383,6 +387,14 @@ async function saveAutopilotRunCompleted(session, reason = "Autopilot run comple
 async function saveAutopilotRunTerminal(session, state, reason) {
   return updateSessionForCwd(session.cwd, (fresh) => {
     if (!fresh.autopilotEnabled) return fresh;
+    if (isAutopilotIdleTimeoutReason(reason)) {
+      fresh.autopilotState = transitionWorkflowStatus(
+        fresh.autopilotState,
+        "created",
+        `${reason}; ready to continue`,
+      );
+      return fresh;
+    }
     fresh.autopilotEnabled = false;
     fresh.autopilotState = transitionWorkflowStatus(
       fresh.autopilotState,

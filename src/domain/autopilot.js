@@ -7,8 +7,18 @@ const MAX_ERROR_BODY_CHARS = 1000;
 const MAX_FEED_REASON_CHARS = 80;
 const RECENT_TRANSCRIPT_LIMIT = 16;
 const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
+const AUTOPILOT_IDLE_TIMEOUT_PATTERN = /\bautopilot idle timeout\b/i;
+
+export function isAutopilotIdleTimeoutMessage(message) {
+  if (!message?.stopped) return false;
+  return AUTOPILOT_IDLE_TIMEOUT_PATTERN.test(messageContent(message));
+}
+
 function latestAssistantMessage(session) {
-  return [...(session.messages || [])].reverse().find((message) => message.role === "assistant") || null;
+  return [...(session.messages || [])]
+    .reverse()
+    .find((message) => message.role === "assistant" && !isAutopilotIdleTimeoutMessage(message))
+    || null;
 }
 
 function messageContent(message) {
@@ -180,6 +190,7 @@ function autopilotPrompt(session, lastAssistant) {
     "- First read the latest messages as the context window. Use them to form an accurate picture of the project state before deciding.",
     "- Judge the latest assistant message in that context, not in isolation.",
     "- Return {\"action\":\"stop\",\"reason\":\"...\"} ONLY when the last assistant message is an app/model/CLI run error or failed/stopped run that would loop if continued.",
+    "- Treat an assistant message that says \"Autopilot idle timeout\" as a watchdog abort of one stuck follow-up, not a terminal project error. Continue with a smaller diagnostic or narrower next step instead of repeating the same long-running command.",
     "- If the last assistant says work is done but lists remaining phases, next steps, or follow-ups, choose the first safe concrete item and continue.",
     "- If the last assistant asks the user to choose among safe options, choose the safest useful option for the project and continue.",
     "- If the last assistant asks a low-risk question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",

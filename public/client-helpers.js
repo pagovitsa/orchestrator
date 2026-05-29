@@ -74,6 +74,12 @@ export function autopilotStateLabel(autopilotState = {}, enabled = false) {
   return enabled ? "ready" : "paused";
 }
 
+function isAutopilotIdleTimeoutMessage(message) {
+  if (!message?.stopped) return false;
+  const content = String(message.modelContent || message.content || "");
+  return /\bautopilot idle timeout\b/i.test(content);
+}
+
 export function autopilotNeedsDecision(session) {
   if (!session?.autopilotEnabled || !Array.isArray(session.messages)) return false;
   const workflowState = String(session.autopilotState?.state || "created").toLowerCase();
@@ -83,7 +89,13 @@ export function autopilotNeedsDecision(session) {
     && /autopilot enabled/i.test(String(session.autopilotState?.reason || ""))
     && Number.isFinite(enabledAt);
   const lastMessage = session.messages.at(-1);
-  if (lastMessage?.role !== "assistant" || lastMessage.streaming || lastMessage.error || lastMessage.stopped) return false;
+  const recoveringFromIdleTimeout = isAutopilotIdleTimeoutMessage(lastMessage);
+  if (
+    lastMessage?.role !== "assistant"
+    || lastMessage.streaming
+    || lastMessage.error
+    || (lastMessage.stopped && !recoveringFromIdleTimeout)
+  ) return false;
   const lastAssistantAt = Date.parse(lastMessage.at || "");
   const lastHistory = Array.isArray(session.autopilotHistory) ? session.autopilotHistory.at(-1) : null;
   const lastHistoryAt = Date.parse(lastHistory?.at || "");
