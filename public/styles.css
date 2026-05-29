@@ -239,6 +239,10 @@ label,
   transition: opacity 120ms ease, transform 120ms ease;
 }
 
+.usage-popover.has-model-quotas {
+  width: min(282px, calc(100vw - 16px));
+}
+
 .model-chip:hover .usage-popover,
 .model-chip:focus-visible .usage-popover {
   opacity: 1;
@@ -258,8 +262,19 @@ label,
   font-size: 11px;
 }
 
+.usage-bar-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .usage-bar-value {
   text-align: right;
+}
+
+.usage-bar-row.model-quota-row {
+  grid-template-columns: 76px minmax(0, 1fr) 46px;
 }
 
 .usage-bar-track {
@@ -1931,6 +1946,10 @@ textarea:disabled {
     bottom: 75px;
     width: min(214px, calc(100vw - 16px));
     transform: translateY(6px);
+  }
+
+  .usage-popover.has-model-quotas {
+    width: min(282px, calc(100vw - 16px));
   }
 
   .model-chip:hover .usage-popover,

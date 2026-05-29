@@ -863,6 +863,10 @@ function usageTitle(connection, usage) {
   if (usage.lastProbeAt) parts.push(`checked ${formatDate(usage.lastProbeAt)}`);
   if (usage.lastProbeError) parts.push(`probe error: ${usage.lastProbeError}`);
   if (usage.lastProbeOutput && !usage.lastProbeError) parts.push(usage.lastProbeOutput.split("\n").slice(0, 2).join(" / "));
+  if (Array.isArray(usage.modelQuotas) && usage.modelQuotas.length) {
+    parts.push(`selected ${usage.selectedModel || usage.modelQuotas[0].modelId}`);
+    parts.push(...usage.modelQuotas.map((quota) => `${geminiQuotaLabel(quota)} ${Math.round(finitePercent(quota.percent) ?? 0)}%`));
+  }
   return parts.join(" - ");
 }
 
@@ -911,7 +915,7 @@ function createUsageRing(connection, usage) {
 
 function createUsagePopover(usage) {
   const popover = document.createElement("span");
-  popover.className = "usage-popover";
+  popover.className = `usage-popover ${Array.isArray(usage?.modelQuotas) && usage.modelQuotas.length ? "has-model-quotas" : ""}`;
   popover.setAttribute("aria-hidden", "true");
   if (usage?.mode === "balance") {
     const spentPercent = finitePercent(usage.percent);
@@ -931,12 +935,36 @@ function createUsagePopover(usage) {
   if (usage?.sonnetWeeklyPercent !== null && usage?.sonnetWeeklyPercent !== undefined) {
     rows.push(createUsageBarRow("Sonnet", usage.sonnetWeeklyPercent));
   }
+  if (Array.isArray(usage?.modelQuotas) && usage.modelQuotas.length) {
+    rows.push(...usage.modelQuotas.map((quota) => createModelQuotaRow(quota, usage.selectedModel)));
+  }
   if (usage?.costTodayUsd || usage?.totalCostUsd) {
     rows.push(createUsageBarRow("Today", null, formatUsageMoney(usage.costTodayUsd, "USD") || "--"));
     rows.push(createUsageBarRow("Total", null, formatUsageMoney(usage.totalCostUsd, "USD") || "--"));
   }
   popover.append(...rows);
   return popover;
+}
+
+function geminiQuotaLabel(quota = {}) {
+  const id = String(quota.modelId || "");
+  if (quota.label) return quota.label;
+  if (/flash[- ]?lite/i.test(id)) return "Flash Lite";
+  if (/flash/i.test(id)) return /3/.test(id) ? "3 Flash" : "Flash";
+  if (/pro/i.test(id)) return /3\.1/.test(id) ? "3.1 Pro" : /3/.test(id) ? "3 Pro" : "Pro";
+  return id.replace(/^gemini-/, "") || "Gemini";
+}
+
+function createModelQuotaRow(quota, selectedModel = "") {
+  const label = geminiQuotaLabel(quota);
+  const row = createUsageBarRow(
+    quota.modelId === selectedModel ? `${label} *` : label,
+    quota.percent,
+  );
+  row.classList.add("model-quota-row");
+  const reset = quota.resetAt ? ` Reset ${formatResetCountdown(Date.parse(quota.resetAt))}` : "";
+  row.title = `${quota.modelId || label}: ${Math.round(finitePercent(quota.percent) ?? 0)}% used.${reset}`;
+  return row;
 }
 
 function createUsageBarRow(label, value, textOverride = "") {

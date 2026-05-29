@@ -1035,6 +1035,139 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
+test("message API retries Gemini with the next model on quota failure", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-gemini-fallback-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-gemini-fallback-data-"));
+    const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-gemini-fallback-home-"));
+    const binDir = await mkdtemp(path.join(os.tmpdir(), "orch-gemini-fallback-bin-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    const argsFile = path.join(dataDir, "gemini-args.log");
+    let server;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.HOME = homeDir;
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.ORCH_TIMEOUT_MS = "5000";
+    process.env.GEMINI_API_KEY = "test-gemini-key";
+    process.env.PATH = binDir + path.delimiter + process.env.PATH;
+    delete process.env.GEMINI_MODEL;
+    delete process.env.ORCH_GEMINI_MODEL_PREFERENCE;
+
+    const geminiPath = path.join(binDir, "gemini");
+    const stateFile = path.join(dataDir, "fake-gemini-state");
+    await writeFile(geminiPath, [
+      "#!/usr/bin/env node",
+      "import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', (chunk) => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      "  appendFileSync(" + JSON.stringify(argsFile) + ", process.argv.slice(2).join(' ') + '\\n');",
+      "  const stateFile = " + JSON.stringify(stateFile) + ";",
+      "  const count = existsSync(stateFile) ? Number(readFileSync(stateFile, 'utf8')) : 0;",
+      "  writeFileSync(stateFile, String(count + 1));",
+      "  if (count === 0) {",
+      "    console.error('quota is 100% for gemini-2.5-pro');",
+      "    process.exit(1);",
+      "  }",
+      "  console.log('Recovered from fallback gemini.');",
+      "});",
+    ].join("\n") + "\n", "utf8");
+    await chmod(geminiPath, 0o755);
+
+    const { sendErrorJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendErrorJson(res, error);
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-gemini-fallback"), { recursive: true });
+      const created = await jsonRequest("POST", baseUrl + "/api/sessions", {
+        supervisor: "gemini",
+        cwd: "project-gemini-fallback",
+      });
+      assert.equal(created.status, 201);
+
+      const response = await jsonRequest("POST", baseUrl + "/api/sessions/" + created.body.session.id + "/messages", {
+        content: "Use Gemini and recover after quota.",
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.body.message.content, "Recovered from fallback gemini.");
+
+      const args = (await readFile(argsFile, "utf8")).trim().split("\n");
+      assert.equal(args.length, 2);
+      assert.match(args[0], /--model gemini-2\.5-pro/);
+      assert.match(args[1], /--model gemini-3\.1-pro-preview/);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+      await rm(homeDir, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 20000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
 test("message API allows parallel projects, stops a hung provider call, and recovers", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";

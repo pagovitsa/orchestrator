@@ -51,6 +51,7 @@ import {
   recordRunEnd,
   recordRunStart,
   recordUsageSignal,
+  selectGeminiModelFromQuotas,
   usageSnapshot,
 } from "../src/domain/usage.js";
 import { normalizeProjectName } from "../src/domain/workspace.js";
@@ -1004,11 +1005,41 @@ test("parseGeminiQuotaPayload converts Gemini remaining fractions to used percen
     paidTier: { name: "Gemini Code Assist in Google One AI Pro" },
   });
 
-  assert.equal(parsed.percent, 35);
-  assert.equal(parsed.currentPercent, 35);
+  assert.equal(parsed.percent, 7);
+  assert.equal(parsed.currentPercent, 7);
   assert.equal(parsed.weeklyPercent, null);
+  assert.equal(parsed.selectedModel, "gemini-2.5-pro");
+  assert.equal(parsed.modelQuotas.length, 2);
+  assert.match(parsed.output, /Pro 7% used/);
+  assert.match(parsed.output, /3 Flash 35% used/);
   assert.match(parsed.label, /Gemini quota/);
   assert.match(parsed.label, /Gemini Code Assist in Google One AI Pro/);
+});
+
+test("selectGeminiModelFromQuotas keeps Pro first and falls back when exhausted", () => {
+  const selected = selectGeminiModelFromQuotas([
+    { modelId: "gemini-2.5-flash", percent: 100 },
+    { modelId: "gemini-2.5-flash-lite", percent: 19 },
+    { modelId: "gemini-2.5-pro", percent: 100 },
+    { modelId: "gemini-3.1-pro-preview", percent: 19 },
+  ]);
+
+  assert.equal(selected.model, "gemini-3.1-pro-preview");
+  assert.deepEqual(selected.candidates.slice(0, 2), [
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-flash-lite",
+  ]);
+});
+
+test("selectGeminiModelFromQuotas uses static fallbacks before quota data exists", () => {
+  const selected = selectGeminiModelFromQuotas([]);
+
+  assert.equal(selected.model, "gemini-2.5-pro");
+  assert.deepEqual(selected.candidates.slice(0, 3), [
+    "gemini-2.5-pro",
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+  ]);
 });
 
 test("parseAutopilotDecision accepts JSON answer decisions", () => {

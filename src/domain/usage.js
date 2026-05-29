@@ -7,6 +7,19 @@ const DEEPSEEK_BALANCE_TTL_MS = 60_000;
 const PROBE_OUTPUT_LIMIT = 5000;
 const GEMINI_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal";
 const CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
+export const GEMINI_DEFAULT_MODEL = "gemini-2.5-pro";
+const GEMINI_MODEL_PREFERENCE = [
+  GEMINI_DEFAULT_MODEL,
+  "gemini-3.1-pro-preview",
+  "gemini-3-pro-preview",
+  "gemini-3.1-pro",
+  "gemini-3-pro",
+  "gemini-2.5-flash",
+  "gemini-3-flash-preview",
+  "gemini-3-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-3.1-flash-lite-preview",
+];
 let usageLock = Promise.resolve();
 let deepSeekBalanceCache = { at: 0, promise: null, result: null };
 let usagePollTimer = null;
@@ -76,6 +89,8 @@ function defaultModelUsage(id) {
     balanceRemaining: null,
     balanceSpent: null,
     balanceUsagePercent: null,
+    modelQuotas: [],
+    selectedModel: "",
     days: {},
   };
 }
@@ -84,6 +99,7 @@ function normalizeStore(raw = {}) {
   const models = raw.models && typeof raw.models === "object" ? raw.models : {};
   for (const id of Object.keys(supervisors)) {
     models[id] = { ...defaultModelUsage(id), ...(models[id] || {}) };
+    models[id].modelQuotas = sanitizeModelQuotas(models[id].modelQuotas);
     models[id].days = models[id].days && typeof models[id].days === "object" ? models[id].days : {};
     for (const day of Object.keys(models[id].days)) {
       models[id].days[day] = normalizeDay(models[id].days[day]);
@@ -173,6 +189,78 @@ function numberOrNull(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function geminiShortModelLabel(modelId = "") {
+  const id = String(modelId || "").toLowerCase();
+  if (/flash[- ]?lite/.test(id)) return "Flash Lite";
+  if (/flash/.test(id)) return id.includes("3") ? "3 Flash" : "Flash";
+  if (/pro/.test(id)) return id.includes("3.1") ? "3.1 Pro" : id.includes("3") ? "3 Pro" : "Pro";
+  return String(modelId || "Gemini").replace(/^gemini-/, "");
+}
+
+function sanitizeModelQuotas(quotas = []) {
+  if (!Array.isArray(quotas)) return [];
+  return quotas
+    .map((quota) => {
+      const modelId = String(quota?.modelId || "").trim();
+      const percent = clampPercent(quota?.percent);
+      if (!modelId || percent === null) return null;
+      const remainingFraction = numberOrNull(quota.remainingFraction);
+      const remainingPercent = numberOrNull(quota.remainingPercent);
+      const remainingAmount = numberOrNull(quota.remainingAmount);
+      return {
+        modelId,
+        label: String(quota.label || geminiShortModelLabel(modelId)).slice(0, 40),
+        percent,
+        currentPercent: percent,
+        weeklyPercent: null,
+        remainingFraction,
+        remainingPercent,
+        remainingAmount,
+        resetAt: isoResetLabel(quota.resetAt || quota.resetTime),
+      };
+    })
+    .filter(Boolean);
+}
+
+function preferredGeminiModels(preferredModel = "") {
+  const preferred = String(preferredModel || process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL).trim();
+  const configured = String(process.env.ORCH_GEMINI_MODEL_PREFERENCE || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set([preferred, ...configured, ...GEMINI_MODEL_PREFERENCE].filter(Boolean))];
+}
+
+export function selectGeminiModelFromQuotas(quotas = [], preferredModel = "") {
+  const clean = sanitizeModelQuotas(quotas);
+  const byId = new Map(clean.map((quota) => [quota.modelId, quota]));
+  const preferred = preferredGeminiModels(preferredModel);
+  const orderedAvailable = [
+    ...preferred
+      .map((model) => byId.get(model))
+      .filter((quota) => quota && quota.percent < 100),
+    ...clean
+      .filter((quota) => quota.percent < 100 && !preferred.includes(quota.modelId))
+      .sort((a, b) => a.percent - b.percent),
+  ];
+  const selectedQuota = orderedAvailable[0] || null;
+  const fallbackModel = preferred[0] || GEMINI_DEFAULT_MODEL;
+  const candidates = clean.length
+    ? (selectedQuota ? orderedAvailable.map((quota) => quota.modelId) : [fallbackModel])
+    : preferred;
+  return {
+    model: selectedQuota?.modelId || fallbackModel,
+    quota: selectedQuota,
+    candidates: [...new Set(candidates.filter(Boolean))],
+    modelQuotas: clean,
+  };
+}
+
+export async function geminiModelSelectionForRun(preferredModel = "") {
+  const store = await readStore();
+  return selectGeminiModelFromQuotas(store.models.gemini?.modelQuotas || [], preferredModel);
 }
 
 function addUsageDeltas(model, { tokens = null, costUsd = null } = {}) {
@@ -414,22 +502,30 @@ export function parseCodexRateLimitPayload(payload = {}) {
 }
 
 function geminiBucketSignal(bucket = {}) {
+  const modelId = String(bucket.modelId || "").trim();
   const remainingFraction = Number(bucket.remainingFraction);
   const remainingAmount = numberOrNull(bucket.remainingAmount);
   if (!Number.isFinite(remainingFraction)) return null;
   const percent = clampPercent((1 - remainingFraction) * 100);
   if (percent === null) return null;
   const reset = bucket.resetTime ? new Date(bucket.resetTime).toISOString() : "";
+  const remainingPercent = Math.max(0, Math.round(remainingFraction * 100));
   const remainingText = remainingAmount !== null
     ? `${remainingAmount} left`
-    : `${Math.max(0, Math.round(remainingFraction * 100))}% left`;
+    : `${remainingPercent}% left`;
   return {
+    modelId: modelId || "gemini",
+    label: geminiShortModelLabel(modelId),
     percent,
     currentPercent: percent,
     weeklyPercent: null,
-    label: `${bucket.modelId || "Gemini model"} ${percent}% used (${remainingText})${reset ? ` reset ${reset}` : ""}`,
+    remainingFraction,
+    remainingPercent,
+    remainingAmount,
+    resetAt: reset,
+    quotaLabel: `${modelId || "Gemini model"} ${percent}% used (${remainingText})${reset ? ` reset ${reset}` : ""}`,
     output: [
-      `model ${bucket.modelId || "unknown"}`,
+      `model ${modelId || "unknown"}`,
       `used ${percent}%`,
       remainingText,
       reset ? `reset ${reset}` : "",
@@ -449,11 +545,24 @@ export function parseGeminiQuotaPayload(payload = {}, loadInfo = {}) {
       output: "Gemini Code Assist returned no quota buckets",
     };
   }
-  const best = signals.reduce((max, signal) => signal.percent > max.percent ? signal : max);
+  const modelQuotas = sanitizeModelQuotas(signals);
+  const selected = selectGeminiModelFromQuotas(modelQuotas);
+  const best = selected.quota || signals.reduce((max, signal) => signal.percent > max.percent ? signal : max);
   const tier = loadInfo?.paidTier?.name || loadInfo?.currentTier?.name || "";
   return {
     ...best,
-    label: `Gemini quota: ${best.label}${tier ? ` · ${tier}` : ""}`,
+    percent: best.percent,
+    currentPercent: best.currentPercent ?? best.percent,
+    weeklyPercent: best.weeklyPercent ?? null,
+    selectedModel: selected.model,
+    modelQuotas,
+    output: modelQuotas.map((quota) => [
+      `${quota.label} ${quota.percent}% used`,
+      quota.remainingPercent !== null ? `${quota.remainingPercent}% left` : "",
+      quota.resetAt ? `reset ${quota.resetAt}` : "",
+      quota.modelId,
+    ].filter(Boolean).join(" · ")).join("\n"),
+    label: `Gemini quota: ${best.label || geminiShortModelLabel(best.modelId)} ${best.percent}% used${tier ? ` · ${tier}` : ""}`,
   };
 }
 
@@ -883,6 +992,10 @@ export async function recordUsageSignal(supervisor, signal = {}) {
     if (typeof signal.currentResetAt === "string") model.currentResetAt = signal.currentResetAt;
     if (typeof signal.weeklyResetAt === "string") model.weeklyResetAt = signal.weeklyResetAt;
     if (typeof signal.sonnetWeeklyResetAt === "string") model.sonnetWeeklyResetAt = signal.sonnetWeeklyResetAt;
+    if (Array.isArray(signal.modelQuotas)) {
+      model.modelQuotas = sanitizeModelQuotas(signal.modelQuotas);
+      model.selectedModel = String(signal.selectedModel || selectGeminiModelFromQuotas(model.modelQuotas).model || "");
+    }
     addUsageDeltas(model, { tokens, costUsd });
     await writeStore(store);
   });
@@ -916,6 +1029,10 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.currentResetAt = typeof signal.currentResetAt === "string" ? signal.currentResetAt : "";
       model.weeklyResetAt = typeof signal.weeklyResetAt === "string" ? signal.weeklyResetAt : "";
       model.sonnetWeeklyResetAt = typeof signal.sonnetWeeklyResetAt === "string" ? signal.sonnetWeeklyResetAt : "";
+      if (Array.isArray(signal.modelQuotas)) {
+        model.modelQuotas = sanitizeModelQuotas(signal.modelQuotas);
+        model.selectedModel = String(signal.selectedModel || selectGeminiModelFromQuotas(model.modelQuotas).model || "");
+      }
     } else if (!signal.error || signal.clearKnown) {
       model.lastKnownPercent = null;
       model.lastKnownLabel = "";
@@ -926,6 +1043,8 @@ async function recordProbeResult(supervisor, signal = {}) {
       model.currentResetAt = "";
       model.weeklyResetAt = "";
       model.sonnetWeeklyResetAt = "";
+      model.modelQuotas = [];
+      model.selectedModel = "";
     }
     if (tokens !== null) model.lastTokens = Math.max(0, Math.round(tokens));
 
@@ -1091,6 +1210,10 @@ export async function listUsage() {
     const todayUsage = normalizeDay(model.days?.[today]);
     const totalCostUsd = Number.isFinite(model.totalCostUsd) ? model.totalCostUsd : 0;
     const budgetWarning = runtime.budgetWarningUsd > 0 && totalCostUsd >= runtime.budgetWarningUsd;
+    const modelQuotas = sanitizeModelQuotas(model.modelQuotas);
+    const selectedModel = id === "gemini"
+      ? selectGeminiModelFromQuotas(modelQuotas, process.env.GEMINI_MODEL).model
+      : String(model.selectedModel || "");
     return {
       id,
       label: supervisors[id].label,
@@ -1134,6 +1257,8 @@ export async function listUsage() {
       balanceRemaining: Number.isFinite(model.balanceRemaining) ? model.balanceRemaining : null,
       balanceSpent: Number.isFinite(model.balanceSpent) ? model.balanceSpent : null,
       balanceUsagePercent,
+      modelQuotas,
+      selectedModel,
     };
   });
 }
