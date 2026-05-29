@@ -14,6 +14,10 @@ export function isAutopilotIdleTimeoutMessage(message) {
   return AUTOPILOT_IDLE_TIMEOUT_PATTERN.test(messageContent(message));
 }
 
+export function isAutopilotUserMessage(message) {
+  return message?.role === "user" && /^autopilot\s*:/i.test(messageContent(message));
+}
+
 export function isAutopilotRunFailureMessage(message) {
   if (!message || message.role !== "assistant") return false;
   return Boolean(message.error || message.stopped);
@@ -205,8 +209,9 @@ export function autopilotNeedsDecision(session) {
   const failureCount = consecutiveAutopilotRunFailures(session);
   const recoveringFromIdleTimeout = isAutopilotIdleTimeoutMessage(lastMessage);
   const recoveringFromRunFailure = isAutopilotRunFailureMessage(lastMessage) && failureCount > 0 && failureCount < 3;
+  const retryingInterruptedFollowup = isAutopilotUserMessage(lastMessage);
   if (
-    lastMessage?.role !== "assistant"
+    (!["assistant", "user"].includes(lastMessage?.role) || (lastMessage.role === "user" && !retryingInterruptedFollowup))
     || lastMessage.streaming
     || ((lastMessage.error || lastMessage.stopped) && !recoveringFromIdleTimeout && !recoveringFromRunFailure)
   ) return false;
@@ -424,6 +429,15 @@ export async function decideAutopilotNext(session, { signal } = {}) {
       action: "stop",
       kind: "stop",
       reason: "Three consecutive supervisor runs failed before returning a normal final answer",
+    };
+  }
+  const lastMessage = session.messages?.at(-1);
+  if (isAutopilotUserMessage(lastMessage)) {
+    return {
+      action: "message",
+      kind: "continue",
+      content: messageContent(lastMessage),
+      reason: "Retrying interrupted Autopilot follow-up that had no saved supervisor answer",
     };
   }
   const lastAssistant = latestAssistantMessage(session);

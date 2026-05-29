@@ -727,7 +727,13 @@ test("clearStaleAutopilotRuns persists restart cleanup for running workflow stat
       cwd: "project-a",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
-      messages: [],
+      messages: [
+        {
+          role: "user",
+          at: "2026-01-01T00:01:00.000Z",
+          content: "Autopilot:\nRun the next check.",
+        },
+      ],
       autopilotEnabled: true,
       autopilotState: { state: "running", reason: "deciding" },
     };
@@ -741,6 +747,10 @@ test("clearStaleAutopilotRuns persists restart cleanup for running workflow stat
     assert.equal(loaded.autopilotEnabled, true);
     assert.equal(loaded.autopilotState.state, "created");
     assert.equal(loaded.autopilotState.reason, "restart cleanup");
+    assert.equal(loaded.messages.at(-1).role, "assistant");
+    assert.equal(loaded.messages.at(-1).stopped, true);
+    assert.match(loaded.messages.at(-1).content, /interrupted before returning a final answer/i);
+    assert.equal(autopilotNeedsDecision(loaded), true);
   } finally {
     paths.workspaceRoot = originalWorkspaceRoot;
     await rm(dir, { recursive: true, force: true });
@@ -1181,6 +1191,20 @@ test("decideAutopilotNext retries supervisor run failures up to three consecutiv
     assert.equal(recovery.action, "message");
     assert.match(recovery.reason, /1\/3/);
     assert.match(recovery.content, /Do not stop yet/);
+
+    const pendingFollowup = {
+      ...oneFailure,
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "Previous phase complete.", at: "2026-05-29T00:00:00.000Z" },
+        { role: "user", content: "Autopilot:\nRun the interrupted test command.", at: "2026-05-29T00:01:00.000Z" },
+      ],
+    };
+    const retried = await decideAutopilotNext(pendingFollowup);
+    assert.equal(autopilotNeedsDecision(pendingFollowup), true);
+    assert.equal(retried.action, "message");
+    assert.match(retried.reason, /interrupted Autopilot follow-up/i);
+    assert.match(retried.content, /Run the interrupted test command/);
+    assert.equal(fetchCalled, false);
 
     const threeFailures = {
       ...oneFailure,

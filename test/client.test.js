@@ -201,6 +201,10 @@ test("autopilotNeedsDecision detects missed ready assistant turns", () => {
     ],
   }), false);
   assert.equal(autopilotNeedsDecision({ ...session, messages: [...session.messages, { role: "user", at: "2026-05-27T10:07:00.000Z" }] }), false);
+  assert.equal(autopilotNeedsDecision({
+    ...session,
+    messages: [...session.messages, { role: "user", at: "2026-05-27T10:08:00.000Z", content: "Autopilot:\nRun the pending follow-up." }],
+  }), true);
   assert.equal(autopilotNeedsDecision({ ...session, autopilotState: { state: "running" } }), false);
   assert.equal(autopilotNeedsDecision({ ...session, messages: [{ ...session.messages.at(-1), streaming: true }] }), false);
   assert.equal(autopilotNeedsDecision({

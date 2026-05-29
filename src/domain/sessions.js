@@ -193,9 +193,20 @@ export async function clearStaleAutopilotRuns(reason = "Cleared after server res
         throw error;
       }
       if (String(raw.autopilotState?.state || "").toLowerCase() !== "running") return;
+      const now = new Date().toISOString();
+      if (raw.autopilotEnabled === true) {
+        raw.messages = Array.isArray(raw.messages) ? raw.messages : [];
+        raw.messages.push({
+          role: "assistant",
+          supervisor: supervisors[raw.supervisor] ? raw.supervisor : runtime.defaultSupervisor,
+          content: `${reason}: previous Autopilot run was interrupted before returning a final answer.`,
+          at: now,
+          stopped: true,
+        });
+      }
       raw.autopilotState = {
         state: raw.autopilotEnabled === true ? "created" : "paused",
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
         reason,
       };
       const saved = normalizeProjectSession(raw, cwd);

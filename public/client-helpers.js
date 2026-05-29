@@ -80,6 +80,11 @@ function isAutopilotIdleTimeoutMessage(message) {
   return /\bautopilot idle timeout\b/i.test(content);
 }
 
+function isAutopilotUserMessage(message) {
+  const content = String(message?.modelContent || message?.content || "");
+  return message?.role === "user" && /^autopilot\s*:/i.test(content);
+}
+
 function isAutopilotRunFailureMessage(message) {
   if (!message || message.role !== "assistant") return false;
   return Boolean(message.error || message.stopped);
@@ -107,8 +112,9 @@ export function autopilotNeedsDecision(session) {
   const failureCount = consecutiveAutopilotRunFailures(session);
   const recoveringFromIdleTimeout = isAutopilotIdleTimeoutMessage(lastMessage);
   const recoveringFromRunFailure = isAutopilotRunFailureMessage(lastMessage) && failureCount > 0 && failureCount < 3;
+  const retryingInterruptedFollowup = isAutopilotUserMessage(lastMessage);
   if (
-    lastMessage?.role !== "assistant"
+    (!["assistant", "user"].includes(lastMessage?.role) || (lastMessage.role === "user" && !retryingInterruptedFollowup))
     || lastMessage.streaming
     || ((lastMessage.error || lastMessage.stopped) && !recoveringFromIdleTimeout && !recoveringFromRunFailure)
   ) return false;
