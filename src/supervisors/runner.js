@@ -12,7 +12,6 @@ import { githubSupervisorEnvSync } from "../domain/github.js";
 import { loadPrompt } from "../domain/prompts.js";
 import { createTimelineEvent } from "../domain/run-timeline.js";
 import { redactSensitiveText } from "../domain/safety.js";
-import { geminiModelSelectionForRun, GEMINI_DEFAULT_MODEL } from "../domain/usage.js";
 import { resolveCwd, requireScopedCwd } from "../domain/workspace.js";
 import { peerRoutingText, writeScopedPeerConfigs } from "./mcp.js";
 
@@ -715,30 +714,19 @@ async function callGemini(session, prompt, options = {}) {
     ? { scopedCwd: requireScopedCwd(session.cwd), geminiConfigPath: null }
     : await writeScopedPeerConfigs(session, options.mcpConfigOptions || {});
   tracePeerSetup(session, scoped, options);
-  const selection = await geminiModelSelectionForRun(process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL);
-  const candidates = selection.candidates.length ? selection.candidates : [process.env.GEMINI_MODEL || GEMINI_DEFAULT_MODEL];
-  let lastResult = null;
-  for (let index = 0; index < candidates.length; index += 1) {
-    const model = candidates[index];
-    const args = ["--skip-trust", "--output-format", "text", "--model", model];
-    args.push("--approval-mode", runtime.allowWrite ? "yolo" : "plan", "--prompt", "");
-    emitTrace(options, `[gemini] selected model ${model}${index > 0 ? " after quota fallback" : ""}`);
-    const result = await runCommand("gemini", args, {
-      cwd: scoped.scopedCwd,
-      input: prompt,
-      env: {
-        GEMINI_CLI_TRUST_WORKSPACE: "true",
-        ...(options.enablePeerMcp === false ? {} : { GEMINI_CLI_SYSTEM_SETTINGS_PATH: scoped.geminiConfigPath }),
-      },
-      ...options,
-    });
-    if (result.ok) return cliResult(result);
-    lastResult = result;
-    const text = `${result.stderr}\n${result.stdout}`;
-    const canFallback = /(?:quota|rate.?limit|usage limit|limit reached|exceeded|resource exhausted|429|100%)/i.test(text);
-    if (!canFallback || options.signal?.aborted) break;
-  }
-  return cliResult(lastResult || { ok: false, stdout: "", stderr: "Gemini run failed before starting", code: -1 });
+  const args = ["--skip-trust", "--output-format", "text"];
+  if (process.env.GEMINI_MODEL) args.push("--model", process.env.GEMINI_MODEL);
+  args.push("--approval-mode", runtime.allowWrite ? "yolo" : "plan", "--prompt", "");
+  const result = await runCommand("gemini", args, {
+    cwd: scoped.scopedCwd,
+    input: prompt,
+    env: {
+      GEMINI_CLI_TRUST_WORKSPACE: "true",
+      ...(options.enablePeerMcp === false ? {} : { GEMINI_CLI_SYSTEM_SETTINGS_PATH: scoped.geminiConfigPath }),
+    },
+    ...options,
+  });
+  return cliResult(result);
 }
 
 async function callDeepSeek(session, userContent, systemPrompt, options = {}) {
