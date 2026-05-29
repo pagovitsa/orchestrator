@@ -307,7 +307,8 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 | `ORCH_AUTOPILOT_FEED_LIMIT` | Recent Autopilot activity entries shown per project. |
 | `ORCH_AUTOPILOT_SERVER_LOOP_MS` | Server-side scheduler interval so Autopilot continues without a browser tab. |
 | `ORCH_TAILSCALE_*` | Docker sidecar auth, hostname, Serve, and HTTPS settings. |
-| `CLAUDE_MODEL`, `CODEX_MODEL`, `GEMINI_MODEL` | Optional CLI model overrides. |
+| `CLAUDE_MODEL`, `CODEX_MODEL`, `GEMINI_MODEL` | CLI model defaults; compose defaults to Claude Opus 4.8, Codex GPT-5.5, and Gemini 3 Pro preview. |
+| `CLAUDE_EFFORT`, `CODEX_REASONING_EFFORT` | Reasoning effort defaults (`max` for Claude; Codex uses `xhigh`, and maps `max` to `xhigh`). |
 
 ## Autopilot, Usage, and Timeline
 

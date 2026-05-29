@@ -717,7 +717,7 @@ test("message API redacts CLI provider failures and recovers next request", asyn
     import assert from "node:assert/strict";
     import { createServer } from "node:http";
     import { request } from "node:http";
-    import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+    import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
     import os from "node:os";
     import path from "node:path";
     import { pathToFileURL } from "node:url";
@@ -727,6 +727,7 @@ test("message API redacts CLI provider failures and recovers next request", asyn
     const homeDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-home-"));
     const binDir = await mkdtemp(path.join(os.tmpdir(), "orch-cli-bin-"));
     const stateFile = path.join(dataDir, "fake-codex-state");
+    const argsFile = path.join(dataDir, "fake-codex-args");
     const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
     let server;
 
@@ -737,17 +738,20 @@ test("message API redacts CLI provider failures and recovers next request", asyn
     process.env.ORCH_GIT_INIT_PROJECTS = "0";
     process.env.OPENAI_API_KEY = "test-openai-key";
     process.env.ORCH_FAKE_CODEX_STATE = stateFile;
+    process.env.CODEX_MODEL = "gpt-5.5";
+    process.env.CODEX_REASONING_EFFORT = "max";
     process.env.PATH = binDir + path.delimiter + process.env.PATH;
 
     const fakeCodex = path.join(binDir, "codex");
     await writeFile(fakeCodex, [
       "#!/usr/bin/env node",
-      "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      "import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';",
       "const args = process.argv.slice(2);",
       "if (args[0] === 'exec' && args.includes('--help')) {",
       "  console.log('Usage: codex exec --profile-v2 <profile>');",
       "  process.exit(0);",
       "}",
+      "appendFileSync(" + JSON.stringify(argsFile) + ", args.join(' ') + '\\n');",
       "let input = '';",
       "process.stdin.setEncoding('utf8');",
       "process.stdin.on('data', (chunk) => { input += chunk; });",
@@ -854,6 +858,8 @@ test("message API redacts CLI provider failures and recovers next request", asyn
       assert.equal(loaded.messages[1].role, "user");
       assert.equal(loaded.messages[2].role, "assistant");
       assert.equal(loaded.messages[2].content, "Recovered from fake codex.");
+      const args = (await readFile(argsFile, "utf8")).trim().split("\n");
+      assert.ok(args.some((line) => /--model gpt-5\.5/.test(line) && /model_reasoning_effort="xhigh"/.test(line)));
       console.log(JSON.stringify({ ok: true }));
     } finally {
       if (server) await new Promise((done) => server.close(done));
@@ -876,7 +882,7 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
     import assert from "node:assert/strict";
     import { createServer } from "node:http";
     import { request } from "node:http";
-    import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+    import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
     import os from "node:os";
     import path from "node:path";
     import { pathToFileURL } from "node:url";
@@ -895,14 +901,20 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
     process.env.ORCH_TIMEOUT_MS = "5000";
     process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
     process.env.GEMINI_API_KEY = "test-gemini-key";
+    process.env.CLAUDE_MODEL = "claude-opus-4-8";
+    process.env.CLAUDE_EFFORT = "max";
+    process.env.GEMINI_MODEL = "gemini-3-pro-preview";
     process.env.PATH = binDir + path.delimiter + process.env.PATH;
 
     async function writeFakeCli(name, successBody) {
       const stateFile = path.join(dataDir, "fake-" + name + "-state");
+      const argsFile = path.join(dataDir, "fake-" + name + "-args");
       const scriptPath = path.join(binDir, name);
       await writeFile(scriptPath, [
         "#!/usr/bin/env node",
-        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "const args = process.argv.slice(2);",
+        "appendFileSync(" + JSON.stringify(argsFile) + ", args.join(' ') + '\\n');",
         "let input = '';",
         "process.stdin.setEncoding('utf8');",
         "process.stdin.on('data', (chunk) => { input += chunk; });",
@@ -918,13 +930,14 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
         "});",
       ].join("\n") + "\n", "utf8");
       await chmod(scriptPath, 0o755);
+      return argsFile;
     }
 
-    await writeFakeCli("claude", [
+    const claudeArgsFile = await writeFakeCli("claude", [
       "  console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Recovered from fake claude.' }] } }));",
       "  console.log(JSON.stringify({ type: 'result', result: 'Recovered from fake claude.' }));",
     ]);
-    await writeFakeCli("gemini", [
+    const geminiArgsFile = await writeFakeCli("gemini", [
       "  console.log('Recovered from fake gemini.');",
     ]);
 
@@ -1017,6 +1030,14 @@ test("message API redacts Claude and Gemini CLI failures and recovers", async ()
         assert.equal(loaded.messages[1].role, "user");
         assert.equal(loaded.messages[2].role, "assistant");
         assert.equal(loaded.messages[2].content, "Recovered from fake " + supervisor + ".");
+
+        const argsFile = supervisor === "claude" ? claudeArgsFile : geminiArgsFile;
+        const args = (await readFile(argsFile, "utf8")).trim().split("\n");
+        if (supervisor === "claude") {
+          assert.ok(args.some((line) => /--model claude-opus-4-8/.test(line) && /--effort max/.test(line)));
+        } else {
+          assert.ok(args.some((line) => /--model gemini-3-pro-preview/.test(line)));
+        }
       }
       console.log(JSON.stringify({ ok: true }));
     } finally {

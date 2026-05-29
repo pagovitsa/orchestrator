@@ -55,6 +55,8 @@ test("recent public config options stay documented", async () => {
     "ORCH_UPLOAD_MAX_BYTES",
     "ORCH_DOCKER_SOCKET",
     "ORCH_DOCKER_HOST",
+    "CLAUDE_EFFORT",
+    "CODEX_REASONING_EFFORT",
   ];
 
   for (const option of publicOptions) {

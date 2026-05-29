@@ -350,6 +350,21 @@ function appendCapped(current, text) {
     : combined;
 }
 
+function envText(name) {
+  return String(process.env[name] || "").trim();
+}
+
+function normalizeClaudeEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  return ["low", "medium", "high", "xhigh", "max"].includes(effort) ? effort : "";
+}
+
+function normalizeCodexReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  if (effort === "max") return "xhigh";
+  return ["low", "medium", "high", "xhigh"].includes(effort) ? effort : "";
+}
+
 function runCommand(command, args, { cwd, input, env = {}, onOutput, onTrace, onTask, stdoutHandler, signal, browserContext }) {
   return new Promise((resolve) => {
     const traceOptions = { onTrace };
@@ -649,7 +664,10 @@ async function callClaude(session, prompt, options = {}) {
   tracePeerSetup(session, scoped, runOptions);
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--system-prompt", systemPrompt ?? await loadPrompt(session.supervisor)];
   if (runOptions.enablePeerMcp !== false) args.push("--mcp-config", scoped.claudeConfigPath, "--strict-mcp-config");
-  if (process.env.CLAUDE_MODEL) args.push("--model", process.env.CLAUDE_MODEL);
+  const claudeModel = envText("CLAUDE_MODEL");
+  const claudeEffort = normalizeClaudeEffort(envText("CLAUDE_EFFORT") || envText("CLAUDE_THINKING_EFFORT"));
+  if (claudeModel) args.push("--model", claudeModel);
+  if (claudeEffort) args.push("--effort", claudeEffort);
   if (runtime.allowWrite) args.push("--dangerously-skip-permissions", "--permission-mode", "bypassPermissions");
   else args.push("--permission-mode", "plan");
   // Disable Claude Code's per-cwd session persistence. The orchestrator owns the conversation
@@ -694,7 +712,10 @@ async function callCodex(session, prompt, options = {}) {
   tracePeerSetup(session, scoped, options);
   const args = ["exec", "--skip-git-repo-check", "-C", scoped.scopedCwd];
   if (options.enablePeerMcp !== false) args.push(await detectCodexProfileFlag(), scoped.codexProfile);
-  if (process.env.CODEX_MODEL) args.push("--model", process.env.CODEX_MODEL);
+  const codexModel = envText("CODEX_MODEL");
+  const codexEffort = normalizeCodexReasoningEffort(envText("CODEX_REASONING_EFFORT") || envText("CODEX_EFFORT"));
+  if (codexModel) args.push("--model", codexModel);
+  if (codexEffort) args.push("-c", `model_reasoning_effort=${JSON.stringify(codexEffort)}`);
   if (runtime.allowWrite) args.push("--dangerously-bypass-approvals-and-sandbox");
   else args.push("--sandbox", "read-only");
   args.push("-");
@@ -715,7 +736,8 @@ async function callGemini(session, prompt, options = {}) {
     : await writeScopedPeerConfigs(session, options.mcpConfigOptions || {});
   tracePeerSetup(session, scoped, options);
   const args = ["--skip-trust", "--output-format", "text"];
-  if (process.env.GEMINI_MODEL) args.push("--model", process.env.GEMINI_MODEL);
+  const geminiModel = envText("GEMINI_MODEL");
+  if (geminiModel) args.push("--model", geminiModel);
   args.push("--approval-mode", runtime.allowWrite ? "yolo" : "plan", "--prompt", "");
   const result = await runCommand("gemini", args, {
     cwd: scoped.scopedCwd,
