@@ -3,7 +3,7 @@ export const workflowStates = ["created", "running", "stopped", "completed", "fa
 const validStates = new Set(workflowStates);
 const transitions = {
   created: new Set(["created", "running", "paused", "stopped", "completed", "failed"]),
-  running: new Set(["running", "stopped", "completed", "failed", "paused"]),
+  running: new Set(["running", "created", "stopped", "completed", "failed", "paused"]),
   stopped: new Set(["stopped", "created", "running", "paused", "failed"]),
   completed: new Set(["completed", "running", "paused", "stopped", "failed"]),
   failed: new Set(["failed", "created", "running", "paused", "stopped"]),

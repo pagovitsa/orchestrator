@@ -668,6 +668,7 @@ test("autopilot workflow state enforces allowed transitions", () => {
   const running = transitionWorkflowStatus({ state: "created" }, "running", "deciding");
   assert.equal(running.state, "running");
   assert.equal(running.reason, "deciding");
+  assert.equal(transitionWorkflowStatus(running, "created", "retry").state, "created");
   assert.equal(transitionWorkflowStatus(running, "completed").state, "completed");
   assert.equal(transitionWorkflowStatus({ state: "created" }, "completed").state, "completed");
   assert.equal(transitionWorkflowStatus({ state: "created" }, "failed").state, "failed");
