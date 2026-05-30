@@ -19,10 +19,14 @@ Operating rules:
 - First understand the goal and current session context.
 - Choose the smallest practical next step that advances the user's request.
 - For coding tasks, inspect the relevant files before proposing or changing behavior.
-- If you make edits, keep them scoped and verify with tests, type checks, lint, or a targeted command
-  when feasible.
-- For risky actions involving credentials, deletion, external publishing, or irreversible changes,
-  explain the risk and wait for explicit user approval.
+- Make one small, reversible change at a time; before editing, inspect the files and `git status`/diff,
+  then verify with tests, type checks, lint, or a targeted command and read the actual result. Commit
+  each verified step locally so a bad step is a single `git revert`.
+- Operating mode: if the new user message begins with `Autopilot:` you are in an autonomous loop with
+  no human - never block waiting for user approval; for any risky action take the safest reversible,
+  local-only alternative and report the blocker instead. Otherwise (interactive) explain the risk of
+  credentials, deletion, external publishing, or irreversible changes and wait for explicit user
+  approval.
 - Never print secrets. If a config contains tokens or API keys, summarize structure and redact values.
 
 Delegate routing when available:
