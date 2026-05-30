@@ -1034,8 +1034,8 @@ test("decideAutopilotNext makes no network call and hands the next step to the s
     assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
-    assert.match(decision.content, /Review the latest result and repo state/i);
-    assert.match(decision.content, /identify the next safest concrete phase/i);
+    assert.match(decision.content, /Review the latest result, repo state, and any existing plan/i);
+    assert.match(decision.content, /identify or update the plan first/i);
     assert.match(decision.content, /verification/i);
     assert.match(decision.reason, /supervisor chooses/i);
   } finally {
@@ -1116,9 +1116,180 @@ test("decideAutopilotNext takes the next listed phase when the assistant says wo
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.match(decision.reason, /supervisor chooses/i);
-    assert.match(decision.content, /Take the next safe remaining item/i);
+    assert.match(decision.content, /Continue with the next stage of the current plan/i);
     assert.match(decision.content, /F2 - settings version-downgrade guard/);
     assert.match(decision.content, /targeted verification/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext does not invent edits for verification-only remaining work", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model for a verification-only continuation");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "framework",
+      messages: [
+        {
+          role: "user",
+          content: "Build the modular TypeScript + Tailwind framework one component at a time.",
+        },
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Committed one local checkpoint: `047b7a0 chore: expose package stylesheet metadata`.",
+            "",
+            "Verification passed:",
+            "- `npm run typecheck`",
+            "- `npm run build`",
+            "",
+            "Remaining work:",
+            "- Drawer CP2 browser verification, no rebuild: side/size behavior, reduced-motion no-flash, stacking scroll-lock regression, focus trap, close reasons, declarative `<ui-drawer>`, console cleanliness, and top-layer behavior.",
+            "- Drawer CP3 code review.",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.match(decision.content, /Continue with the next stage of the current plan/i);
+    assert.match(decision.content, /Drawer CP2 browser verification/i);
+    assert.match(decision.content, /Do not invent a code change/i);
+    assert.match(decision.content, /commit only if you changed files/i);
+    assert.equal(/Make one small, reversible change/.test(decision.content), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext follows explicit next stage instead of verification bullets", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model to parse the next plan stage");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "emenu",
+      messages: [
+        {
+          role: "user",
+          content: "Open the QR menu with Playwright and map the whole site and its functions.",
+        },
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Implemented the next local-only mapping step and committed it.",
+            "",
+            "Verification:",
+            "- Opened `https://kostasvillagetaverna.com/qrmenu/` with Playwright.",
+            "- `git diff --check HEAD~1..HEAD` passed.",
+            "",
+            "Remote publishing still needs explicit approval.",
+            "",
+            "Next stage: Phase 2 MySQL schema and migrations from the mapped legacy data.",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /Continue with the next stage of the current plan/i);
+    assert.match(decision.content, /Phase 2 MySQL schema and migrations/i);
+    assert.equal(/Opened https:\/\/kostasvillagetaverna\.com\/qrmenu/i.test(decision.content), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext ignores verification bullets when no plan stage is given", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model while ignoring verification bullets");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "emenu",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Changed docs/source-site-map.md and committed it.",
+            "",
+            "Verification:",
+            "- Opened `https://kostasvillagetaverna.com/qrmenu/` with Playwright.",
+            "- Verified `GET /qrmenuserver/getAllData` returns JSON.",
+            "- `git diff --check` passed.",
+            "",
+            "Remote publishing still needs explicit approval.",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /identify or update the plan first/i);
+    assert.equal(/Opened https:\/\/kostasvillagetaverna\.com\/qrmenu/i.test(decision.content), false);
+    assert.equal(/getAllData/i.test(decision.content), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext refuses remote-write next stages in autopilot", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model while routing around remote write stages");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "emenu",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Local mapping is complete and verified.",
+            "GITHUB_TOKEN is missing.",
+            "Next stage: push to GitHub and create repo.",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /local-only next step/i);
+    assert.equal(/push to GitHub/i.test(decision.content), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1209,7 +1380,7 @@ test("decideAutopilotNext keeps the session alive when the supervisor says work 
     assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
-    assert.match(decision.content, /identify the next safest concrete phase/i);
+    assert.match(decision.content, /identify or update the plan first/i);
     assert.match(decision.reason, /supervisor chooses/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
@@ -1308,7 +1479,7 @@ test("decideAutopilotNext continues a non-auth blocker by handing the next step 
     assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
-    assert.match(decision.content, /identify the next safest concrete phase/i);
+    assert.match(decision.content, /identify or update the plan first/i);
     assert.match(decision.content, /targeted verification/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
@@ -1398,7 +1569,7 @@ test("decideAutopilotNext skips the verification gate when the last turn shows c
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.match(decision.reason, /supervisor chooses/i);
-    assert.match(decision.content, /Make one small, reversible change/i);
+    assert.match(decision.content, /file change is required/i);
     assert.match(decision.content, /commit it locally/i);
     assert.equal(/Before any new change, verify the previous change/i.test(decision.content), false);
   } finally {
@@ -1458,7 +1629,7 @@ test("decideAutopilotNext anchors continuations to the original objective", asyn
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.match(decision.content, /Keep the original objective in focus: "Add input validation to the signup form\."/);
-    assert.match(decision.content, /Make one small, reversible change/i);
+    assert.match(decision.content, /file change is required/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1511,7 +1682,7 @@ test("decideAutopilotNext verification gate skips an explicit already-verified r
     assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.match(decision.reason, /supervisor chooses/i);
-    assert.match(decision.content, /Make one small, reversible change/i);
+    assert.match(decision.content, /file change is required/i);
     assert.equal(/Before any new change, verify the previous change/i.test(decision.content), false);
   } finally {
     globalThis.fetch = originalFetch;

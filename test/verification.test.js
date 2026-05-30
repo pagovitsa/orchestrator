@@ -65,6 +65,26 @@ test("recent public config options stay documented", async () => {
   }
 });
 
+test("Codex generated prompt has Codex-only Claude critique policy", async () => {
+  const [codex, claude, gemini, deepseek] = await Promise.all([
+    readFile(path.resolve("prompts/Codex.md"), "utf8"),
+    readFile(path.resolve("prompts/Claude.md"), "utf8"),
+    readFile(path.resolve("prompts/Gemini.md"), "utf8"),
+    readFile(path.resolve("prompts/DeepSeek.md"), "utf8"),
+  ]);
+
+  assert.match(codex, /## Codex-only supervisor policy/);
+  assert.match(codex, /consult \*\*Claude\*\* before/);
+  assert.match(codex, /Compare Claude's claims against the live files, tests, docs/);
+  assert.match(codex, /runtime-provided subagents/);
+  assert.match(codex, /Codex owns the final decision/);
+
+  for (const prompt of [claude, gemini, deepseek]) {
+    assert.doesNotMatch(prompt, /## Codex-only supervisor policy/);
+    assert.doesNotMatch(prompt, /Codex owns the final decision/);
+  }
+});
+
 test("Docker supervisor access stays wired into image and compose", async () => {
   const [dockerfile, compose, entrypoint] = await Promise.all([
     readFile(path.resolve("Dockerfile"), "utf8"),

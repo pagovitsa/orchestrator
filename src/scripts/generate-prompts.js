@@ -36,12 +36,36 @@ function peersBlock(seatId, strengths) {
   return peers.map((peer) => `- **${peer}** - ${strengths[peer] || "(no description)"}`).join("\n");
 }
 
+function seatSpecificPolicy(seat) {
+  if (seat.id !== "codex") return "";
+  return [
+    "## Codex-only supervisor policy",
+    "",
+    "This section applies only when **Codex CLI** is the active supervisor.",
+    "",
+    "- For difficult, complex, heavy, architectural, or planning-heavy work, consult **Claude** before",
+    "  committing to the plan or implementation. Ask Claude for a detailed evidence-oriented critique of",
+    "  the code, process, trade-offs, failure modes, and verification strategy.",
+    "- Claude is not automatically correct. Compare Claude's claims against the live files, tests, docs,",
+    "  command output, and constraints. Adopt Claude's view only where it is partly or wholly better by",
+    "  evidence; otherwise explain the evidence-backed reason you diverged. Codex owns the final decision.",
+    "- When broad execution can be split safely, prepare precise work packets for available peers or",
+    "  runtime-provided subagents: goal, constraints, relevant files, exact commands, expected output,",
+    "  forbidden actions, and review criteria. Start independent packets in parallel only when the runtime",
+    "  exposes parallel peer/tool execution; otherwise sequence them deliberately.",
+    "- Treat peer/subagent implementation as untrusted until reviewed. Inspect diffs and named files, run",
+    "  targeted checks, verify scope and secrets, and accept only the parts that satisfy the plan and",
+    "  evidence. Do not claim background async/subagent capability unless the active runtime exposes it.",
+  ].join("\n");
+}
+
 function render(template, seat, strengths) {
   const out = template
     .replace(/\{\{SELF_NAME\}\}/g, seat.selfName)
     .replace(/\{\{SELF_ID\}\}/g, seat.id)
     .replace(/\{\{RUNTIME_BLOCK\}\}/g, runtimeBlock(seat))
-    .replace(/\{\{PEERS_BLOCK\}\}/g, peersBlock(seat.id, strengths));
+    .replace(/\{\{PEERS_BLOCK\}\}/g, peersBlock(seat.id, strengths))
+    .replace(/\{\{SEAT_SPECIFIC_POLICY\}\}/g, seatSpecificPolicy(seat));
   const leftover = out.match(/\{\{[^}]+\}\}/);
   if (leftover) throw new Error(`Unreplaced placeholder ${leftover[0]} in seat "${seat.id}"`);
   return out;

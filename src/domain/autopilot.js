@@ -61,31 +61,70 @@ function normalizedLine(text) {
 
 function riskyAutopilotTask(text) {
   return /\b(secret|credential|credentials|token|password|api key|billing|production|prod|deploy|release|force[- ]?push|history rewrite|delete backups?|drop database|destructive)\b/i
+    .test(String(text || ""))
+    || /\b(git\s+push|push(?:ing)?\s+(?:to|remote|origin|github)|remote\s+(?:write|publish|push)|publish(?:ing)?\s+(?:to|remote|github)|create\s+(?:a\s+)?(?:github\s+)?repo)\b/i
     .test(String(text || ""));
+}
+
+function cleanCandidateTask(text) {
+  const candidate = normalizedLine(text);
+  if (!candidate || riskyAutopilotTask(candidate)) return "";
+  return candidate;
+}
+
+function extractExplicitNextStage(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = normalizedLine(lines[index]).replace(/^#{1,6}\s+/, "");
+    const colonMatch = line.match(/^(?:next|upcoming|remaining)\s+(?:(?:safe|concrete|autonomous|local-only|planned|plan)\s+)*(?:stage|phase|step|item)(?:\s+(?:of|from|according to)\s+(?:the\s+)?(?:plan|design|roadmap))?\s*[:=-]\s*(.+)$/i);
+    const remainsMatch = line.match(/^(?:next|upcoming)\s+(?:(?:safe|concrete|autonomous|local-only|planned|plan)\s+)*(?:stage|phase|step|item)\s+(?:is|remains)\s+(.+)$/i);
+    const candidate = cleanCandidateTask(colonMatch?.[1] || remainsMatch?.[1] || "");
+    if (candidate) return candidate;
+
+    if (/^(?:next|upcoming|remaining)\s+(?:(?:safe|concrete|autonomous|local-only|planned|plan)\s+)*(?:stage|phase|step|item)\b/i.test(line)) {
+      for (let next = index + 1; next < Math.min(lines.length, index + 5); next += 1) {
+        const trimmed = lines[next].trim();
+        const bullet = trimmed.match(/^[-*]\s+(.+)$/) || trimmed.match(/^\d+[.)]\s+(.+)$/);
+        const followup = cleanCandidateTask(bullet?.[1] || trimmed);
+        if (followup) return followup;
+      }
+    }
+  }
+  return "";
 }
 
 function extractSuggestedNextTask(text) {
   const lines = String(text || "").split(/\r?\n/);
   const markerIndex = lines.findIndex((line) => (
-    /\b(remaining useful next phases?|remaining next phases?|useful next phases?|next phases?|remaining useful next steps?|next steps?|follow[- ]?ups?|todo)\b/i
+    /\b(remaining work|remaining useful next phases?|remaining next phases?|useful next phases?|next phases?|remaining useful next steps?|next steps?|follow[- ]?ups?|todo|outstanding work|remaining tasks?)\b/i
       .test(line)
   ));
-  const start = markerIndex >= 0 ? markerIndex + 1 : 0;
-  const end = markerIndex >= 0 ? Math.min(lines.length, start + 12) : lines.length;
+  if (markerIndex < 0) return "";
+  const start = markerIndex + 1;
+  const end = Math.min(lines.length, start + 12);
 
   for (let index = start; index < end; index += 1) {
     const trimmed = lines[index].trim();
     const match = trimmed.match(/^[-*]\s+(.+)$/) || trimmed.match(/^\d+[.)]\s+(.+)$/);
     if (!match) continue;
-    const candidate = normalizedLine(match[1]);
-    if (candidate && !riskyAutopilotTask(candidate)) return candidate;
+    const candidate = cleanCandidateTask(match[1]);
+    if (candidate) return candidate;
   }
 
   return "";
 }
 
+function extractPlannedNextStage(text) {
+  return extractExplicitNextStage(text) || extractSuggestedNextTask(text);
+}
+
+function looksLikeVerificationOrReviewTask(text) {
+  return /\b(browser\s+)?verification\b|\bverify\b|\b(code\s+)?review\b|\bregression\b|\bsmoke\b|\bhealth\s+check\b|\bconsole cleanliness\b|\bfocus trap\b|\bscroll[- ]lock\b|\breduced[- ]motion\b|\btop[- ]layer\b|\btype[- ]?check\b|\blint\b/i
+    .test(String(text || ""));
+}
+
 function mentionsManualAuth(text) {
-  return /\b(auth|authenticate|login|credential|credentials|token|tokens|ssh key|api key|manual authentication)\b/i
+  return /\b(auth|authenticate|login|credential|credentials|token|tokens|ssh key|api key|manual authentication)\b|(?:GITHUB|GH)_TOKEN/i
     .test(String(text || ""));
 }
 
@@ -101,6 +140,13 @@ function mentionsDockerGate(text) {
 
 function fallbackContinuationContent(lastAssistant) {
   const content = assistantContent(lastAssistant);
+  const nextTask = extractPlannedNextStage(content);
+  if (nextTask) {
+    if (looksLikeVerificationOrReviewTask(nextTask)) {
+      return `Continue with the next stage of the current plan: ${nextTask}. Run that verification/review against the live project. Do not invent a code change just to satisfy Autopilot; only make the smallest fix if the check exposes a concrete defect, then verify and commit it. If no files change, report the evidence and leave the tree clean.`;
+    }
+    return `Continue with the next stage of the current plan: ${nextTask}. Implement it end to end, run targeted verification, and report what changed.`;
+  }
   if (mentionsManualAuth(content)) {
     return "Do not wait for credentials or manual authentication. Choose the safest local-only next step that avoids secrets and remote write access, verify it, and report any remaining auth blocker separately.";
   }
@@ -110,11 +156,14 @@ function fallbackContinuationContent(lastAssistant) {
   if (mentionsDockerGate(content)) {
     return "Docker is available inside the orch-ui supervisor container. Verify Docker with `docker version` and `docker compose version`, then run the project's Docker/testcontainers verification or merge gate. If Docker itself fails, report that concrete tool/app error instead of saying Docker is unavailable.";
   }
-  const nextTask = extractSuggestedNextTask(content);
-  if (nextTask) {
-    return `Take the next safe remaining item: ${nextTask}. Implement it end to end, run targeted verification, and report what changed.`;
+  return "Review the latest result, repo state, and any existing plan. If there is no explicit next stage, identify or update the plan first, then continue with the next safest concrete stage. Run targeted verification and report the decision and result.";
+}
+
+function continuationStepPolicy(continuation) {
+  if (/do not invent a code change/i.test(continuation)) {
+    return "Keep the step small and reversible; commit only if you changed files.";
   }
-  return "Review the latest result and repo state. If there is no explicit next phase, identify the next safest concrete phase or ask yourself what phase should follow, then implement that step, run targeted verification, and report the decision and result.";
+  return "If a file change is required, make one small, reversible change, run its verification, and commit it locally before the next step. If the safest next step is inspection or verification only, do not invent a change; report concrete evidence and leave the tree clean.";
 }
 
 // (2) Goal anchor: the original objective is the first real human message of the chat (autopilot's
@@ -147,6 +196,7 @@ function showsVerificationEvidence(text) {
   return (
     /\b(npm|yarn|pnpm)\s+(run\s+)?(test|lint|build|check|typecheck)\b/i.test(value)
     || /\b(pytest|jest|mocha|vitest|tsc|eslint|cargo\s+(test|build|check)|go\s+test|make\s+(test|check|lint))\b/i.test(value)
+    || /\bgit\s+diff\s+--check\b[\s\S]{0,120}\b(pass(ed)?|exit(?:ed)?\s+0|clean)\b/i.test(value)
     || /\bexit\s+code\s+\d+\b/i.test(value)
     || /\b\d+\s*(\/\s*\d+)?\s+(tests?|specs?|checks?|assertions?|examples?)\b/i.test(value)
     || /\b\d+\s+(passed|failed|passing|failing|pending|skipped)\b/i.test(value)
@@ -469,11 +519,13 @@ export async function decideAutopilotNext(session) {
     };
   }
   // (2)+(3) Keep-alive: hand the next step to the supervisor, anchored to the original objective and
-  // framed as one small, reversible, locally-committed step so a bad step is a single revert.
+  // framed as one small, reversible step. Local commits are required only when files changed; pure
+  // verification/review steps should not drift into invented edits just to satisfy the pacer.
+  const continuation = fallbackContinuationContent(lastAssistant);
   return {
     action: "message",
     kind: "continue",
-    content: `${fallbackContinuationContent(lastAssistant)} Make one small, reversible change, run its verification, and commit it locally before the next step.${objective}`,
+    content: `${continuation} ${continuationStepPolicy(continuation)}${objective}`,
     reason: "Autopilot keeps the session active; the supervisor chooses and verifies the next step",
   };
 }

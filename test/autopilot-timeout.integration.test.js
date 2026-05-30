@@ -257,9 +257,9 @@ test("server-side autopilot loop advances projects without a browser scheduler o
       assert.equal(loaded.autopilotEnabled, true);
       // The supervisor's follow-up answer landed without a browser tab driving it.
       assert.equal((loaded.messages || []).some((message) => /Server loop ran without a browser/.test(String(message.content || ""))), true);
-      // The autopilot-authored user turn handed the next-step choice back to the supervisor.
+      // The autopilot-authored user turn handed plan-first next-stage choice back to the supervisor.
       assert.equal((loaded.messages || []).some((message) => (
-        message.role === "user" && /identify the next safest concrete phase/i.test(String(message.content || ""))
+        message.role === "user" && /identify or update the plan first/i.test(String(message.content || ""))
       )), true);
       console.log(JSON.stringify({ ok: true }));
     } finally {
