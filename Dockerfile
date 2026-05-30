@@ -62,6 +62,39 @@ ARG SERENA_SPEC=serena-agent
 RUN runuser -u node -- env HOME=/home/node PATH="$PATH" \
     uv tool install --python 3.12 ${SERENA_SPEC}
 
+# Rust toolchain (rustc + cargo + rustfmt + clippy, via rustup) and Foundry (forge/cast/anvil/
+# chisel, via foundryup) for the node user, so supervisor agents can build Rust crates and
+# Solidity/EVM projects inside /workspace. Both install under /home/node, already on the ENV PATH
+# above (~/.cargo/bin, ~/.foundry/bin); build-essential (installed above) supplies the linker rustc
+# needs. The minimal profile skips rust-docs; clippy/rustfmt are added explicitly. The foundry
+# installer aborts on an unrecognized $SHELL, so it is pinned to bash here.
+ARG RUST_VERSION=stable
+RUN runuser -u node -- env HOME=/home/node CARGO_HOME=/home/node/.cargo RUSTUP_HOME=/home/node/.rustup \
+    bash -c "curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain ${RUST_VERSION} -c rustfmt -c clippy"
+
+ARG FOUNDRY_VERSION=latest
+RUN runuser -u node -- env HOME=/home/node SHELL=/bin/bash \
+    bash -c "curl -fsSL https://foundry.paradigm.xyz | bash \
+      && /home/node/.foundry/bin/foundryup --install ${FOUNDRY_VERSION}"
+
+# Put the node user's cargo + foundry bins on PATH for the entrypoint-launched supervisors. Set here
+# (after the installs) rather than next to the base PATH near the top so the expensive earlier layers
+# (apt/chromium, npm CLIs, serena) stay cache-valid across this change.
+ENV PATH=/home/node/.cargo/bin:/home/node/.foundry/bin:$PATH
+
+# The ENV above covers the non-login processes the entrypoint launches, but parts of this app run
+# commands via `bash -lc` (e.g. src/domain/usage.js), and login shells re-source /etc/profile and
+# reset PATH — which would drop the cargo/foundry dirs. Register them in /etc/profile.d so the tools
+# resolve in login/interactive shells too.
+RUN printf '%s\n' \
+    'case ":${PATH}:" in' \
+    '  *:/home/node/.cargo/bin:*) ;;' \
+    '  *) PATH="/home/node/.cargo/bin:/home/node/.foundry/bin:${PATH}" ;;' \
+    'esac' \
+    'export PATH' \
+    > /etc/profile.d/10-rust-foundry.sh
+
 RUN mkdir -p /workspace /workspace/orchestrator /data /app \
   && chown -R node:node /workspace /data /app
 
