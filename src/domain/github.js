@@ -335,3 +335,97 @@ export async function publishProjectToGithub(projectName, { repoName: requestedN
     steps,
   };
 }
+
+// The checked-out branch, or a clear error when HEAD is detached. `gitDefaultBranch` silently falls
+// back to "main" on a detached HEAD, which would push the wrong ref — a backup must refuse instead.
+async function currentBranch(projectPath) {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", projectPath, "symbolic-ref", "--short", "-q", "HEAD"]);
+    const branch = stdout.trim();
+    if (branch) return branch;
+  } catch { /* detached HEAD / unborn branch */ }
+  throw Object.assign(new Error("Cannot back up from a detached HEAD; check out a branch first."), { status: 409 });
+}
+
+// Exit-code check instead of matching localized "nothing to commit" text (which breaks on non-English
+// git). `git diff --cached --quiet` exits 0 when nothing is staged, 1 when there are staged changes.
+async function hasStagedChanges(projectPath) {
+  try {
+    await execFileAsync("git", ["-C", projectPath, "diff", "--cached", "--quiet"]);
+    return false;
+  } catch (error) {
+    if (error.code === 1) return true;
+    throw error;
+  }
+}
+
+function classifyPushError(error) {
+  const msg = String(error.stderr || error.stdout || error.message || "");
+  if (/non-fast-forward|\brejected\b|fetch first|tip of your current branch is behind/i.test(msg)) {
+    return Object.assign(new Error("Push rejected: the remote has commits this backup does not. Reconcile (pull/rebase) before backing up again."), { status: 409 });
+  }
+  if (/could not read|repository not found|does not appear to be a git repository|connection|timed out|host key|permission denied|name or service not known/i.test(msg)) {
+    return Object.assign(new Error("Could not reach the remote repository (deleted, unreachable, or auth failed). Check the GitHub connection and that the repo still exists."), { status: 409 });
+  }
+  return Object.assign(new Error(`git push failed: ${msg.slice(-400) || "unknown error"}`), { status: 500 });
+}
+
+// Manual on-demand backup of a workspace project to its private GitHub repo. The first backup of an
+// unpublished project performs the full publish (private repo + initial commit + push) via
+// publishProjectToGithub, so the private-only policy lives in exactly one place. Once a project has an
+// origin, a backup snapshots the working tree (add -A, commit if anything changed) and pushes — but
+// only after confirming the destination is private and HEAD is on a real branch.
+export async function backupProjectToGithub(projectName) {
+  const token = await readToken();
+  if (!token) throw Object.assign(new Error("Connect GitHub first"), { status: 409 });
+  if (!await fileExists(privateKeyPath())) {
+    throw Object.assign(new Error("SSH keypair missing; reconnect GitHub"), { status: 409 });
+  }
+  const projectPath = resolveCwd(projectName);
+
+  const status = await projectGithubStatus(projectName);
+  if (!status.hasOrigin) {
+    // Never published yet: a backup is the first publish (creates the private repo and pushes).
+    const published = await publishProjectToGithub(projectName);
+    return { ...published, mode: "published" };
+  }
+
+  // Refuse a detached HEAD up front — we cannot know which branch to push.
+  const branch = await currentBranch(projectPath);
+
+  // Private-only policy applies to backups too. For a github.com origin, confirm the repo is private
+  // before pushing; never leak working-tree contents to a public repo. (A public origin is only
+  // possible if the user pointed origin at one manually — Orch never creates public repos.) Origins
+  // we can't resolve to a github.com repo (other hosts, local remotes) are pushed as-is.
+  const remote = status.repo;
+  if (remote?.owner && remote?.name) {
+    const info = await githubRequest(token, "GET", `/repos/${remote.owner}/${remote.name}`).catch(() => null);
+    if (info && info.private === false) {
+      throw Object.assign(new Error(`Refusing to back up: origin ${remote.owner}/${remote.name} is a public repo. The orchestrator never pushes to public repos.`), { status: 409 });
+    }
+  }
+
+  // Already published & safe: snapshot the working tree, then push.
+  const viewer = await verifyToken(token);
+  await gitInProject(projectPath, ["config", "user.email", `${viewer.login}@users.noreply.github.com`]);
+  await gitInProject(projectPath, ["config", "user.name", viewer.name || viewer.login]);
+  await gitInProject(projectPath, ["add", "-A"]);
+
+  const steps = [];
+  if (await hasStagedChanges(projectPath)) {
+    await gitInProject(projectPath, ["commit", "-m", `Orch backup ${new Date().toISOString()}`]);
+    steps.push("committed working tree");
+  } else {
+    // Nothing new to commit — still push in case local commits are ahead of the remote.
+    steps.push("no working-tree changes to commit");
+  }
+
+  try {
+    await gitInProject(projectPath, ["push", "origin", branch]);
+  } catch (error) {
+    throw classifyPushError(error);
+  }
+  steps.push(`pushed ${branch} to origin`);
+
+  return { project: projectName, repo: status.repo, defaultBranch: branch, steps, mode: "snapshot" };
+}

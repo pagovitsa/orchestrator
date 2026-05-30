@@ -22,6 +22,9 @@ const state = {
   tailscaleContinueAfterSetup: false,
   githubStatus: null,
   githubConnected: false,
+  // Project names with a GitHub backup currently in flight; guards against double-fire / index-lock
+  // contention from a second click while the first push is still running.
+  backupInFlight: new Set(),
   prompts: [],
   promptDrafts: {},
   activePromptId: null,
@@ -1896,6 +1899,22 @@ function openProjectContextMenu(event, project) {
     supervisorItems.push(item);
   }
 
+  const githubSeparator = document.createElement("div");
+  githubSeparator.className = "project-context-separator";
+
+  const backup = document.createElement("button");
+  backup.type = "button";
+  backup.role = "menuitem";
+  backup.className = "project-context-item";
+  const githubConnected = Boolean(state.githubConnected);
+  const backingUp = state.backupInFlight.has(projectMenuKey(project));
+  backup.disabled = running || !githubConnected || backingUp;
+  backup.innerHTML = `<span>Back up to GitHub</span>${backingUp ? "<strong>Backing up...</strong>" : githubConnected ? "" : "<strong>Connect first</strong>"}`;
+  backup.addEventListener("click", () => {
+    closeProjectContextMenu();
+    void backupProjectToGithubFromUi(project);
+  });
+
   const separator = document.createElement("div");
   separator.className = "project-context-separator";
 
@@ -1910,10 +1929,28 @@ function openProjectContextMenu(event, project) {
     await deleteProjectFromUi(project);
   });
 
-  el.projectContextMenu.append(autopilot, supervisorSeparator, supervisorHeader, ...supervisorItems, separator, remove);
+  el.projectContextMenu.append(autopilot, supervisorSeparator, supervisorHeader, ...supervisorItems, githubSeparator, backup, separator, remove);
   el.projectContextMenu.hidden = false;
   positionProjectContextMenu(event.clientX, event.clientY);
   autopilot.focus();
+}
+
+async function backupProjectToGithubFromUi(project) {
+  const name = projectMenuKey(project);
+  if (!name || state.backupInFlight.has(name)) return;
+  state.backupInFlight.add(name);
+  setStatus(`Backing up "${name}" to GitHub...`);
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(name)}/github/backup`, { method: "POST" });
+    const steps = body.result?.steps || [];
+    const last = steps[steps.length - 1] || (body.result?.mode === "published" ? "published" : "backed up");
+    const repoUrl = body.result?.repo?.htmlUrl || "";
+    setStatus(`Backed up "${name}" to GitHub - ${last}${repoUrl ? ` (${repoUrl})` : ""}`);
+  } catch (error) {
+    setStatus(`GitHub backup error: ${error.message}`);
+  } finally {
+    state.backupInFlight.delete(name);
+  }
 }
 
 async function setProjectSupervisor(project, supervisorId) {

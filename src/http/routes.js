@@ -41,6 +41,7 @@ import {
 } from "../domain/connections.js";
 import { deleteProject, ensureProject, listProjects, requireScopedCwd, resolveCwd } from "../domain/workspace.js";
 import {
+  backupProjectToGithub,
   clearGithubConnection,
   ensureKeypair,
   githubConnectionStatus,
@@ -1203,6 +1204,12 @@ export async function handleApi(req, res, url) {
   if (githubProjectStatusMatch && req.method === "GET") {
     const project = decodeURIComponent(githubProjectStatusMatch[1]);
     return sendJson(res, 200, { status: await projectGithubStatus(project) });
+  }
+  const githubBackupMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/github\/backup$/);
+  if (githubBackupMatch && req.method === "POST") {
+    const project = decodeURIComponent(githubBackupMatch[1]);
+    const result = await backupProjectToGithub(project);
+    return sendJson(res, 200, { result, status: await projectGithubStatus(project) });
   }
   const githubPublishMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/github\/publish$/);
   if (githubPublishMatch && req.method === "POST") {
