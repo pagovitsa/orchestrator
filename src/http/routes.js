@@ -205,6 +205,23 @@ function clearActiveRun(id, abortController) {
   if (active?.abortController === abortController) activeRuns.delete(id);
 }
 
+function cancelScheduledServerAutopilot(sessionId) {
+  const timer = serverAutopilotTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    serverAutopilotTimers.delete(sessionId);
+  }
+}
+
+function cancelAutopilotForSession(sessionId, reason = "Autopilot disabled by user") {
+  cancelScheduledServerAutopilot(sessionId);
+  activeAutopilotRuns.get(sessionId)?.abort?.(new Error(reason));
+  const activeRun = activeRuns.get(sessionId);
+  if (activeRun?.source === "autopilot" || activeRun?.mode === "server-autopilot") {
+    activeRun.abortController?.abort?.(new Error(reason));
+  }
+}
+
 function updateRunActivity(run) {
   if (!run) return;
   run.lastActivityMs = Date.now();
@@ -471,6 +488,44 @@ async function appendUserMessage(session, body) {
   return modelContent;
 }
 
+async function appendAutopilotUserMessage(session, body) {
+  const rawContent = String(body.content || "").trim();
+  const content = redactSensitiveText(rawContent);
+  const safetyRedacted = content !== rawContent;
+  if (!content) {
+    throw Object.assign(new Error("Message content is required"), { status: 400 });
+  }
+  requireScopedCwd(session.cwd);
+  const modelContent = buildModelContent(content, []);
+  const saved = await updateSessionForCwd(session.cwd, (fresh) => {
+    if (!fresh.autopilotEnabled) return fresh;
+    fresh.messages ||= [];
+    fresh.messages.push({
+      role: "user",
+      content,
+      modelContent,
+      attachments: [],
+      safetyRedacted,
+      at: new Date().toISOString(),
+    });
+    return fresh;
+  });
+  Object.assign(session, saved);
+  if (!session.autopilotEnabled) return "";
+  await autoRememberUserFacts(session, content);
+  return modelContent;
+}
+
+async function appendAssistantMessage(session, message) {
+  const saved = await updateSessionForCwd(session.cwd, (fresh) => {
+    fresh.messages ||= [];
+    fresh.messages.push(message);
+    return fresh;
+  });
+  Object.assign(session, saved);
+  return session.messages.at(-1);
+}
+
 async function handleStreamMessage(req, res, id) {
   const session = await loadSession(id);
   const abortController = new AbortController();
@@ -492,13 +547,23 @@ async function handleStreamMessage(req, res, id) {
   activeRun.clientId = clientId;
   activeRun.source = body.source === "autopilot" ? "autopilot" : "manual";
   activeRun.lastActivityMs = Date.now();
-  const modelContent = await appendUserMessage(session, body).catch((error) => {
+  const modelContent = await (activeRun.source === "autopilot"
+    ? appendAutopilotUserMessage(session, body)
+    : appendUserMessage(session, body)).catch((error) => {
     clearActiveRun(id, abortController);
     throw error;
   });
+  if (activeRun.source === "autopilot" && (!session.autopilotEnabled || !modelContent)) {
+    clearActiveRun(id, abortController);
+    throw Object.assign(new Error("Autopilot is paused"), { status: 409 });
+  }
   if (activeRun.source === "autopilot") {
     const saved = await saveAutopilotRunStarted(session, "Autopilot follow-up running");
     Object.assign(session, saved);
+    if (!session.autopilotEnabled) {
+      clearActiveRun(id, abortController);
+      throw Object.assign(new Error("Autopilot is paused"), { status: 409 });
+    }
   }
   activeRun.session = session;
   activeRun.draft = {
@@ -584,19 +649,19 @@ async function handleStreamMessage(req, res, id) {
     // get reclassified as `stopped`. Lock in the success status now.
     completed = true;
     const finalAnswer = redactSensitiveText(answer || transcript.trim() || "(empty response)");
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: finalAnswer,
       at: new Date().toISOString(),
       trace: activeRun.draft?.trace || [],
       timeline: activeRun.draft?.timeline || [],
-    });
-    await saveSession(session);
+    };
+    await appendAssistantMessage(session, assistantMessage);
     if (activeRun.source === "autopilot") {
       const saved = await saveAutopilotRunCompleted(session, "Autopilot follow-up completed");
       Object.assign(session, saved);
-      scheduleServerAutopilot(id, 1000);
+      if (session.autopilotEnabled) scheduleServerAutopilot(id, 1000);
     }
     activeRun.session = session;
     activeRun.draft = null;
@@ -613,7 +678,7 @@ async function handleStreamMessage(req, res, id) {
   } catch (error) {
     const stopped = abortController.signal.aborted && !completed;
     const details = stopped ? runStopReason(abortController.signal) : errorDetail(error);
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: stopped
@@ -624,8 +689,8 @@ async function handleStreamMessage(req, res, id) {
       timeline: activeRun.draft?.timeline || [],
       error: !stopped,
       stopped,
-    });
-    await saveSession(session);
+    };
+    await appendAssistantMessage(session, assistantMessage);
     if (activeRun.source === "autopilot") {
       const saved = await saveAutopilotRunTerminal(session, stopped ? "stopped" : "failed", details);
       Object.assign(session, saved);
@@ -667,10 +732,18 @@ async function handleJsonMessage(req, res, id) {
     activeRun.source = body.source === "autopilot" ? "autopilot" : "manual";
     activeRun.lastActivityMs = Date.now();
     const browserContext = browserContextFromRequest(req, body);
-    const modelContent = await appendUserMessage(session, body);
+    const modelContent = activeRun.source === "autopilot"
+      ? await appendAutopilotUserMessage(session, body)
+      : await appendUserMessage(session, body);
+    if (activeRun.source === "autopilot" && (!session.autopilotEnabled || !modelContent)) {
+      throw Object.assign(new Error("Autopilot is paused"), { status: 409 });
+    }
     if (activeRun.source === "autopilot") {
       const saved = await saveAutopilotRunStarted(session, "Autopilot follow-up running");
       Object.assign(session, saved);
+      if (!session.autopilotEnabled) {
+        throw Object.assign(new Error("Autopilot is paused"), { status: 409 });
+      }
     }
     usageStarted = true;
     await safelyRecordUsage(`start for ${session.supervisor}`, () => recordRunStart(session.supervisor));
@@ -687,17 +760,17 @@ async function handleJsonMessage(req, res, id) {
       onUsage: captureUsage(session.supervisor),
     });
     const finalAnswer = redactSensitiveText(answer || "(empty response)");
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: finalAnswer,
       at: new Date().toISOString(),
-    });
-    await saveSession(session);
+    };
+    await appendAssistantMessage(session, assistantMessage);
     if (activeRun.source === "autopilot") {
       const saved = await saveAutopilotRunCompleted(session, "Autopilot follow-up completed");
       Object.assign(session, saved);
-      scheduleServerAutopilot(id, 1000);
+      if (session.autopilotEnabled) scheduleServerAutopilot(id, 1000);
     }
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
     emitHookEvent({
@@ -713,14 +786,14 @@ async function handleJsonMessage(req, res, id) {
   } catch (error) {
     if (!abortController.signal.aborted) {
       if (activeRun.source === "autopilot") {
-        session.messages.push({
+        const assistantMessage = {
           role: "assistant",
           supervisor: session.supervisor,
           content: `Error: ${errorDetail(error)}`,
           at: new Date().toISOString(),
           error: true,
-        });
-        await saveSession(session);
+        };
+        await appendAssistantMessage(session, assistantMessage);
         const saved = await saveAutopilotFailure(session, error);
         Object.assign(session, saved);
         if (saved.autopilotEnabled) scheduleServerAutopilot(id, 3000);
@@ -738,14 +811,14 @@ async function handleJsonMessage(req, res, id) {
       });
       throw error;
     }
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: runStopReason(abortController.signal),
       at: new Date().toISOString(),
       stopped: true,
-    });
-    await saveSession(session);
+    };
+    await appendAssistantMessage(session, assistantMessage);
     if (activeRun.source === "autopilot") {
       const saved = await saveAutopilotRunTerminal(session, "stopped", runStopReason(abortController.signal));
       Object.assign(session, saved);
@@ -886,9 +959,11 @@ async function runServerAutopilotFollowup(sessionId, decision) {
   try {
     activeRun.source = "autopilot";
     activeRun.lastActivityMs = Date.now();
-    const modelContent = await appendUserMessage(session, { content, attachments: [], source: "autopilot" });
+    const modelContent = await appendAutopilotUserMessage(session, { content });
+    if (!session.autopilotEnabled || !modelContent) return false;
     const savedStarted = await saveAutopilotRunStarted(session, "Autopilot follow-up running");
     Object.assign(session, savedStarted);
+    if (!session.autopilotEnabled) return false;
     activeRun.session = session;
     activeRun.draft = {
       role: "assistant",
@@ -955,15 +1030,20 @@ async function runServerAutopilotFollowup(sessionId, decision) {
     });
     completed = true;
     const finalAnswer = redactSensitiveText(answer || transcript.trim() || "(empty response)");
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: finalAnswer,
       at: new Date().toISOString(),
       trace: activeRun.draft?.trace || [],
       timeline: activeRun.draft?.timeline || [],
+    };
+    const savedWithMessage = await updateSessionForCwd(session.cwd, (fresh) => {
+      fresh.messages ||= [];
+      fresh.messages.push(assistantMessage);
+      return fresh;
     });
-    await saveSession(session);
+    Object.assign(session, savedWithMessage);
     const savedCompleted = await saveAutopilotRunCompleted(session, "Autopilot follow-up completed");
     Object.assign(session, savedCompleted);
     activeRun.session = session;
@@ -978,12 +1058,12 @@ async function runServerAutopilotFollowup(sessionId, decision) {
       detail: `${answer?.length || transcript.length || 0} chars`,
     });
     await safelyRecordUsage(`finish for ${session.supervisor}`, () => recordRunEnd(session.supervisor));
-    scheduleServerAutopilot(sessionId, 1000);
+    if (session.autopilotEnabled) scheduleServerAutopilot(sessionId, 1000);
     return true;
   } catch (error) {
     const stopped = abortController.signal.aborted && !completed;
     const details = stopped ? runStopReason(abortController.signal) : errorDetail(error);
-    session.messages.push({
+    const assistantMessage = {
       role: "assistant",
       supervisor: session.supervisor,
       content: stopped
@@ -994,8 +1074,13 @@ async function runServerAutopilotFollowup(sessionId, decision) {
       timeline: activeRun.draft?.timeline || [],
       error: !stopped,
       stopped,
+    };
+    const savedWithMessage = await updateSessionForCwd(session.cwd, (fresh) => {
+      fresh.messages ||= [];
+      fresh.messages.push(assistantMessage);
+      return fresh;
     });
-    await saveSession(session);
+    Object.assign(session, savedWithMessage);
     const saved = await saveAutopilotRunTerminal(session, stopped ? "stopped" : "failed", details);
     Object.assign(session, saved);
     activeRun.session = session;
@@ -1254,7 +1339,7 @@ export async function handleApi(req, res, url) {
     const session = applySessionPatch(await loadSession(sessionMatch[1]), await readBody(req), { allowIdentityChange: false });
     await saveSession(session);
     if (!session.autopilotEnabled) {
-      activeAutopilotRuns.get(session.id)?.abort?.(new Error("Autopilot disabled by user"));
+      cancelAutopilotForSession(session.id);
     } else {
       scheduleServerAutopilot(session.id, 0);
     }

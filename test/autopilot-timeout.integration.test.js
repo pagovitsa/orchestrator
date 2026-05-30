@@ -276,3 +276,348 @@ test("server-side autopilot loop advances projects without a browser scheduler o
   });
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
+
+test("disabling autopilot cancels an active server-side follow-up without re-enabling it", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdir, mkdtemp, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-disable-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-disable-data-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+    const originalFetch = globalThis.fetch;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.ORCH_AUTOPILOT_DECISION_TIMEOUT_MS = "0";
+    process.env.ORCH_AUTOPILOT_SERVER_LOOP_MS = "20";
+    process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
+    process.env.DEEPSEEK_API_KEY = "test-key";
+
+    let supervisorCalls = 0;
+    let fetchAborted = false;
+    globalThis.fetch = async (_url, options = {}) => {
+      supervisorCalls += 1;
+      return new Promise((resolve, reject) => {
+        const abort = () => {
+          fetchAborted = true;
+          reject(options.signal?.reason || new Error("aborted"));
+        };
+        if (options.signal?.aborted) return abort();
+        const timer = setTimeout(() => {
+          options.signal?.removeEventListener?.("abort", abort);
+          resolve(new Response(JSON.stringify({
+            choices: [{ message: { content: "This stale autopilot answer must not be saved." } }],
+            usage: { total_tokens: 7 },
+          }), { status: 200, headers: { "content-type": "application/json" } }));
+        }, 2000);
+        timer.unref?.();
+        options.signal?.addEventListener?.("abort", () => {
+          clearTimeout(timer);
+          abort();
+        }, { once: true });
+      });
+    };
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi, stopAutopilotServerLoop } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession, saveSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    const postJson = (url, body = {}) => jsonRequest("POST", url, body);
+    const patchJson = (url, body = {}) => jsonRequest("PATCH", url, body);
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-a"), { recursive: true });
+      const session = {
+        id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        supervisor: "deepseek",
+        cwd: "project-a",
+        messages: [{ role: "assistant", supervisor: "deepseek", content: "Previous phase complete.", at: "2026-01-01T00:00:00.000Z" }],
+        autopilotEnabled: true,
+        autopilotState: { state: "completed" },
+      };
+      await saveSession(session);
+
+      const autopilotUrl = baseUrl + "/api/sessions/" + session.id + "/autopilot";
+      const decided = await postJson(autopilotUrl);
+      assert.equal(decided.status, 200);
+      assert.equal(decided.body.serverDriven, true);
+      assert.equal(decided.body.decision.action, "message");
+
+      for (let i = 0; i < 40 && supervisorCalls === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(supervisorCalls, 1);
+
+      const paused = await patchJson(baseUrl + "/api/sessions/" + session.id, { autopilotEnabled: false });
+      assert.equal(paused.status, 200);
+      assert.equal(paused.body.session.autopilotEnabled, false);
+
+      for (let i = 0; i < 40 && !fetchAborted; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(fetchAborted, true);
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const loaded = await loadSession(session.id);
+      const contents = (loaded.messages || []).map((message) => String(message.content || "")).join("\n");
+      assert.equal(loaded.autopilotEnabled, false);
+      assert.equal(loaded.autopilotState.state, "paused");
+      assert.match(contents, /Autopilot disabled by user/);
+      assert.doesNotMatch(contents, /stale autopilot answer/);
+      assert.equal(supervisorCalls, 1);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      stopAutopilotServerLoop();
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 8000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});
+
+test("disabling autopilot cancels an active client-driven stream without stale re-enable", async () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { createServer } from "node:http";
+    import { request } from "node:http";
+    import { mkdir, mkdtemp, rm } from "node:fs/promises";
+    import os from "node:os";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-stream-disable-workspace-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-stream-disable-data-"));
+    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
+    let server;
+    const originalFetch = globalThis.fetch;
+
+    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
+    process.env.ORCH_DATA_DIR = dataDir;
+    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
+    process.env.ORCH_GIT_INIT_PROJECTS = "0";
+    process.env.ORCH_AUTOPILOT_DECISION_TIMEOUT_MS = "0";
+    process.env.ORCH_AUTOPILOT_SERVER_LOOP_MS = "0";
+    process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
+    process.env.DEEPSEEK_API_KEY = "test-key";
+
+    let supervisorCalls = 0;
+    let fetchAborted = false;
+    globalThis.fetch = async (_url, options = {}) => {
+      supervisorCalls += 1;
+      return new Promise((resolve, reject) => {
+        const abort = () => {
+          fetchAborted = true;
+          reject(options.signal?.reason || new Error("aborted"));
+        };
+        if (options.signal?.aborted) return abort();
+        const timer = setTimeout(() => {
+          options.signal?.removeEventListener?.("abort", abort);
+          resolve(new Response(JSON.stringify({
+            choices: [{ message: { content: "This stale stream answer must not be saved." } }],
+            usage: { total_tokens: 7 },
+          }), { status: 200, headers: { "content-type": "application/json" } }));
+        }, 2000);
+        timer.unref?.();
+        options.signal?.addEventListener?.("abort", () => {
+          clearTimeout(timer);
+          abort();
+        }, { once: true });
+      });
+    };
+
+    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
+    const { handleApi, stopAutopilotServerLoop } = await import(new URL("src/http/routes.js", rootUrl));
+    const { loadSession, saveSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    function startApiServer() {
+      server = createServer(async (req, res) => {
+        try {
+          const url = new URL(req.url || "/", "http://127.0.0.1");
+          await handleApi(req, res, url);
+        } catch (error) {
+          sendJson(res, error.status || 500, { error: error.message || String(error) });
+        }
+      });
+      return new Promise((resolve, reject) => {
+        server.on("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          const address = server.address();
+          resolve("http://127.0.0.1:" + address.port);
+        });
+      });
+    }
+
+    function jsonRequest(method, url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method,
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
+          });
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    function streamRequest(url, body = {}) {
+      return new Promise((resolve, reject) => {
+        const target = new URL(url);
+        const payload = JSON.stringify(body);
+        const req = request({
+          method: "POST",
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname + target.search,
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+          },
+        }, (res) => {
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    }
+
+    const patchJson = (url, body = {}) => jsonRequest("PATCH", url, body);
+
+    try {
+      const baseUrl = await startApiServer();
+      await mkdir(path.join(workspaceRoot, "project-a"), { recursive: true });
+      const session = {
+        id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        supervisor: "deepseek",
+        cwd: "project-a",
+        messages: [{ role: "assistant", supervisor: "deepseek", content: "Previous phase complete.", at: "2026-01-01T00:00:00.000Z" }],
+        autopilotEnabled: true,
+        autopilotState: { state: "completed" },
+      };
+      await saveSession(session);
+
+      const streamPromise = streamRequest(baseUrl + "/api/sessions/" + session.id + "/messages/stream", {
+        source: "autopilot",
+        content: "Autopilot:\nContinue with the next safe local step.",
+        attachments: [],
+      });
+
+      for (let i = 0; i < 40 && supervisorCalls === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(supervisorCalls, 1);
+
+      const paused = await patchJson(baseUrl + "/api/sessions/" + session.id, { autopilotEnabled: false });
+      assert.equal(paused.status, 200);
+      assert.equal(paused.body.session.autopilotEnabled, false);
+
+      for (let i = 0; i < 40 && !fetchAborted; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(fetchAborted, true);
+
+      const stream = await streamPromise;
+      assert.equal(stream.status, 200);
+      assert.match(stream.text, /"type":"stopped"/);
+      assert.match(stream.text, /Autopilot disabled by user/);
+
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const loaded = await loadSession(session.id);
+      const contents = (loaded.messages || []).map((message) => String(message.content || "")).join("\n");
+      assert.equal(loaded.autopilotEnabled, false);
+      assert.equal(loaded.autopilotState.state, "paused");
+      assert.match(contents, /Autopilot disabled by user/);
+      assert.doesNotMatch(contents, /stale stream answer/);
+      assert.equal(supervisorCalls, 1);
+      console.log(JSON.stringify({ ok: true }));
+    } finally {
+      stopAutopilotServerLoop();
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise((done) => server.close(done));
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  `;
+
+  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    timeout: 8000,
+  });
+  assert.deepEqual(JSON.parse(stdout), { ok: true });
+});

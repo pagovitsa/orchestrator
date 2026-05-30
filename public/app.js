@@ -35,6 +35,7 @@ const state = {
   // sessionId -> timer handle; storing the handle (rather than a Set of ids) lets us cancel a
   // scheduled run when the session/project is deleted before the 450 ms delay elapses.
   autopilotTimers: new Map(),
+  autopilotDisabledIntents: new Set(),
   soundMuted: readBooleanPreference("orch.soundMuted", false),
   speechEnabled: readBooleanPreference("orch.speechEnabled", false),
   audioContext: null,
@@ -1692,6 +1693,37 @@ function projectAutopilotEnabled(project) {
   return project?.autopilotEnabled === true;
 }
 
+function sessionSummaryById(sessionId) {
+  return state.sessions.find((session) => session.id === sessionId) || null;
+}
+
+function localAutopilotDisabled(sessionId) {
+  if (!sessionId) return false;
+  if (state.autopilotDisabledIntents.has(sessionId)) return true;
+  if (state.currentSession?.id === sessionId && state.currentSession.autopilotEnabled === false) return true;
+  const summary = sessionSummaryById(sessionId);
+  return summary?.autopilotEnabled === false;
+}
+
+function latestAutopilotSession(session) {
+  if (!session?.id) return session;
+  if (localAutopilotDisabled(session.id)) {
+    return (state.currentSession?.id === session.id && state.currentSession)
+      || sessionSummaryById(session.id)
+      || session;
+  }
+  if (state.currentSession?.id === session.id && Array.isArray(state.currentSession.messages)) {
+    return state.currentSession;
+  }
+  return session;
+}
+
+function latestAutopilotEnabled(session) {
+  if (!session?.id) return projectAutopilotEnabled(session);
+  if (localAutopilotDisabled(session.id)) return false;
+  return projectAutopilotEnabled(latestAutopilotSession(session));
+}
+
 function configuredAutopilotFeedLimit() {
   const value = Number(state.config?.autopilotFeedLimit);
   if (!Number.isFinite(value)) return 2;
@@ -1701,6 +1733,13 @@ function configuredAutopilotFeedLimit() {
 async function setProjectAutopilot(project, enabled) {
   const key = projectMenuKey(project);
   if (!key || !project?.id) return;
+  if (!enabled) {
+    state.autopilotDisabledIntents.add(project.id);
+    cancelScheduledAutopilot(project.id);
+    state.autopilotPhases.delete(project.id);
+  } else {
+    state.autopilotDisabledIntents.delete(project.id);
+  }
   try {
     const body = await api(`/api/sessions/${project.id}`, {
       method: "PATCH",
@@ -1708,16 +1747,25 @@ async function setProjectAutopilot(project, enabled) {
     });
     const session = body.session;
     if (session) {
+      if (session.autopilotEnabled === false) state.autopilotDisabledIntents.add(session.id);
+      else if (enabled) state.autopilotDisabledIntents.delete(session.id);
       upsertSessionSummary(session);
       if (isViewing(session.id)) state.currentSession = session;
     }
     renderSessions();
     syncComposerState();
     setStatus(`${key} autopilot ${enabled ? "on" : "paused"}`);
-    if (enabled && state.currentSession?.id === project.id) scheduleAutopilot(state.currentSession);
+    if (enabled && state.currentSession?.id === project.id) {
+      state.autopilotDisabledIntents.delete(project.id);
+      scheduleAutopilot(state.currentSession);
+    }
     // Disabling autopilot must drop any in-flight scheduled decision; otherwise the 450 ms timer
     // fires and the server returns 409 "Autopilot is paused".
-    if (!enabled) cancelScheduledAutopilot(project.id);
+    if (!enabled) {
+      state.autopilotDisabledIntents.add(project.id);
+      cancelScheduledAutopilot(project.id);
+      state.autopilotPhases.delete(project.id);
+    }
   } catch (error) {
     setStatus(`Autopilot toggle error: ${error.message}`);
   }
@@ -1751,7 +1799,9 @@ function autopilotContent(decision) {
 }
 
 async function maybeRunAutopilot(session) {
-  if (!session?.id || !projectAutopilotEnabled(session)) return;
+  session = latestAutopilotSession(session);
+  if (!session?.id || !latestAutopilotEnabled(session)) return;
+  if (!autopilotNeedsDecision(session)) return;
   if (state.runs.has(session.id)) return;
   const projectName = projectMenuKey(session);
   try {
@@ -1764,7 +1814,7 @@ async function maybeRunAutopilot(session) {
       if (isViewing(session.id)) state.currentSession = session;
       renderSessions();
     }
-    if (!projectAutopilotEnabled(session)) {
+    if (!latestAutopilotEnabled(session)) {
       setStatus(`${projectName} autopilot off`);
       return;
     }
@@ -1776,7 +1826,8 @@ async function maybeRunAutopilot(session) {
 }
 
 async function sendAutopilotDecision(session, decision) {
-  if (!session?.id || !projectAutopilotEnabled(session)) return false;
+  session = latestAutopilotSession(session);
+  if (!session?.id || !latestAutopilotEnabled(session)) return false;
   if (state.runs.has(session.id) || state.pendingSends.has(session.id)) return false;
   const projectName = projectMenuKey(session);
   if (decision?.action !== "message") {
@@ -1793,11 +1844,13 @@ async function sendAutopilotDecision(session, decision) {
 }
 
 function scheduleAutopilot(session) {
-  if (!session?.id || !projectAutopilotEnabled(session) || !autopilotNeedsDecision(session)) return;
+  session = latestAutopilotSession(session);
+  if (!session?.id || !latestAutopilotEnabled(session) || !autopilotNeedsDecision(session)) return;
   if (state.autopilotTimers.has(session.id)) return;
   const handle = setTimeout(() => {
     state.autopilotTimers.delete(session.id);
-    maybeRunAutopilot(session);
+    const latest = latestAutopilotSession(session);
+    if (latestAutopilotEnabled(latest)) maybeRunAutopilot(latest);
   }, 450);
   state.autopilotTimers.set(session.id, handle);
 }
@@ -2986,6 +3039,7 @@ async function deleteProjectFromUi(project) {
     if (project.id) {
       state.autopilotPhases.delete(project.id);
       cancelScheduledAutopilot(project.id);
+      state.autopilotDisabledIntents.delete(project.id);
     }
     if (isCurrentProject(project)) {
       state.currentSession = null;
@@ -3049,8 +3103,9 @@ async function sendMessage(content, files = [], options = {}) {
 }
 
 async function sendMessageForSession(targetSession, content, files = [], options = {}) {
-  const session = targetSession;
+  const session = options.source === "autopilot" ? latestAutopilotSession(targetSession) : targetSession;
   if (!session?.id) return false;
+  if (options.source === "autopilot" && !latestAutopilotEnabled(session)) return false;
   const supervisor = session.supervisor;
   const viewingSession = () => isViewing(session.id);
   if (state.runs.has(session.id) || !state.pendingSends.tryStart(session.id)) {
@@ -3483,6 +3538,11 @@ function handleLiveAutopilot(event) {
       renderMessages();
       syncComposerState();
     }
+    if (!projectAutopilotEnabled(liveSession)) {
+      state.autopilotDisabledIntents.add(event.sessionId);
+      cancelScheduledAutopilot(event.sessionId);
+      state.autopilotPhases.delete(event.sessionId);
+    }
   }
   if (event.phase === "thinking") {
     state.autopilotPhases.set(event.sessionId, "running");
@@ -3518,7 +3578,7 @@ function handleLiveAutopilot(event) {
   if (event.phase === "state") {
     state.autopilotPhases.delete(event.sessionId);
     renderSessions();
-    if (liveSession) scheduleAutopilot(liveSession);
+    if (liveSession && latestAutopilotEnabled(liveSession)) scheduleAutopilot(liveSession);
     return;
   }
   if (event.phase === "decision") {
@@ -3530,8 +3590,9 @@ function handleLiveAutopilot(event) {
       : `Autopilot stopped: ${decision.reason || "no next action"}`);
     if (decision.action === "message" && liveSession && !event.serverDriven) {
       setTimeout(() => {
-        if (!state.runs.has(event.sessionId) && !state.pendingSends.has(event.sessionId)) {
-          void sendAutopilotDecision(liveSession, decision);
+        const latest = latestAutopilotSession(liveSession);
+        if (!state.runs.has(event.sessionId) && !state.pendingSends.has(event.sessionId) && latestAutopilotEnabled(latest)) {
+          void sendAutopilotDecision(latest, decision);
         }
       }, 1000);
     }
