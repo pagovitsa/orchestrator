@@ -1,11 +1,7 @@
 import { runtime } from "../config/env.js";
 import { redactSensitiveText } from "./safety.js";
 
-const AUTOPILOT_MODEL = "deepseek-v4-pro";
-const MAX_DECISION_CHARS = 6000;
-const MAX_ERROR_BODY_CHARS = 1000;
 const MAX_FEED_REASON_CHARS = 80;
-const RECENT_TRANSCRIPT_LIMIT = 16;
 const TRANSIENT_ERROR_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 const AUTOPILOT_IDLE_TIMEOUT_PATTERN = /\bautopilot idle timeout\b/i;
 
@@ -42,18 +38,6 @@ function latestAssistantMessage(session) {
 
 function messageContent(message) {
   return String(message?.modelContent || message?.content || "").trim();
-}
-
-function recentTranscript(session, limit = RECENT_TRANSCRIPT_LIMIT) {
-  return (session.messages || [])
-    .slice(-limit)
-    .map((message) => {
-      const speaker = message.role === "assistant"
-        ? `assistant/${message.supervisor || session.supervisor || "unknown"}`
-        : "user";
-      return `${speaker.toUpperCase()}:\n${messageContent(message)}`;
-    })
-    .join("\n\n");
 }
 
 function hasRunError(message) {
@@ -133,6 +117,105 @@ function fallbackContinuationContent(lastAssistant) {
   return "Review the latest result and repo state. If there is no explicit next phase, identify the next safest concrete phase or ask yourself what phase should follow, then implement that step, run targeted verification, and report the decision and result.";
 }
 
+// (2) Goal anchor: the original objective is the first real human message of the chat (autopilot's
+// own injected user turns are skipped). Re-stating it on every continuation keeps the supervisor from
+// drifting into self-invented, error-prone scope.
+function originalObjective(session) {
+  const first = (session?.messages || []).find(
+    (message) => message.role === "user" && !isAutopilotUserMessage(message) && messageContent(message),
+  );
+  return first ? messageContent(first).replace(/\s+/g, " ").slice(0, 300) : "";
+}
+
+function objectiveReminder(session) {
+  const objective = originalObjective(session);
+  return objective ? ` Keep the original objective in focus: "${objective}".` : "";
+}
+
+// (1) Heuristic: the last turn describes an edit that actually happened (past tense, specific), not a
+// plan ("I will add ...") or a summary. Used to decide whether a verification step is owed.
+function describesCodeChange(text) {
+  return /\b(edited|implemented|refactored|rewrote|wrote|modified|patched|applied the (patch|change|diff)|added (a|an|the|new)\b|changed the\b|fixed the\b|created (a|an|the|new)\b)/i
+    .test(String(text || ""));
+}
+
+// (1) Heuristic: the text shows the project checks were actually EXERCISED — a runner was invoked or a
+// concrete result/exit code/emoji is present. Deliberately strict: bare intent ("the tests should
+// pass") must NOT count, or the gate becomes a no-op that never asks for real verification.
+function showsVerificationEvidence(text) {
+  const value = String(text || "");
+  return (
+    /\b(npm|yarn|pnpm)\s+(run\s+)?(test|lint|build|check|typecheck)\b/i.test(value)
+    || /\b(pytest|jest|mocha|vitest|tsc|eslint|cargo\s+(test|build|check)|go\s+test|make\s+(test|check|lint))\b/i.test(value)
+    || /\bexit\s+code\s+\d+\b/i.test(value)
+    || /\b\d+\s*(\/\s*\d+)?\s+(tests?|specs?|checks?|assertions?|examples?)\b/i.test(value)
+    || /\b\d+\s+(passed|failed|passing|failing|pending|skipped)\b/i.test(value)
+    || /\b(tests?|checks?|build|suite|lint|type[- ]?check|compilation)\s+(passed|failed|succeeded|errored|broke)\b/i.test(value)
+    || /\b(all|every)\s+(tests?|checks?|specs?)\s+(pass(ed)?|green)\b/i.test(value)
+    || /\bcompiled successfully\b|\bbuild (succeeded|passed)\b|\bno (errors|failures)\b/i.test(value)
+    || /[✓✗✅❌]/.test(value)
+  );
+}
+
+// (1+D) A clear recap that verification already happened. Lets the gate skip "I edited X and already
+// verified it" recaps without weakening the gate for genuinely unverified changes.
+function mentionsAlreadyVerified(text) {
+  return /\b(already|just|have|has been)\s+(verified|tested)\b|\b(verified|tested)\s+(it|this|that|the change)\b|\btests?\s+already\s+(pass|passed|green)\b/i
+    .test(String(text || ""));
+}
+
+function normalizeForCompare(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[`*_>#-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Token-set (Jaccard) similarity in [0,1]. Cheap and good enough to catch "the supervisor said almost
+// the same thing again" without pulling in a dependency.
+function similarityRatio(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const ta = new Set(a.split(" ").filter(Boolean));
+  const tb = new Set(b.split(" ").filter(Boolean));
+  if (!ta.size || !tb.size) return 0;
+  let intersection = 0;
+  for (const token of ta) if (tb.has(token)) intersection += 1;
+  const union = ta.size + tb.size - intersection;
+  return union ? intersection / union : 0;
+}
+
+// The most recent real assistant answers (newest first), skipping idle-timeout markers and failures.
+function recentRealAnswers(session, limit = 2) {
+  const answers = [];
+  for (const message of [...(session?.messages || [])].reverse()) {
+    if (message.role !== "assistant") continue;
+    if (isAutopilotIdleTimeoutMessage(message) || message.error || message.stopped) continue;
+    answers.push(normalizeForCompare(messageContent(message)));
+    if (answers.length >= limit) break;
+  }
+  return answers;
+}
+
+// (5) No-progress breaker: the last two substantial answers are near-duplicates, so the supervisor is
+// spinning. Two guards keep this from firing on legitimate iterative refinement (where each turn
+// shares vocabulary but adds real new work): a high similarity floor AND a requirement that the newer
+// answer introduces almost no new tokens. Tuned conservatively — a false fire derails real progress,
+// which is the opposite of the goal, so we only trip on genuine repetition.
+function looksLikeNoProgress(session) {
+  const answers = recentRealAnswers(session, 2);
+  if (answers.length < 2) return false;
+  if (answers[0].length < 40 || answers[1].length < 40) return false;
+  if (similarityRatio(answers[0], answers[1]) < 0.9) return false;
+  const newer = new Set(answers[0].split(" ").filter(Boolean));
+  const older = new Set(answers[1].split(" ").filter(Boolean));
+  let novel = 0;
+  for (const token of newer) if (!older.has(token)) novel += 1;
+  const novelRatio = newer.size ? novel / newer.size : 0;
+  return novelRatio < 0.15;
+}
+
 function runFailureRecoveryContent(lastAssistant, failureCount = 1) {
   const details = assistantContent(lastAssistant).replace(/\s+/g, " ").slice(0, 280);
   return [
@@ -140,61 +223,6 @@ function runFailureRecoveryContent(lastAssistant, failureCount = 1) {
     details ? `Observed failure: ${details}` : "",
     "Do not stop yet. Inspect the current repo state, usage/tool status, and any partial changes; choose the smallest safe recovery step, avoid repeating the exact failing command unchanged, run targeted verification, and report the concrete result.",
   ].filter(Boolean).join(" ");
-}
-
-function extractJsonObject(text) {
-  const value = String(text || "").trim();
-  if (!value) throw new Error("DeepSeek returned an empty autopilot decision");
-  try {
-    return JSON.parse(value);
-  } catch {
-    const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
-    if (fenced) return JSON.parse(fenced);
-    const start = value.indexOf("{");
-    const end = value.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(value.slice(start, end + 1));
-    throw new Error("DeepSeek autopilot decision was not valid JSON");
-  }
-}
-
-export function parseAutopilotDecision(text) {
-  const parsed = extractJsonObject(text);
-  const action = String(parsed.action || "").trim().toLowerCase();
-  const kind = String(parsed.kind || "").trim().toLowerCase();
-  const reason = String(parsed.reason || "").trim();
-  const rawContent = String(parsed.content || parsed.message || "").trim();
-
-  if (action === "stop") {
-    return { action: "stop", kind: kind || "stop", reason: reason || "Autopilot stopped" };
-  }
-
-  if (["message", "answer", "continue"].includes(action) || rawContent) {
-    const content = rawContent;
-    if (!content) return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
-    return {
-      action: "message",
-      kind: kind || (action === "answer" ? "answer" : "continue"),
-      content: content.slice(0, MAX_DECISION_CHARS),
-      reason,
-    };
-  }
-
-  return { action: "stop", kind: "stop", reason: reason || "Autopilot returned no next message" };
-}
-
-export function normalizeAutopilotDecision(decision, { lastAssistant } = {}) {
-  if (decision?.action === "message") return decision;
-  if (lastAssistant && !hasRunError(lastAssistant)) {
-    return {
-      action: "message",
-      kind: "continue",
-      content: fallbackContinuationContent(lastAssistant),
-      reason: decision?.reason
-        ? `Continuing instead of stopping: ${decision.reason}`
-        : "Autopilot continues unless the last assistant turn is an app or run error",
-    };
-  }
-  return decision;
 }
 
 export function autopilotNeedsDecision(session) {
@@ -231,50 +259,6 @@ export function autopilotNeedsDecision(session) {
     : [];
   const lastDecisionAt = decisionTimes.length ? Math.max(...decisionTimes) : 0;
   return !Number.isFinite(lastAssistantAt) || lastDecisionAt < lastAssistantAt;
-}
-
-function fallbackDecisionForPlannerError(session, error) {
-  const lastAssistant = latestAssistantMessage(session);
-  if (!lastAssistant || hasRunError(lastAssistant)) return null;
-  const reason = String(error?.message || error || "Autopilot planner failed").trim();
-  return normalizeAutopilotDecision({
-    action: "stop",
-    kind: "continue",
-    reason: `Autopilot planner failed, continuing locally: ${reason}`,
-  }, { lastAssistant });
-}
-
-function autopilotPrompt(session, lastAssistant) {
-  return [
-    "You are Orch UI Autopilot. You decide the next USER message for a coding supervisor.",
-    "Return ONLY compact JSON. No markdown, no prose outside JSON.",
-    "",
-    "Rules:",
-    "- First read the latest messages as the context window. Use them to form an accurate picture of the project state before deciding.",
-    "- Judge the latest assistant message in that context, not in isolation.",
-    "- Return {\"action\":\"stop\",\"reason\":\"...\"} ONLY when the last assistant message is an app/model/CLI run error or failed/stopped run that would loop if continued.",
-    "- Treat an assistant message that says \"Autopilot idle timeout\" as a watchdog abort of one stuck follow-up, not a terminal project error. Continue with a smaller diagnostic or narrower next step instead of repeating the same long-running command.",
-    "- If the last assistant says work is done but lists remaining phases, next steps, or follow-ups, choose the first safe concrete item and continue.",
-    "- If the last assistant asks the user to choose among safe options, choose the safest useful option for the project and continue.",
-    "- If the last assistant asks a low-risk question, choose the safest useful answer for the project and return {\"action\":\"message\",\"kind\":\"answer\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- Never provide or invent secrets, credentials, billing decisions, production access, force-push approval, history rewrites, or destructive approval.",
-    "- If a path needs credentials, deployment, production access, or destructive approval, choose a safe local-only/reversible alternative and continue instead of stopping.",
-    "- Docker is available in the orch-ui supervisor container via the mounted Docker socket. If the latest assistant says Docker/testcontainers are unavailable, choose a next message that verifies Docker and runs the Docker gate instead of stopping or repeating that blocker.",
-    "- If the last assistant still leaves a clear, concrete, reversible next step, return {\"action\":\"message\",\"kind\":\"continue\",\"content\":\"...\",\"reason\":\"...\"}.",
-    "- If there is no explicit next step or next phase, ask the supervisor to inspect repo status/history, identify the next safest concrete phase, make that choice itself, implement it, verify it, and report the result.",
-    "- For continue, tell the supervisor the specific next step, require verification, and avoid generic continue-only instructions.",
-    "- Otherwise, decide the safest concrete next step yourself or ask the supervisor to choose it from repo context, then continue.",
-    "- Keep content concise but actionable. It will be sent automatically to the active supervisor as the next user message.",
-    "",
-    `Project: ${session.cwd || session.project || "."}`,
-    `Supervisor to answer: ${session.supervisor || "unknown"}`,
-    "",
-    `Latest messages for context (oldest to newest, last ${RECENT_TRANSCRIPT_LIMIT} max):`,
-    recentTranscript(session),
-    "",
-    "Last assistant message to judge:",
-    assistantContent(lastAssistant),
-  ].join("\n");
 }
 
 export function appendAutopilotHistory(session, decision) {
@@ -399,11 +383,7 @@ export async function decideAutopilotNextWithRetry(session, {
     } catch (error) {
       lastError = error;
       throwIfAborted(signal);
-      if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) {
-        const fallback = fallbackDecisionForPlannerError(currentSession, error);
-        if (fallback) return { decision: fallback, session: currentSession, attempts: attempt, fallback: true };
-        throw error;
-      }
+      if (attempt >= retry.attempts || !isRetriableAutopilotError(error)) throw error;
       // Full jitter: pick uniformly in [base/2, base]. Without jitter, multiple sessions backing
       // off a shared 429 wake up simultaneously and hammer the endpoint together.
       const base = retry.backoffMs * (2 ** (attempt - 1));
@@ -422,7 +402,15 @@ export async function decideAutopilotNextWithRetry(session, {
   throw lastError || new Error("Autopilot retry exhausted");
 }
 
-export async function decideAutopilotNext(session, { signal } = {}) {
+// Deterministic autopilot pacer. No model (DeepSeek or otherwise) is consulted to choose the next
+// step: the strong active supervisor — which has full tool access and just produced the latest turn
+// — is the one asked to pick and verify the next step. Autopilot only keeps the session alive and
+// hands that choice back to the supervisor, stopping only on hard safety conditions (an error loop
+// of three consecutive failed runs; idle timeout and manual disable are enforced elsewhere).
+// Removing a weak-model decision from the loop is the core error-reduction goal.
+// Invariant: every path returns a valid decision object — this function performs no I/O and never
+// throws, so decideAutopilotNextWithRetry no longer needs a planner-failure fallback.
+export async function decideAutopilotNext(session) {
   const failureCount = consecutiveAutopilotRunFailures(session);
   if (failureCount >= 3) {
     return {
@@ -440,12 +428,13 @@ export async function decideAutopilotNext(session, { signal } = {}) {
       reason: "Retrying interrupted Autopilot follow-up that had no saved supervisor answer",
     };
   }
+  const objective = objectiveReminder(session);
   const lastAssistant = latestAssistantMessage(session);
   if (!lastAssistant) {
     return {
       action: "message",
       kind: "continue",
-      content: "Inspect the project status, choose the safest concrete next step, run targeted verification, and report what changed.",
+      content: `Inspect the project status, choose the safest concrete next step, run targeted verification, and report what changed.${objective}`,
       reason: "Autopilot starts by choosing a safe first step",
     };
   }
@@ -457,48 +446,34 @@ export async function decideAutopilotNext(session, { signal } = {}) {
       reason: `Recovering from supervisor run failure ${Math.max(1, failureCount)}/3`,
     };
   }
-  if (!runtime.deepseekApiKey) {
-    throw Object.assign(new Error("DeepSeek API key is required for Autopilot"), { status: 409 });
+  const content = assistantContent(lastAssistant);
+  // (1) Verification gate: the last turn made a change but shows no evidence the checks were run.
+  // Checked BEFORE the no-progress breaker because an unverified change is the more specific, more
+  // actionable error signal — unverified steps stacking on each other is a top source of compounding
+  // errors, so verify before doing (or repeating) anything new.
+  if (describesCodeChange(content) && !showsVerificationEvidence(content) && !mentionsAlreadyVerified(content)) {
+    return {
+      action: "message",
+      kind: "continue",
+      content: `Before any new change, verify the previous change: run the project's documented checks (tests, lint, type-check, build as applicable) and report the actual result. If a check fails, fix it before moving on; if no check exists for it, say so explicitly.${objective}`,
+      reason: "Autopilot requires the last change to be verified before continuing",
+    };
   }
-
-  const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${runtime.deepseekApiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: AUTOPILOT_MODEL,
-      temperature: 0.1,
-      max_tokens: 1200,
-      messages: [
-        {
-          role: "system",
-          content: "You are a strict JSON autopilot planner for a coding chat UI. Return only JSON.",
-        },
-        { role: "user", content: autopilotPrompt(session, lastAssistant) },
-      ],
-    }),
-    signal,
-  });
-
-  const body = await response.text();
-  if (!response.ok) {
-    const details = body.length > MAX_ERROR_BODY_CHARS
-      ? `${body.slice(0, MAX_ERROR_BODY_CHARS)}...`
-      : body;
-    throw Object.assign(new Error(`DeepSeek autopilot HTTP ${response.status}: ${details}`), { status: response.status });
+  // (5) No-progress breaker: stop repeating a near-identical turn; force a different, diagnosed step.
+  if (looksLikeNoProgress(session)) {
+    return {
+      action: "message",
+      kind: "continue",
+      content: `The last steps repeated with no verified progress. Do not repeat the same action. Diagnose WHY there is no progress: read the actual error or test output, re-check your assumptions against the live files, then take a different concrete step. Run targeted verification and report what changed.${objective}`,
+      reason: "Autopilot detected repeated turns with no verified progress",
+    };
   }
-  // A 2xx with a non-JSON body (proxy error page, truncated response) would otherwise throw a
-  // bare SyntaxError that the retry classifier does not recognise; wrap it as an HTTP-style
-  // failure so the caller can surface it consistently.
-  let parsed;
-  try {
-    parsed = JSON.parse(body);
-  } catch (error) {
-    const snippet = body.length > MAX_ERROR_BODY_CHARS ? `${body.slice(0, MAX_ERROR_BODY_CHARS)}...` : body;
-    throw Object.assign(new Error(`DeepSeek autopilot returned non-JSON body: ${error.message} :: ${snippet}`), { status: 502 });
-  }
-  const content = parsed.choices?.[0]?.message?.content || "";
-  return normalizeAutopilotDecision(parseAutopilotDecision(content), { lastAssistant });
+  // (2)+(3) Keep-alive: hand the next step to the supervisor, anchored to the original objective and
+  // framed as one small, reversible, locally-committed step so a bad step is a single revert.
+  return {
+    action: "message",
+    kind: "continue",
+    content: `${fallbackContinuationContent(lastAssistant)} Make one small, reversible change, run its verification, and commit it locally before the next step.${objective}`,
+    reason: "Autopilot keeps the session active; the supervisor chooses and verifies the next step",
+  };
 }

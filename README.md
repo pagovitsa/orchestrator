@@ -18,7 +18,7 @@ It is designed for hands-on local development: each chat is tied to a project di
 - Shared MCP tools for semantic code search, live docs, local memory, and browser checks.
 - Docker-owned CLI auth volumes for Claude, Codex, and Gemini.
 - Optional Docker Tailscale sidecar with HTTPS Serve for the UI and preview ports.
-- Persistent Autopilot workflow state with retry, idle guard, activity feed, and restart cleanup.
+- Persistent Autopilot workflow state with idle guard, activity feed, safety stop on repeated run failures, and restart cleanup.
 - Usage and budget telemetry with redaction before persistence.
 - Built-in safety scanning for obvious credentials in memory, attachments, sessions, and reports.
 
@@ -301,9 +301,9 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 | `ORCH_BUDGET_WARNING_USD` | Lifetime spend warning threshold. |
 | `ORCH_AUTOPILOT_IDLE_TIMEOUT_MS` | Stops silent automatic follow-up runs after this delay. |
 | `ORCH_AUTOPILOT_IDLE_WARNING_MS` | Sends a warning before the idle stop. |
-| `ORCH_AUTOPILOT_DECISION_TIMEOUT_MS` | Timeout for the DeepSeek Autopilot decision call. |
-| `ORCH_AUTOPILOT_RETRY_ATTEMPTS` | Decision retry attempts for transient failures. |
-| `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` | Base retry backoff for Autopilot decisions. |
+| `ORCH_AUTOPILOT_DECISION_TIMEOUT_MS` | Legacy guard around the Autopilot decision. The decision is now deterministic and instant, so this no longer fires; retained for compatibility. |
+| `ORCH_AUTOPILOT_RETRY_ATTEMPTS` | Legacy decision retry count. The deterministic decision makes no network call, so retries no longer apply; retained for compatibility. |
+| `ORCH_AUTOPILOT_RETRY_BACKOFF_MS` | Legacy base retry backoff for the decision; unused now that the decision is deterministic. |
 | `ORCH_AUTOPILOT_FEED_LIMIT` | Recent Autopilot activity entries shown per project. |
 | `ORCH_AUTOPILOT_SERVER_LOOP_MS` | Server-side scheduler interval so Autopilot continues without a browser tab. |
 | `ORCH_TAILSCALE_*` | Docker sidecar auth, hostname, Serve, and HTTPS settings. |
@@ -314,11 +314,15 @@ The full current reference is `.env.example`. The compose file passes the app-fa
 
 Autopilot state is stored with each project chat. It tracks `created`, `running`, `stopped`, `completed`, `failed`, and `paused` states so automatic follow-up runs survive browser refreshes and recover cleanly after server restarts.
 
+Autopilot is a deterministic pacer: it never calls a model to decide the next step. Each cycle it
+keeps the session active and hands the choice back to the active supervisor (Claude/Codex/Gemini),
+asking it to inspect the project, choose the safest concrete next step itself, verify it, and report.
+Because no model decides for the supervisor, Autopilot does **not** require a DeepSeek API key.
+
 Autopilot has:
 
 - idle warning and auto-stop for silent follow-up runs
-- separate decision timeout
-- retry/backoff for transient DeepSeek or network failures
+- a hard safety stop only on three consecutive failed runs, idle timeout, or manual disable
 - bounded, redacted sidebar activity feed
 - a server-side scheduler, so enabled projects keep advancing even when the browser tab sleeps or disconnects
 

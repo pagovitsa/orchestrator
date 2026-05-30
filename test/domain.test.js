@@ -15,9 +15,7 @@ import {
   decideAutopilotNextWithRetry,
   isAutopilotIdleTimeoutMessage,
   isRetriableAutopilotError,
-  normalizeAutopilotDecision,
   normalizeAutopilotRetryConfig,
-  parseAutopilotDecision,
   summarizeAutopilotFeed,
 } from "../src/domain/autopilot.js";
 import { normalizeHookEvent } from "../src/domain/hooks.js";
@@ -1011,41 +1009,14 @@ test("parseGeminiQuotaPayload converts Gemini remaining fractions to used percen
   assert.match(parsed.label, /Gemini Code Assist in Google One AI Pro/);
 });
 
-test("parseAutopilotDecision accepts JSON answer decisions", () => {
-  const parsed = parseAutopilotDecision('{"action":"message","kind":"answer","content":"Use the safer default.","reason":"assistant asked"}');
-
-  assert.equal(parsed.action, "message");
-  assert.equal(parsed.kind, "answer");
-  assert.equal(parsed.content, "Use the safer default.");
-});
-
-test("parseAutopilotDecision stops on explicit stop decisions", () => {
-  const parsed = parseAutopilotDecision("```json\n{\"action\":\"stop\",\"reason\":\"auth failed\"}\n```");
-
-  assert.equal(parsed.action, "stop");
-  assert.equal(parsed.reason, "auth failed");
-});
-
-test("parseAutopilotDecision stops on empty message decisions", () => {
-  const parsed = parseAutopilotDecision('{"action":"continue","content":"","reason":"no text"}');
-
-  assert.equal(parsed.action, "stop");
-  assert.equal(parsed.reason, "no text");
-});
-
-test("decideAutopilotNext sends latest messages to DeepSeek for context", async () => {
+test("decideAutopilotNext makes no network call and hands the next step to the supervisor", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
-  let requestBody;
+  let fetchCalled = false;
   runtime.deepseekApiKey = "test-deepseek-key";
-  globalThis.fetch = async (_url, options = {}) => {
-    requestBody = JSON.parse(String(options.body || "{}"));
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Continue carefully.","reason":"has context"}' } }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model to decide the next step");
   };
 
   try {
@@ -1060,13 +1031,13 @@ test("decideAutopilotNext sends latest messages to DeepSeek for context", async 
       ],
     });
 
+    assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
-    const prompt = requestBody.messages[1].content;
-    assert.match(prompt, /Latest messages for context/);
-    assert.match(prompt, /USER:\nFocus on the invoice edge case\./);
-    assert.match(prompt, /USER:\nAlso keep the mobile layout stable\./);
-    assert.match(prompt, /ASSISTANT\/CLAUDE:\nDone; tests pass and layout is stable\./);
-    assert.match(prompt, /Last assistant message to judge:\nDone; tests pass and layout is stable\./);
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /Review the latest result and repo state/i);
+    assert.match(decision.content, /identify the next safest concrete phase/i);
+    assert.match(decision.content, /verification/i);
+    assert.match(decision.reason, /supervisor chooses/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
@@ -1076,16 +1047,11 @@ test("decideAutopilotNext sends latest messages to DeepSeek for context", async 
 test("decideAutopilotNext recovers from idle timeout markers", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
-  let requestBody;
+  let fetchCalled = false;
   runtime.deepseekApiKey = "test-deepseek-key";
-  globalThis.fetch = async (_url, options = {}) => {
-    requestBody = JSON.parse(String(options.body || "{}"));
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Run a narrower diagnostic and continue.","reason":"recover timeout"}' } }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model to recover from an idle timeout");
   };
 
   try {
@@ -1104,65 +1070,58 @@ test("decideAutopilotNext recovers from idle timeout markers", async () => {
       ],
     });
 
+    // The idle-timeout marker is a watchdog abort, not a terminal error: autopilot keeps the
+    // session alive and judges the last real assistant turn (the Docker gate) instead.
+    assert.equal(fetchCalled, false);
     assert.equal(isAutopilotIdleTimeoutMessage(timeoutMessage), true);
     assert.equal(decision.action, "message");
-    assert.equal(decision.content, "Run a narrower diagnostic and continue.");
-    const prompt = requestBody.messages[1].content;
-    assert.match(prompt, /Autopilot idle timeout/);
-    assert.match(prompt, /Last assistant message to judge:\nThe Docker gate is still running/);
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.match(decision.content, /Docker is available inside the orch-ui supervisor container/);
+    assert.match(decision.content, /docker version/);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
   }
 });
 
-test("normalizeAutopilotDecision converts non-error stops into next phase continuations", () => {
-  const normalized = normalizeAutopilotDecision(
-    { action: "stop", kind: "stop", reason: "task appears complete" },
-    {
-      lastAssistant: {
-        role: "assistant",
-        content: [
-          "Phase F is done and committed.",
-          "",
-          "Remaining useful next phases:",
-          "- `F2` - settings version-downgrade guard.",
-          "- `F3` - fsync + single-instance lock on the settings store.",
-        ].join("\n"),
-      },
-    },
-  );
+test("decideAutopilotNext takes the next listed phase when the assistant says work is done", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model to pick the next listed phase");
+  };
 
-  assert.equal(normalized.action, "message");
-  assert.equal(normalized.kind, "continue");
-  assert.match(normalized.content, /F2 - settings version-downgrade guard/);
-  assert.match(normalized.reason, /Continuing instead of stopping/);
-});
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: [
+            "Phase F is done and committed.",
+            "",
+            "Remaining useful next phases:",
+            "- `F2` - settings version-downgrade guard.",
+            "- `F3` - fsync + single-instance lock on the settings store.",
+          ].join("\n"),
+        },
+      ],
+    });
 
-test("normalizeAutopilotDecision keeps stop when the assistant turn is an app error", () => {
-  const normalized = normalizeAutopilotDecision(
-    { action: "stop", kind: "stop", reason: "run failed" },
-    { lastAssistant: { role: "assistant", content: "Error: model crashed", error: true } },
-  );
-
-  assert.equal(normalized.action, "stop");
-  assert.equal(normalized.reason, "run failed");
-});
-
-test("normalizeAutopilotDecision turns Docker-gate blockers into Docker verification", () => {
-  const normalized = normalizeAutopilotDecision(
-    { action: "stop", kind: "stop", reason: "Docker unavailable" },
-    {
-      lastAssistant: {
-        role: "assistant",
-        content: "All safe local work is done. The full Docker/testcontainers suite remains as the merge gate when Docker is available.",
-      },
-    },
-  );
-
-  assert.equal(normalized.action, "message");
-  assert.match(normalized.content, /Docker is available inside the orch-ui supervisor container/);
-  assert.match(normalized.content, /docker version/);
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.match(decision.content, /Take the next safe remaining item/i);
+    assert.match(decision.content, /F2 - settings version-downgrade guard/);
+    assert.match(decision.content, /targeted verification/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("decideAutopilotNext retries supervisor run failures up to three consecutive failures", async () => {
@@ -1226,16 +1185,15 @@ test("decideAutopilotNext retries supervisor run failures up to three consecutiv
   }
 });
 
-test("decideAutopilotNext converts DeepSeek stop decisions into continuations", async () => {
+test("decideAutopilotNext keeps the session alive when the supervisor says work is done", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
   runtime.deepseekApiKey = "test-deepseek-key";
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{ message: { content: '{"action":"stop","reason":"nothing left to do"}' } }],
-  }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model to keep the session alive");
+  };
 
   try {
     const decision = await decideAutopilotNext({
@@ -1246,10 +1204,13 @@ test("decideAutopilotNext converts DeepSeek stop decisions into continuations", 
       ],
     });
 
+    // "Done" is never a terminal state here: the loop stays alive and asks the supervisor to
+    // identify and verify the next safe step itself.
+    assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.match(decision.content, /identify the next safest concrete phase/i);
-    assert.match(decision.reason, /nothing left to do/);
+    assert.match(decision.reason, /supervisor chooses/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
@@ -1271,6 +1232,7 @@ test("decideAutopilotNext on a fresh session starts with a safe first step witho
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.equal(/error|stopped run/i.test(decision.reason), false);
+    assert.match(decision.reason, /Autopilot starts by choosing a safe first step/);
     assert.match(decision.content, /Inspect the project status/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
@@ -1285,12 +1247,7 @@ test("decideAutopilotNext keeps going on auth blockers with a local-only continu
   let fetchCalled = false;
   globalThis.fetch = async () => {
     fetchCalled = true;
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: '{"action":"stop","kind":"stop","reason":"manual credentials required"}' } }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    throw new Error("autopilot must not call any model to route around an auth blocker");
   };
 
   try {
@@ -1314,7 +1271,7 @@ test("decideAutopilotNext keeps going on auth blockers with a local-only continu
       ],
     });
 
-    assert.equal(fetchCalled, true);
+    assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
     assert.match(decision.content, /local-only next step/i);
@@ -1325,19 +1282,14 @@ test("decideAutopilotNext keeps going on auth blockers with a local-only continu
   }
 });
 
-test("decideAutopilotNext lets non-auth blockers go to DeepSeek", async () => {
+test("decideAutopilotNext continues a non-auth blocker by handing the next step to the supervisor", async () => {
   const originalKey = runtime.deepseekApiKey;
   const originalFetch = globalThis.fetch;
   runtime.deepseekApiKey = "test-deepseek-key";
   let fetchCalled = false;
   globalThis.fetch = async () => {
     fetchCalled = true;
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: '{"action":"message","kind":"continue","content":"Install the missing package and rerun tests.","reason":"recoverable blocker"}' } }],
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    throw new Error("autopilot must not call any model for a recoverable blocker");
   };
 
   try {
@@ -1353,39 +1305,242 @@ test("decideAutopilotNext lets non-auth blockers go to DeepSeek", async () => {
       ],
     });
 
-    assert.equal(fetchCalled, true);
+    assert.equal(fetchCalled, false);
     assert.equal(decision.action, "message");
     assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /identify the next safest concrete phase/i);
+    assert.match(decision.content, /targeted verification/i);
   } finally {
     runtime.deepseekApiKey = originalKey;
     globalThis.fetch = originalFetch;
   }
 });
 
-test("decideAutopilotNext rejects invalid DeepSeek decisions without fallback continue", async () => {
-  const originalKey = runtime.deepseekApiKey;
+test("decideAutopilotNext routes risky-approval blockers to a safe reversible continuation", async () => {
   const originalFetch = globalThis.fetch;
-  runtime.deepseekApiKey = "test-deepseek-key";
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    choices: [{ message: { content: "not json" } }],
-  }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model for a risky-approval blocker");
+  };
 
   try {
-    await assert.rejects(
-      decideAutopilotNext({
-        supervisor: "codex",
-        cwd: "project-a",
-        messages: [
-          { role: "assistant", supervisor: "codex", content: "All checks pass. Nothing else is required." },
-        ],
-      }),
-      /not valid JSON/,
-    );
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        {
+          role: "assistant",
+          supervisor: "codex",
+          content: "Awaiting approval to delete the production database and force-push to main. Confirm the destructive action before proceeding.",
+        },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /safest reversible path/i);
+    assert.match(decision.content, /avoids destructive changes/i);
   } finally {
-    runtime.deepseekApiKey = originalKey;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext forces verification when the last turn changed code without checks", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model for the verification gate");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "user", content: "Make the retry backoff jittered." },
+        { role: "assistant", supervisor: "codex", content: "I edited src/retry.js to add the jittered backoff logic." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /verified before continuing/i);
+    assert.match(decision.content, /Before any new change, verify the previous change/i);
+    assert.match(decision.content, /tests, lint, type-check, build/i);
+    assert.match(decision.content, /Keep the original objective in focus: "Make the retry backoff jittered\."/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext skips the verification gate when the last turn shows checks were run", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "I edited src/retry.js to add jittered backoff and ran npm test - 42/42 pass." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.match(decision.content, /Make one small, reversible change/i);
+    assert.match(decision.content, /commit it locally/i);
+    assert.equal(/Before any new change, verify the previous change/i.test(decision.content), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext breaks no-progress loops when recent answers repeat", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model for the no-progress breaker");
+  };
+
+  const repeated = "I am investigating the failing database connection test and checking the pool configuration in the data layer now.";
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: repeated },
+        { role: "assistant", supervisor: "codex", content: repeated },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.reason, /repeated turns with no verified progress/i);
+    assert.match(decision.content, /no verified progress/i);
+    assert.match(decision.content, /Diagnose WHY there is no progress/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext anchors continuations to the original objective", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "user", content: "Add input validation to the signup form." },
+        { role: "assistant", supervisor: "codex", content: "I reviewed the signup form structure and the current handlers." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.equal(decision.kind, "continue");
+    assert.match(decision.content, /Keep the original objective in focus: "Add input validation to the signup form\."/);
+    assert.match(decision.content, /Make one small, reversible change/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext verification gate fires on intent claims, not just keywords", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        // Mentions "tests" and "pass" but only as intent — no run, no result. The gate must still fire.
+        { role: "assistant", supervisor: "codex", content: "I edited validation.js to add the email check. The tests should pass now." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.match(decision.reason, /verified before continuing/i);
+    assert.match(decision.content, /Before any new change, verify the previous change/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext verification gate skips an explicit already-verified recap", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "I edited validation.js to add the email check and already verified it; committing now." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.match(decision.content, /Make one small, reversible change/i);
+    assert.equal(/Before any new change, verify the previous change/i.test(decision.content), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("decideAutopilotNext no-progress breaker does not fire on distinct iterative turns", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("autopilot must not call any model");
+  };
+
+  try {
+    const decision = await decideAutopilotNext({
+      supervisor: "codex",
+      cwd: "project-a",
+      messages: [
+        { role: "assistant", supervisor: "codex", content: "I reviewed the signup form and mapped out the validation rules we still need." },
+        { role: "assistant", supervisor: "codex", content: "I outlined the email and password constraints and where they slot into the request handler." },
+      ],
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(decision.action, "message");
+    assert.match(decision.reason, /supervisor chooses/i);
+    assert.equal(/no verified progress/i.test(decision.content), false);
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });
@@ -1432,34 +1587,6 @@ test("decideAutopilotNextWithRetry retries transient errors and reloads session"
   assert.equal(result.attempts, 2);
   assert.equal(result.session, reloaded);
   assert.equal(result.decision.content, "next");
-});
-
-test("decideAutopilotNextWithRetry falls back locally on planner failures after safe assistant turns", async () => {
-  let attempts = 0;
-  const result = await decideAutopilotNextWithRetry({
-    id: "s1",
-    supervisor: "codex",
-    messages: [
-      {
-        role: "assistant",
-        supervisor: "codex",
-        content: "Phase F3 is complete.\n\nRemaining useful next phases:\n- B: tx-history table",
-      },
-    ],
-  }, {
-    config: { attempts: 3, backoffMs: 0 },
-    decide: async () => {
-      attempts += 1;
-      throw new Error("DeepSeek returned an empty autopilot decision");
-    },
-  });
-
-  assert.equal(attempts, 1);
-  assert.equal(result.fallback, true);
-  assert.equal(result.decision.action, "message");
-  assert.equal(result.decision.kind, "continue");
-  assert.match(result.decision.reason, /planner failed/i);
-  assert.match(result.decision.content, /B: tx-history table/);
 });
 
 test("decideAutopilotNextWithRetry retry backoff applies full jitter in [base/2, base]", async () => {

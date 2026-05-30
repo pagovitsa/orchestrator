@@ -1129,7 +1129,10 @@ async function runDeepSeekPeerTool(session, toolName, prompt, parentOptions = {}
   if (!["claude", "codex", "gemini"].includes(peer)) throw new Error(`Unknown DeepSeek peer tool: ${toolName}`);
   const taskId = nextTimelineId("peer");
   const startedAt = Date.now();
-  const peerSession = { ...session, supervisor: peer, messages: [], cwd: session.cwd || "." };
+  // Give the delegated peer recent conversation context instead of starting it cold. A peer that has
+  // to rediscover the project state from scratch is the one most likely to invent file paths and
+  // identifiers; sharing the recent turns grounds it in what actually happened.
+  const peerSession = { ...session, supervisor: peer, messages: (session.messages || []).slice(-8), cwd: session.cwd || "." };
   const systemPrompt = await loadPrompt(peerSession.supervisor);
   const sharedOnlyMcp = { includePeerServers: false };
   const peerPrompt = buildCliPrompt(peerSession, prompt, systemPrompt, {

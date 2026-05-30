@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-test("autopilot decision timeout aborts the API decision and persists stopped state", async () => {
+test("autopilot decision endpoint decides deterministically without a model call, and recovers from run failures", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";
     import { createServer } from "node:http";
@@ -25,140 +25,22 @@ test("autopilot decision timeout aborts the API decision and persists stopped st
     process.env.ORCH_DATA_DIR = dataDir;
     process.env.ORCH_DEFAULT_SUPERVISOR = "codex";
     process.env.ORCH_GIT_INIT_PROJECTS = "0";
-    process.env.ORCH_AUTOPILOT_DECISION_TIMEOUT_MS = "25";
-    process.env.ORCH_AUTOPILOT_IDLE_WARNING_MS = "10";
-    process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
-    process.env.ORCH_AUTOPILOT_SERVER_LOOP_MS = "0";
-    process.env.DEEPSEEK_API_KEY = "test-key";
-
-    const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
-    const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
-    const { loadSession, saveSession } = await import(new URL("src/domain/sessions.js", rootUrl));
-
-    function startApiServer() {
-      server = createServer(async (req, res) => {
-        try {
-          const url = new URL(req.url || "/", "http://127.0.0.1");
-          await handleApi(req, res, url);
-        } catch (error) {
-          sendJson(res, error.status || 500, { error: error.message || String(error) });
-        }
-      });
-      return new Promise((resolve, reject) => {
-        server.on("error", reject);
-        server.listen(0, "127.0.0.1", () => {
-          const address = server.address();
-          resolve("http://127.0.0.1:" + address.port);
-        });
-      });
-    }
-
-    function postJson(url, body = {}) {
-      return new Promise((resolve, reject) => {
-        const target = new URL(url);
-        const payload = JSON.stringify(body);
-        const req = request({
-          method: "POST",
-          hostname: target.hostname,
-          port: target.port,
-          path: target.pathname + target.search,
-          headers: {
-            "content-type": "application/json",
-            "content-length": Buffer.byteLength(payload),
-          },
-        }, (res) => {
-          const chunks = [];
-          res.on("data", (chunk) => chunks.push(chunk));
-          res.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
-            resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null });
-          });
-        });
-        req.on("error", reject);
-        req.end(payload);
-      });
-    }
-
-    let fetchAbortSeen = false;
-    globalThis.fetch = async (_url, options = {}) => new Promise((_resolve, reject) => {
-      const signal = options.signal;
-      if (signal?.aborted) {
-        fetchAbortSeen = true;
-        reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-        return;
-      }
-      signal?.addEventListener("abort", () => {
-        fetchAbortSeen = true;
-        reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-      }, { once: true });
-    });
-
-    try {
-      const baseUrl = await startApiServer();
-      const session = {
-        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        supervisor: "codex",
-        cwd: "project-a",
-        messages: [{ role: "assistant", supervisor: "codex", content: "Phase complete.", at: "2026-01-01T00:00:00.000Z" }],
-        autopilotEnabled: true,
-        autopilotState: { state: "created" },
-      };
-      await mkdir(path.join(workspaceRoot, "project-a"), { recursive: true });
-      await saveSession(session);
-
-      const response = await postJson(baseUrl + "/api/sessions/" + session.id + "/autopilot");
-      const loaded = await loadSession(session.id);
-
-      assert.equal(fetchAbortSeen, true);
-      assert.equal(response.status, 500);
-      assert.match(response.body.error, /Autopilot decision timeout/);
-      assert.equal(loaded.autopilotEnabled, false);
-      assert.equal(loaded.autopilotState.state, "stopped");
-      assert.equal(loaded.autopilotState.reason, "Autopilot decision timeout");
-      console.log(JSON.stringify({ ok: true }));
-    } finally {
-      globalThis.fetch = originalFetch;
-      if (server) await new Promise((done) => server.close(done));
-      await rm(workspaceRoot, { recursive: true, force: true });
-      await rm(dataDir, { recursive: true, force: true });
-    }
-  `;
-
-  const { stdout } = await execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
-    cwd: process.cwd(),
-    timeout: 5000,
-  });
-  assert.deepEqual(JSON.parse(stdout), { ok: true });
-});
-
-test("autopilot API blocks concurrent decisions, supports stop, and restarts", async () => {
-  const script = String.raw`
-    import assert from "node:assert/strict";
-    import { createServer } from "node:http";
-    import { request } from "node:http";
-    import { mkdir, mkdtemp, rm } from "node:fs/promises";
-    import os from "node:os";
-    import path from "node:path";
-    import { pathToFileURL } from "node:url";
-
-    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-workspace-"));
-    const dataDir = await mkdtemp(path.join(os.tmpdir(), "orch-autopilot-data-"));
-    const rootUrl = pathToFileURL(process.cwd() + path.sep).href;
-    let server;
-    const originalFetch = globalThis.fetch;
-
-    process.env.ORCH_WORKSPACE_ROOT = workspaceRoot;
-    process.env.ORCH_DATA_DIR = dataDir;
-    process.env.ORCH_DEFAULT_SUPERVISOR = "deepseek";
-    process.env.ORCH_GIT_INIT_PROJECTS = "0";
     process.env.ORCH_AUTOPILOT_DECISION_TIMEOUT_MS = "0";
-    process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
     process.env.ORCH_AUTOPILOT_SERVER_LOOP_MS = "0";
+    process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
     process.env.DEEPSEEK_API_KEY = "test-key";
 
     const { sendJson } = await import(new URL("src/http/response.js", rootUrl));
     const { handleApi } = await import(new URL("src/http/routes.js", rootUrl));
     const { loadSession, saveSession } = await import(new URL("src/domain/sessions.js", rootUrl));
+
+    // The deterministic autopilot pacer must never consult a model to decide the next step. Any
+    // fetch during a decision is a regression, so fail loudly instead of silently mocking one.
+    let modelFetchCalled = false;
+    globalThis.fetch = async () => {
+      modelFetchCalled = true;
+      throw new Error("autopilot decision must not call any model");
+    };
 
     function startApiServer() {
       server = createServer(async (req, res) => {
@@ -213,117 +95,92 @@ test("autopilot API blocks concurrent decisions, supports stop, and restarts", a
 
       const session = {
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        supervisor: "deepseek",
+        supervisor: "codex",
         cwd: "project-a",
-        messages: [{
-          role: "assistant",
-          supervisor: "deepseek",
-          content: "Please confirm before deleting any backups?",
-          at: "2026-01-01T00:00:00.000Z",
-        }],
+        messages: [{ role: "assistant", supervisor: "codex", content: "Phase complete.", at: "2026-01-01T00:00:00.000Z" }],
         autopilotEnabled: true,
         autopilotState: { state: "created" },
       };
       await saveSession(session);
-
-      let fetchAbortSeen = false;
-      let resolveFetchCalled;
-      const fetchCalled = new Promise((resolve) => {
-        resolveFetchCalled = resolve;
-      });
-      globalThis.fetch = async (_url, options = {}) => new Promise((_resolve, reject) => {
-        resolveFetchCalled();
-        const signal = options.signal;
-        if (signal?.aborted) {
-          fetchAbortSeen = true;
-          reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-          return;
-        }
-        signal?.addEventListener("abort", () => {
-          fetchAbortSeen = true;
-          reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
-        }, { once: true });
-      });
-
       const autopilotUrl = baseUrl + "/api/sessions/" + session.id + "/autopilot";
-      const firstDecision = postJson(autopilotUrl);
-      await fetchCalled;
 
-      const concurrent = await postJson(autopilotUrl);
-      assert.equal(concurrent.status, 409);
-      assert.match(concurrent.body.error, /already running/);
+      // Normal turn: keep the session alive and hand the next step to the supervisor, no model call.
+      const decided = await postJson(autopilotUrl);
+      const afterDecide = await loadSession(session.id);
+      assert.equal(modelFetchCalled, false);
+      assert.equal(decided.status, 200);
+      assert.equal(decided.body.decision.action, "message");
+      assert.equal(decided.body.decision.kind, "continue");
+      assert.equal(afterDecide.autopilotEnabled, true);
+      assert.equal(afterDecide.autopilotState.state, "completed");
+      assert.equal(afterDecide.autopilotHistory.length, 1);
+      assert.equal(afterDecide.autopilotFeed.length, 1);
 
+      // Pause and restart still flow through the workflow state machine.
       const paused = await patchJson(baseUrl + "/api/sessions/" + session.id, { autopilotEnabled: false });
       assert.equal(paused.status, 200);
       assert.equal(paused.body.session.autopilotEnabled, false);
       assert.equal(paused.body.session.autopilotState.state, "paused");
-
-      const aborted = await firstDecision;
-      const afterAbort = await loadSession(session.id);
-      assert.equal(fetchAbortSeen, true);
-      assert.equal(aborted.status, 500);
-      assert.match(aborted.body.error, /Autopilot disabled by user/);
-      assert.equal(afterAbort.autopilotEnabled, false);
-      assert.equal(afterAbort.autopilotState.state, "paused");
-      assert.equal(afterAbort.autopilotState.reason, "Autopilot paused");
 
       const restarted = await patchJson(baseUrl + "/api/sessions/" + session.id, { autopilotEnabled: true });
       assert.equal(restarted.status, 200);
       assert.equal(restarted.body.session.autopilotEnabled, true);
       assert.equal(restarted.body.session.autopilotState.state, "created");
 
-      globalThis.fetch = async () => new Response(JSON.stringify({
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              action: "stop",
-              kind: "stop",
-              reason: "Human approval required",
-            }),
-          },
-        }],
-      }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-
-      const continued = await postJson(autopilotUrl);
-      const afterContinue = await loadSession(session.id);
-      assert.equal(continued.status, 200);
-      assert.equal(continued.body.decision.action, "message");
-      assert.equal(continued.body.session.autopilotEnabled, true);
-      assert.equal(continued.body.session.autopilotState.state, "completed");
-      assert.equal(afterContinue.autopilotEnabled, true);
-      assert.equal(afterContinue.autopilotState.state, "completed");
-      assert.equal(afterContinue.autopilotHistory.length, 1);
-      assert.equal(afterContinue.autopilotFeed.length, 1);
-
-      let errorFetchCalled = false;
-      globalThis.fetch = async () => {
-        errorFetchCalled = true;
-        throw new Error("fetch should not be called for run-failure recovery");
-      };
-      afterContinue.messages.push({
+      // A failed run is nudged with a recovery step (1/3), still without any model call.
+      const restartedSession = await loadSession(session.id);
+      restartedSession.messages.push({
         role: "assistant",
-        supervisor: "deepseek",
+        supervisor: "codex",
         content: "Error: model crashed",
         error: true,
         at: "2026-01-01T00:01:00.000Z",
       });
-      await saveSession(afterContinue);
+      await saveSession(restartedSession);
 
+      const recovered = await postJson(autopilotUrl);
+      const afterRecover = await loadSession(session.id);
+      assert.equal(modelFetchCalled, false);
+      assert.equal(recovered.status, 200);
+      assert.equal(recovered.body.decision.action, "message");
+      assert.match(recovered.body.decision.reason, /1\/3/);
+      assert.equal(afterRecover.autopilotEnabled, true);
+      assert.equal(afterRecover.autopilotState.state, "completed");
+
+      // A second consecutive failure still recovers (2/3).
+      const failed2Session = await loadSession(session.id);
+      failed2Session.messages.push({
+        role: "assistant",
+        supervisor: "codex",
+        content: "Error: second failure",
+        error: true,
+        at: "2026-01-01T00:02:00.000Z",
+      });
+      await saveSession(failed2Session);
+      const recovered2 = await postJson(autopilotUrl);
+      assert.equal(modelFetchCalled, false);
+      assert.equal(recovered2.status, 200);
+      assert.equal(recovered2.body.decision.action, "message");
+      assert.match(recovered2.body.decision.reason, /2\/3/);
+
+      // The third consecutive failure hits the hard safety stop through the endpoint.
+      const failed3Session = await loadSession(session.id);
+      failed3Session.messages.push({
+        role: "assistant",
+        supervisor: "codex",
+        content: "Error: third failure",
+        error: true,
+        at: "2026-01-01T00:03:00.000Z",
+      });
+      await saveSession(failed3Session);
       const stopped = await postJson(autopilotUrl);
-      const afterError = await loadSession(session.id);
+      const afterStop = await loadSession(session.id);
+      assert.equal(modelFetchCalled, false);
       assert.equal(stopped.status, 200);
-      assert.equal(errorFetchCalled, false);
-      assert.equal(stopped.body.decision.action, "message");
-      assert.match(stopped.body.decision.reason, /1\/3/);
-      assert.equal(stopped.body.session.autopilotEnabled, true);
-      assert.equal(stopped.body.session.autopilotState.state, "completed");
-      assert.equal(afterError.autopilotEnabled, true);
-      assert.equal(afterError.autopilotState.state, "completed");
-      assert.equal(afterError.autopilotHistory.length, 2);
-      assert.equal(afterError.autopilotFeed.length, 2);
+      assert.equal(stopped.body.decision.action, "stop");
+      assert.match(stopped.body.decision.reason, /Three consecutive/);
+      assert.equal(afterStop.autopilotEnabled, false);
+      assert.equal(afterStop.autopilotState.state, "stopped");
       console.log(JSON.stringify({ ok: true }));
     } finally {
       globalThis.fetch = originalFetch;
@@ -340,7 +197,7 @@ test("autopilot API blocks concurrent decisions, supports stop, and restarts", a
   assert.deepEqual(JSON.parse(stdout), { ok: true });
 });
 
-test("server-side autopilot loop advances projects without a browser scheduler", async () => {
+test("server-side autopilot loop advances projects without a browser scheduler or planner model", async () => {
   const script = String.raw`
     import assert from "node:assert/strict";
     import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -362,22 +219,10 @@ test("server-side autopilot loop advances projects without a browser scheduler",
     process.env.ORCH_AUTOPILOT_RETRY_ATTEMPTS = "1";
     process.env.DEEPSEEK_API_KEY = "test-key";
 
-    let plannerCalls = 0;
+    // The deterministic decision makes no model call, so every fetch here is the DeepSeek supervisor
+    // running the follow-up step the autopilot handed back to it.
     let supervisorCalls = 0;
-    globalThis.fetch = async (_url, options = {}) => {
-      const body = JSON.parse(String(options.body || "{}"));
-      const system = String(body.messages?.[0]?.content || "");
-      if (/strict JSON autopilot planner/i.test(system)) {
-        plannerCalls += 1;
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({
-            action: "message",
-            kind: "continue",
-            content: "Inspect status and report from the server loop.",
-            reason: "server loop test",
-          }) } }],
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
+    globalThis.fetch = async () => {
       supervisorCalls += 1;
       return new Response(JSON.stringify({
         choices: [{ message: { content: "Server loop ran without a browser." } }],
@@ -408,11 +253,14 @@ test("server-side autopilot loop advances projects without a browser scheduler",
         if ((loaded.messages || []).some((message) => /Server loop ran without a browser/.test(String(message.content || "")))) break;
       }
 
-      assert.equal(plannerCalls >= 1, true);
       assert.equal(supervisorCalls >= 1, true);
       assert.equal(loaded.autopilotEnabled, true);
+      // The supervisor's follow-up answer landed without a browser tab driving it.
       assert.equal((loaded.messages || []).some((message) => /Server loop ran without a browser/.test(String(message.content || ""))), true);
-      assert.equal((loaded.messages || []).some((message) => /Inspect status and report from the server loop/.test(String(message.content || ""))), true);
+      // The autopilot-authored user turn handed the next-step choice back to the supervisor.
+      assert.equal((loaded.messages || []).some((message) => (
+        message.role === "user" && /identify the next safest concrete phase/i.test(String(message.content || ""))
+      )), true);
       console.log(JSON.stringify({ ok: true }));
     } finally {
       stopAutopilotServerLoop();

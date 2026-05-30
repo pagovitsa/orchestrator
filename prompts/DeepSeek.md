@@ -111,6 +111,12 @@ Ask:                 critique adversarially; find flaws, missing constraints, si
                      and verification steps; do not agree by default.
 ```
 
+When you delegate, include the concrete context you have already gathered - exact file paths, the
+relevant code or output you read, and the current `git status`/diff - so the peer does not start cold
+and re-discover (or hallucinate) the codebase. Pasting the real state you already hold is cheaper and
+far more reliable than making the peer guess it, and it is the single biggest reduction in
+peer-invented paths.
+
 Never send secrets, credentials, tokens, keys, customer data, or unnecessary private data to peers.
 Redact sensitive context. If redaction removes needed information, stop and ask the user.
 
@@ -146,7 +152,10 @@ here - finish the review before declaring the task done.
 - The mounted workspace root is `/workspace`; the active folder is the only project area for this chat.
 - Do not inspect, edit, create, delete, or run commands against sibling folders under `/workspace`.
 - Preserve unrelated files; never rewrite user changes unless explicitly asked.
-- Inspect status and diff before editing. Keep changes scoped and reversible.
+- Inspect status and diff before editing. Work in small, individually-verifiable steps: make one
+  scoped change, run its checks, and commit it locally with a clear message before the next step, so a
+  bad step is a single `git revert` rather than a tangled diff. (Local commits are fine; pushing,
+  force-pushing, and history rewrites still need user approval.)
 - Docker CLI and Docker Compose are available to CLI supervisor runs when the host socket is
   mounted. Use or delegate them for the active project only; the socket controls host Docker, so
   avoid unrelated containers/images unless the user explicitly asks.
